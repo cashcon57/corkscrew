@@ -1048,6 +1048,46 @@ mod tests {
     use std::fs;
 
     /// Helper: create a minimal fake bottle on disk and return its path.
+    /// Asserts that `actual` names the same filesystem entry as `expected`.
+    /// Case-insensitive filesystems (the macOS default) reach one directory
+    /// through several spellings, so existing prefixes are compared by
+    /// identity and the not-yet-existing tail must match exactly.
+    fn assert_same_path(actual: &Path, expected: &Path) {
+        fn split(path: &Path) -> (PathBuf, Vec<std::ffi::OsString>) {
+            let mut base = path.to_path_buf();
+            let mut rest = Vec::new();
+            while !base.exists() {
+                match base.file_name() {
+                    Some(name) => rest.push(name.to_owned()),
+                    None => break,
+                }
+                base.pop();
+            }
+            rest.reverse();
+            (base, rest)
+        }
+        #[cfg(unix)]
+        fn same_entry(a: &Path, b: &Path) -> bool {
+            use std::os::unix::fs::MetadataExt;
+            match (fs::metadata(a), fs::metadata(b)) {
+                (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+                _ => a == b,
+            }
+        }
+        #[cfg(not(unix))]
+        fn same_entry(a: &Path, b: &Path) -> bool {
+            a.canonicalize().ok() == b.canonicalize().ok()
+        }
+        let (actual_base, actual_rest) = split(actual);
+        let (expected_base, expected_rest) = split(expected);
+        assert!(
+            actual_rest == expected_rest && same_entry(&actual_base, &expected_base),
+            "{} is not the same path as {}",
+            actual.display(),
+            expected.display()
+        );
+    }
+
     fn create_fake_bottle(parent: &Path, name: &str) -> PathBuf {
         let bottle = parent.join(name);
         fs::create_dir_all(bottle.join("drive_c")).expect("create drive_c");
@@ -1394,9 +1434,9 @@ mod tests {
             fs::create_dir_all(user.join(local)).unwrap();
             fs::create_dir_all(user.join(documents)).unwrap();
 
-            assert_eq!(bottle.users_dir(), users);
-            assert_eq!(bottle.appdata_local(), user.join(local));
-            assert_eq!(bottle.documents_dir(), user.join(documents));
+            assert_same_path(&bottle.users_dir(), &users);
+            assert_same_path(&bottle.appdata_local(), &user.join(local));
+            assert_same_path(&bottle.documents_dir(), &user.join(documents));
         }
     }
 
@@ -1417,8 +1457,8 @@ mod tests {
         ] {
             fs::create_dir_all(user.join(relative)).unwrap();
         }
-        assert_eq!(bottle.appdata_local(), user.join("aPpDaTa/lOcAl"));
-        assert_eq!(bottle.documents_dir(), user.join("dOcUmEnTs"));
+        assert_same_path(&bottle.appdata_local(), &user.join("aPpDaTa/lOcAl"));
+        assert_same_path(&bottle.documents_dir(), &user.join("dOcUmEnTs"));
     }
 
     // Linux permits distinct entries whose names differ only in case.
@@ -1469,15 +1509,9 @@ mod tests {
                 source: "Test".into(),
             };
             let default_users = bottle.drive_c().join("users");
-            assert_eq!(bottle.users_dir(), default_users);
-            assert_eq!(
-                bottle.appdata_local(),
-                default_users.join("crossover/AppData/Local")
-            );
-            assert_eq!(
-                bottle.documents_dir(),
-                default_users.join("crossover/Documents")
-            );
+            assert_same_path(&bottle.users_dir(), &default_users);
+            assert_same_path(&bottle.appdata_local(), &default_users.join("crossover/AppData/Local"));
+            assert_same_path(&bottle.documents_dir(), &default_users.join("crossover/Documents"));
 
             let users = bottle.drive_c().join(users_name);
             fs::create_dir_all(&users).unwrap();
@@ -1487,9 +1521,9 @@ mod tests {
                     fs::create_dir_all(users.join("Player/Local Settings")).unwrap();
                     fs::write(users.join("not-a-user"), "").unwrap();
                 }
-                assert_eq!(bottle.users_dir(), users);
-                assert_eq!(bottle.appdata_local(), users.join("crossover/AppData/Local"));
-                assert_eq!(bottle.documents_dir(), users.join("crossover/Documents"));
+                assert_same_path(&bottle.users_dir(), &users);
+                assert_same_path(&bottle.appdata_local(), &users.join("crossover/AppData/Local"));
+                assert_same_path(&bottle.documents_dir(), &users.join("crossover/Documents"));
             }
         }
     }
