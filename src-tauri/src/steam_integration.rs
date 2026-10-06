@@ -40,12 +40,25 @@ pub fn is_flatpak() -> bool {
 /// The Snap package keeps its real data under `snap/steam/common/.local/share/Steam`
 /// (the same layout `proton.rs` uses for its library scan); `snap/steam/current`
 /// is a per-revision symlinked view that is not always populated.
+///
+/// Flatpak Steam roots live under the app dir `.var/app/com.valvesoftware.Steam`,
+/// checked in this order (the first two match the Flatpak paths `proton.rs`
+/// scans):
+/// - `data/Steam` — the sandbox's `$XDG_DATA_HOME/Steam`, where current
+///   Flatpak Steam keeps its real data;
+/// - `.local/share/Steam` — the sandboxed-home `~/.local/share/Steam` layout
+///   used by some (older) installs instead of `data/Steam`;
+/// - `.steam/steam` — the legacy symlink inside the app dir, which may be
+///   absent or dangling, so it is only a final detection fallback here (not
+///   used by `proton.rs`).
 const STEAM_ROOT_SUFFIXES: &[&str] = &[
     ".steam/steam",
     ".local/share/Steam",
-    ".var/app/com.valvesoftware.Steam/.steam/steam", // Flatpak
-    "snap/steam/current/.steam/steam",               // Snap (revision view)
-    "snap/steam/common/.local/share/Steam",          // Snap (common data)
+    ".var/app/com.valvesoftware.Steam/data/Steam", // Flatpak (XDG data)
+    ".var/app/com.valvesoftware.Steam/.local/share/Steam", // Flatpak (sandboxed home data)
+    ".var/app/com.valvesoftware.Steam/.steam/steam", // Flatpak (legacy symlink)
+    "snap/steam/current/.steam/steam",             // Snap (revision view)
+    "snap/steam/common/.local/share/Steam",        // Snap (common data)
 ];
 
 /// Build the ordered list of candidate Steam roots for `home`, plus the raw
@@ -1300,5 +1313,40 @@ mod tests {
         let candidates = steam_root_candidates(home, raw);
         assert_eq!(candidates.len(), STEAM_ROOT_SUFFIXES.len() * 2);
         assert!(candidates.contains(&raw.join("snap/steam/common/.local/share/Steam")));
+    }
+
+    #[test]
+    fn test_steam_root_candidates_order_includes_flatpak_data() {
+        let home = Path::new("/home/deck");
+        let candidates = steam_root_candidates(home, home);
+        let pos = |suffix: &str| {
+            candidates
+                .iter()
+                .position(|c| c == &home.join(suffix))
+                .unwrap_or_else(|| panic!("missing candidate {suffix}"))
+        };
+        let native = pos(".steam/steam");
+        let native_share = pos(".local/share/Steam");
+        let flatpak_data = pos(".var/app/com.valvesoftware.Steam/data/Steam");
+        let flatpak_share = pos(".var/app/com.valvesoftware.Steam/.local/share/Steam");
+        let flatpak_legacy = pos(".var/app/com.valvesoftware.Steam/.steam/steam");
+        let snap_current = pos("snap/steam/current/.steam/steam");
+        let snap_common = pos("snap/steam/common/.local/share/Steam");
+        // Native first, then Flatpak (XDG data dir, then sandboxed-home data dir,
+        // then legacy symlink), then Snap.
+        assert_eq!(native, 0);
+        assert!(native < native_share);
+        assert!(native_share < flatpak_data);
+        assert!(flatpak_data < flatpak_share);
+        assert!(flatpak_share < flatpak_legacy);
+        assert!(flatpak_legacy < snap_current);
+        assert!(snap_current < snap_common);
+
+        let raw = Path::new("/var/home/deck");
+        let candidates = steam_root_candidates(home, raw);
+        assert!(candidates.contains(&raw.join(".var/app/com.valvesoftware.Steam/data/Steam")));
+        assert!(
+            candidates.contains(&raw.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"))
+        );
     }
 }

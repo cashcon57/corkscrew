@@ -2,6 +2,12 @@
 
 All notable changes to Corkscrew are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.14.15] - 2026-10-06
+
+### Fixed
+
+- **Flatpak Steam not detected in its modern data location**: Steam root detection only checked the legacy Flatpak path `~/.var/app/com.valvesoftware.Steam/.steam/steam`, missing installs whose data lives under `~/.var/app/com.valvesoftware.Steam/data/Steam` or `~/.var/app/com.valvesoftware.Steam/.local/share/Steam` (the paths Proton compatibility-tool scanning already used). "Add to Steam", launch-option patching, and Steam status now find these installs too. Native Steam installs still take priority, followed by Flatpak, then Snap.
+
 ## [0.14.14] - 2026-10-06
 
 ### Fixed
