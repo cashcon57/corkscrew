@@ -2,6 +2,12 @@
 
 All notable changes to Corkscrew are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.14.16] - 2026-10-06
+
+### Fixed
+
+- **Native Steam not detected via `~/.steam/root`**: Steam root detection checked `~/.steam/steam` and `~/.local/share/Steam` but not `~/.steam/root`, the other native Steam symlink (and the path Proton compatibility-tool and library scanning already used). Installs that only expose `~/.steam/root` are now found for "Add to Steam", launch-option patching, and Steam status. It is checked right after `~/.steam/steam`, ahead of other native, Flatpak, and Snap roots; `/var/home` (Fedora Atomic / Bazzite) homes are covered too.
+
 ## [0.14.15] - 2026-10-06
 
 ### Fixed

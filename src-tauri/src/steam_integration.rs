@@ -37,6 +37,11 @@ pub fn is_flatpak() -> bool {
 
 /// Steam root directories relative to a home directory, in priority order.
 ///
+/// Native installs come first: `.steam/steam`, then `.steam/root` (the other
+/// symlink Steam's bootstrapper maintains, which `proton.rs` scans for
+/// `steamapps`, `libraryfolders.vdf` and `compatibilitytools.d` — some
+/// installs only have this one), then the real data dir `.local/share/Steam`.
+///
 /// The Snap package keeps its real data under `snap/steam/common/.local/share/Steam`
 /// (the same layout `proton.rs` uses for its library scan); `snap/steam/current`
 /// is a per-revision symlinked view that is not always populated.
@@ -53,6 +58,7 @@ pub fn is_flatpak() -> bool {
 ///   used by `proton.rs`).
 const STEAM_ROOT_SUFFIXES: &[&str] = &[
     ".steam/steam",
+    ".steam/root",
     ".local/share/Steam",
     ".var/app/com.valvesoftware.Steam/data/Steam", // Flatpak (XDG data)
     ".var/app/com.valvesoftware.Steam/.local/share/Steam", // Flatpak (sandboxed home data)
@@ -1347,6 +1353,36 @@ mod tests {
         assert!(candidates.contains(&raw.join(".var/app/com.valvesoftware.Steam/data/Steam")));
         assert!(
             candidates.contains(&raw.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"))
+        );
+    }
+
+    #[test]
+    fn test_steam_root_candidates_include_native_root_alias() {
+        let home = Path::new("/home/deck");
+        let raw = Path::new("/var/home/deck");
+        let candidates = steam_root_candidates(home, raw);
+        let n = STEAM_ROOT_SUFFIXES.len();
+        // `.steam/root` sits right after `.steam/steam` and before every other
+        // native or packaged root, for both the normalized and raw homes.
+        for (base, offset) in [(home, 0), (raw, n)] {
+            assert_eq!(candidates[offset], base.join(".steam/steam"));
+            assert_eq!(candidates[offset + 1], base.join(".steam/root"));
+            assert_eq!(candidates[offset + 2], base.join(".local/share/Steam"));
+        }
+        // Normalized-home candidates (including the alias) precede raw-home ones.
+        let root_pos = |base: &Path| {
+            candidates
+                .iter()
+                .position(|c| c == &base.join(".steam/root"))
+                .unwrap()
+        };
+        assert!(root_pos(home) < root_pos(raw));
+        assert_eq!(
+            candidates
+                .iter()
+                .filter(|c| c.ends_with(".steam/root"))
+                .count(),
+            2
         );
     }
 }
