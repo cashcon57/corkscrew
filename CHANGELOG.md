@@ -2,6 +2,12 @@
 
 All notable changes to Corkscrew are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.14.13] - 2026-10-06
+
+### Fixed
+
+- **Snap Steam not detected for Steam integration**: Steam root detection only checked the Snap revision view (`~/snap/steam/current/.steam/steam`), missing installs whose data lives under the Snap common-data layout `~/snap/steam/common/.local/share/Steam` (the path Proton/library scanning already used). "Add to Steam", launch-option patching, and Steam status now find these installs too.
+
 ## [0.14.12] - 2026-10-02
 
 ### Fixed

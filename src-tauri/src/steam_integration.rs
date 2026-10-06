@@ -35,6 +35,32 @@ pub fn is_flatpak() -> bool {
     std::env::var("FLATPAK_ID").is_ok() || std::path::Path::new("/.flatpak-info").exists()
 }
 
+/// Steam root directories relative to a home directory, in priority order.
+///
+/// The Snap package keeps its real data under `snap/steam/common/.local/share/Steam`
+/// (the same layout `proton.rs` uses for its library scan); `snap/steam/current`
+/// is a per-revision symlinked view that is not always populated.
+const STEAM_ROOT_SUFFIXES: &[&str] = &[
+    ".steam/steam",
+    ".local/share/Steam",
+    ".var/app/com.valvesoftware.Steam/.steam/steam", // Flatpak
+    "snap/steam/current/.steam/steam",               // Snap (revision view)
+    "snap/steam/common/.local/share/Steam",          // Snap (common data)
+];
+
+/// Build the ordered list of candidate Steam roots for `home`, plus the raw
+/// (`/var/home`) variant when it differs from the normalized home.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn steam_root_candidates(home: &Path, raw_home: &Path) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> =
+        STEAM_ROOT_SUFFIXES.iter().map(|s| home.join(s)).collect();
+    // Also check /var/home variant if the normalized home differs from the raw home
+    if home != raw_home {
+        candidates.extend(STEAM_ROOT_SUFFIXES.iter().map(|s| raw_home.join(s)));
+    }
+    candidates
+}
+
 /// Detect a Steam installation on this system.
 #[cfg(target_os = "linux")]
 pub fn detect_steam_installation() -> Option<SteamInfo> {
@@ -47,19 +73,7 @@ pub fn detect_steam_installation() -> Option<SteamInfo> {
         log::info!("Steam detection running in container environment: {:?}", env);
     }
 
-    let mut candidates = vec![
-        home.join(".steam/steam"),
-        home.join(".local/share/Steam"),
-        home.join(".var/app/com.valvesoftware.Steam/.steam/steam"), // Flatpak
-        home.join("snap/steam/current/.steam/steam"),               // Snap
-    ];
-    // Also check /var/home variant if the normalized home differs from the raw home
-    if home != raw_home {
-        candidates.push(raw_home.join(".steam/steam"));
-        candidates.push(raw_home.join(".local/share/Steam"));
-        candidates.push(raw_home.join(".var/app/com.valvesoftware.Steam/.steam/steam"));
-        candidates.push(raw_home.join("snap/steam/current/.steam/steam"));
-    }
+    let candidates = steam_root_candidates(&home, &raw_home);
 
     for candidate in &candidates {
         if candidate.join("steam.sh").exists() || candidate.join("ubuntu12_32").exists() {
@@ -1269,5 +1283,22 @@ mod tests {
         assert!(extenders.iter().any(|e| e.game_id == "skyrimse"));
         assert!(extenders.iter().any(|e| e.game_id == "fallout4"));
         assert!(extenders.iter().any(|e| e.game_id == "oblivion"));
+    }
+
+    #[test]
+    fn test_steam_root_candidates_include_snap_common_data() {
+        let home = Path::new("/home/deck");
+        let candidates = steam_root_candidates(home, home);
+        assert!(candidates.contains(&home.join("snap/steam/common/.local/share/Steam")));
+        assert!(candidates.contains(&home.join("snap/steam/current/.steam/steam")));
+        // Native installs keep priority over packaged ones.
+        assert_eq!(candidates[0], home.join(".steam/steam"));
+        // No duplicate /var/home entries when the paths are identical.
+        assert_eq!(candidates.len(), STEAM_ROOT_SUFFIXES.len());
+
+        let raw = Path::new("/var/home/deck");
+        let candidates = steam_root_candidates(home, raw);
+        assert_eq!(candidates.len(), STEAM_ROOT_SUFFIXES.len() * 2);
+        assert!(candidates.contains(&raw.join("snap/steam/common/.local/share/Steam")));
     }
 }
