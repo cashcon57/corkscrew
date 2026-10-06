@@ -83,6 +83,15 @@ pub(crate) fn steam_root_candidates(home: &Path, raw_home: &Path) -> Vec<PathBuf
     candidates
 }
 
+/// Return the first candidate that looks like a real Steam root, i.e. contains
+/// `steam.sh` or `ubuntu12_32`. Candidates are checked in the given order.
+#[cfg(target_os = "linux")]
+fn first_valid_steam_root(candidates: &[PathBuf]) -> Option<&PathBuf> {
+    candidates
+        .iter()
+        .find(|c| c.join("steam.sh").exists() || c.join("ubuntu12_32").exists())
+}
+
 /// Detect a Steam installation on this system.
 #[cfg(target_os = "linux")]
 pub fn detect_steam_installation() -> Option<SteamInfo> {
@@ -97,37 +106,31 @@ pub fn detect_steam_installation() -> Option<SteamInfo> {
 
     let candidates = steam_root_candidates(&home, &raw_home);
 
-    for candidate in &candidates {
-        if candidate.join("steam.sh").exists() || candidate.join("ubuntu12_32").exists() {
-            let userdata = candidate.join("userdata");
-            let mut userdata_dirs = Vec::new();
+    let candidate = first_valid_steam_root(&candidates)?;
 
-            if userdata.is_dir() {
-                if let Ok(entries) = std::fs::read_dir(&userdata) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.is_dir() && path.join("config").is_dir() {
-                            userdata_dirs.push(path);
-                        }
-                    }
+    let userdata = candidate.join("userdata");
+    let mut userdata_dirs = Vec::new();
+
+    if userdata.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&userdata) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() && path.join("config").is_dir() {
+                    userdata_dirs.push(path);
                 }
             }
-
-            if is_flatpak() {
-                log::warn!(
-                    "Running under Flatpak \u{2014} Steam paths may require portal permissions"
-                );
-            }
-
-            return Some(SteamInfo {
-                steam_root: candidate.clone(),
-                userdata_dirs,
-                is_steam_deck: is_steam_deck(),
-            });
         }
     }
 
-    None
+    if is_flatpak() {
+        log::warn!("Running under Flatpak \u{2014} Steam paths may require portal permissions");
+    }
+
+    Some(SteamInfo {
+        steam_root: candidate.clone(),
+        userdata_dirs,
+        is_steam_deck: is_steam_deck(),
+    })
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1387,5 +1390,71 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_first_valid_steam_root_accepts_snap_common_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let candidates = steam_root_candidates(home, home);
+
+        // Only the Snap common-data root exists, marked by `ubuntu12_32`.
+        let snap_common = home.join("snap/steam/common/.local/share/Steam");
+        std::fs::create_dir_all(snap_common.join("ubuntu12_32")).unwrap();
+        assert_eq!(first_valid_steam_root(&candidates), Some(&snap_common));
+
+        // `steam.sh` alone is also a valid marker.
+        std::fs::remove_dir(snap_common.join("ubuntu12_32")).unwrap();
+        std::fs::write(snap_common.join("steam.sh"), "").unwrap();
+        assert_eq!(first_valid_steam_root(&candidates), Some(&snap_common));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_first_valid_steam_root_rejects_dir_without_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let candidates = steam_root_candidates(home, home);
+
+        // Existing roots with unrelated contents are not Steam installs.
+        let native = home.join(".steam/steam");
+        let snap_common = home.join("snap/steam/common/.local/share/Steam");
+        std::fs::create_dir_all(native.join("steamapps")).unwrap();
+        std::fs::create_dir_all(snap_common.join("userdata")).unwrap();
+        assert_eq!(first_valid_steam_root(&candidates), None);
+        assert_eq!(first_valid_steam_root(&[]), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_first_valid_steam_root_prefers_first_valid_candidate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let candidates = steam_root_candidates(home, home);
+
+        // An earlier unmarked root is skipped; the first marked root wins over
+        // later marked ones.
+        let native = home.join(".steam/steam");
+        let native_share = home.join(".local/share/Steam");
+        let snap_common = home.join("snap/steam/common/.local/share/Steam");
+        std::fs::create_dir_all(&native).unwrap();
+        std::fs::create_dir_all(&native_share).unwrap();
+        std::fs::write(native_share.join("steam.sh"), "").unwrap();
+        std::fs::create_dir_all(snap_common.join("ubuntu12_32")).unwrap();
+        assert_eq!(first_valid_steam_root(&candidates), Some(&native_share));
+
+        // Marking the first candidate makes it take priority.
+        std::fs::write(native.join("steam.sh"), "").unwrap();
+        assert_eq!(first_valid_steam_root(&candidates), Some(&native));
+
+        // Normalized-home roots win over raw (`/var/home`) roots.
+        let raw_tmp = tempfile::tempdir().unwrap();
+        let raw = raw_tmp.path();
+        let raw_native = raw.join(".steam/steam");
+        std::fs::create_dir_all(&raw_native).unwrap();
+        std::fs::write(raw_native.join("steam.sh"), "").unwrap();
+        let candidates = steam_root_candidates(home, raw);
+        assert_eq!(first_valid_steam_root(&candidates), Some(&native));
     }
 }
