@@ -118,7 +118,7 @@ export async function injectTauriMock(
       case "get_download_queue": return [];
       case "get_notification_count": return 0;
       case "set_config_value": return null;
-      case "list_profiles": return [{ name: "default", is_active: true, game_id: "skyrimse", bottle_name: "CrossOver Default" }];
+      case "list_profiles_cmd": return [{ id: 1, name: "default", is_active: true, game_id: "skyrimse", bottle_name: "CrossOver Default", created_at: "2026-01-01T00:00:00Z" }];
       case "list_installed_collections": return [
         { slug: "uehwil", name: "The Goblet", game_domain: "hogwartslegacy", game_id: "hogwartslegacy", bottle_name: "CrossOver Default", author: "v2", latest_revision: 63, installed_revision: 63, mod_count: 132, download_size: 4294967296, status: "installed" },
       ];

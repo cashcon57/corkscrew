@@ -34,7 +34,7 @@
     const t0 = performance.now();
     loading = true;
     try {
-      profiles = await listProfiles(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
+      profiles = (await listProfiles(game.game_id, (wineCtx(game)?.bottle_name ?? ""))) ?? [];
     } catch (e: unknown) {
       showError(`Failed to load profiles: ${e}`);
     } finally {
