@@ -1304,7 +1304,7 @@ mod tests {
             scan_proton_dir(&dir, &mut versions);
         }
         assert_eq!(versions.len(), 1);
-        assert_eq!(versions[0].path, expected);
+        assert!(same_dir(&versions[0].path, &expected));
     }
 
     #[test]
@@ -1326,8 +1326,8 @@ mod tests {
             scan_proton_dir(&dir, &mut versions);
         }
         assert_eq!(versions.len(), 2);
-        assert!(versions.iter().any(|v| v.path == native_proton));
-        assert!(versions.iter().any(|v| v.path == snap_proton));
+        assert!(versions.iter().any(|v| same_dir(&v.path, &native_proton)));
+        assert!(versions.iter().any(|v| same_dir(&v.path, &snap_proton)));
     }
 
     #[cfg(unix)]
