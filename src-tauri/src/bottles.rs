@@ -304,9 +304,9 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
 
 /// Build the list of directories to scan on Linux.
 #[cfg(target_os = "linux")]
-fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
+fn platform_search_locations(raw_home: &Path) -> Vec<SearchLocation> {
     // Normalize for Fedora Atomic / Bazzite (/var/home -> /home)
-    let home = normalize_container_path(home);
+    let home = normalize_container_path(raw_home);
     let home = home.as_path();
     let mut locations = vec![
         // Native Wine default prefix
@@ -350,77 +350,118 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
                 .join("bottles")
                 .join("bottles"),
         },
-        // Steam / Proton (primary library)
-        SearchLocation {
-            source: "Proton",
-            path: home
-                .join(".local")
-                .join("share")
-                .join("Steam")
-                .join("steamapps")
-                .join("compatdata"),
-        },
-        // Steam via symlink (common on SteamOS)
-        SearchLocation {
-            source: "Proton",
-            path: home
-                .join(".steam")
-                .join("steam")
-                .join("steamapps")
-                .join("compatdata"),
-        },
-        // Flatpak Steam
-        SearchLocation {
-            source: "Proton",
-            path: home
-                .join(".var")
-                .join("app")
-                .join("com.valvesoftware.Steam")
-                .join(".local")
-                .join("share")
-                .join("Steam")
-                .join("steamapps")
-                .join("compatdata"),
-        },
     ];
 
-    // Also scan secondary Steam library folders (e.g. SD card on Steam Deck)
-    let steam_dirs = [
-        home.join(".local/share/Steam"),
-        home.join(".steam/steam"),
-    ];
-    for steam_dir in &steam_dirs {
+    // Steam / Proton: primary compatdata of every supported Steam root, then
+    // secondary library folders (e.g. SD card on Steam Deck).
+    locations.extend(
+        proton_compatdata_dirs(home, raw_home)
+            .into_iter()
+            .map(|path| SearchLocation {
+                source: "Proton",
+                path,
+            }),
+    );
+
+    locations
+}
+
+/// Steam roots whose compatdata was scanned before the shared candidate list
+/// was adopted, kept first (in their original order) so the first-wins bottle
+/// dedup keeps reporting the same prefix path when roots alias one install.
+#[cfg(target_os = "linux")]
+const LEGACY_PROTON_ROOT_SUFFIXES: &[&str] = &[
+    ".local/share/Steam",
+    ".steam/steam",
+    ".var/app/com.valvesoftware.Steam/.local/share/Steam",
+];
+
+/// Ordered, deduplicated Steam roots to search for Proton prefixes: the legacy
+/// roots first, then every remaining `steam_root_candidates` entry (native,
+/// Flatpak, Snap, and the raw `/var/home` variants).
+#[cfg(target_os = "linux")]
+fn proton_steam_roots(home: &Path, raw_home: &Path) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = LEGACY_PROTON_ROOT_SUFFIXES
+        .iter()
+        .map(|s| home.join(s))
+        .collect();
+    for candidate in crate::steam_integration::steam_root_candidates(home, raw_home) {
+        if !roots.contains(&candidate) {
+            roots.push(candidate);
+        }
+    }
+    roots
+}
+
+/// Identity key for collapsing symlinked aliases of one directory.
+#[cfg(target_os = "linux")]
+fn path_identity(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Extract library paths from a Steam `libraryfolders.vdf`.
+///
+/// Only absolute paths without `..` components are accepted; the file is
+/// external input and every entry is joined onto before being scanned.
+#[cfg(target_os = "linux")]
+fn parse_libraryfolders_paths(content: &str) -> Vec<PathBuf> {
+    content
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("\"path\""))
+        .map(|rest| rest.trim().trim_matches('"').replace('\\', "/"))
+        .filter(|raw| !raw.is_empty() && !raw.contains('\0'))
+        .map(PathBuf::from)
+        .filter(|p| {
+            p.is_absolute()
+                && !p
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+        })
+        .collect()
+}
+
+/// Build the ordered list of Steam `compatdata` directories to scan.
+///
+/// Primary `steamapps/compatdata` of every root from [`proton_steam_roots`]
+/// comes first (listed even if absent; aliases of an existing directory are
+/// collapsed), followed by existing `compatdata` dirs of secondary libraries
+/// from each root's `libraryfolders.vdf`, in root order, without duplicates.
+#[cfg(target_os = "linux")]
+fn proton_compatdata_dirs(home: &Path, raw_home: &Path) -> Vec<PathBuf> {
+    use std::collections::HashSet;
+
+    let roots = proton_steam_roots(home, raw_home);
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut dirs = Vec::new();
+
+    for root in &roots {
+        let compatdata = root.join("steamapps").join("compatdata");
+        if seen.insert(path_identity(&compatdata)) {
+            dirs.push(compatdata);
+        }
+    }
+
+    let mut seen_vdfs: HashSet<PathBuf> = HashSet::new();
+    for root in &roots {
         for vdf_name in &["steamapps/libraryfolders.vdf", "config/libraryfolders.vdf"] {
-            let vdf_path = steam_dir.join(vdf_name);
-            if let Ok(content) = fs::read_to_string(&vdf_path) {
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    if let Some(rest) = trimmed.strip_prefix("\"path\"") {
-                        let rest = rest.trim().trim_matches('"');
-                        if !rest.is_empty() {
-                            let lib_path =
-                                PathBuf::from(rest.replace('\\', "/"))
-                                    .join("steamapps")
-                                    .join("compatdata");
-                            // Avoid duplicates
-                            if !locations.iter().any(|l| l.path == lib_path) && lib_path.is_dir() {
-                                log::info!(
-                                    "Found additional Steam library: {}",
-                                    lib_path.display()
-                                );
-                                locations.push(SearchLocation {
-                                    source: "Proton",
-                                    path: lib_path,
-                                });
-                            }
-                        }
-                    }
+            let vdf_path = root.join(vdf_name);
+            if !vdf_path.is_file() || !seen_vdfs.insert(path_identity(&vdf_path)) {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&vdf_path) else {
+                continue;
+            };
+            for lib in parse_libraryfolders_paths(&content) {
+                let compatdata = lib.join("steamapps").join("compatdata");
+                if compatdata.is_dir() && seen.insert(path_identity(&compatdata)) {
+                    log::info!("Found additional Steam library: {}", compatdata.display());
+                    dirs.push(compatdata);
                 }
             }
         }
     }
 
-    locations
+    dirs
 }
 
 // ---------------------------------------------------------------------------
@@ -1403,5 +1444,233 @@ mod tests {
 
         let deduped = deduplicate_bottles_by_name(bottles);
         assert_eq!(deduped.len(), 1, "case-insensitive duplicate should be collapsed to one entry");
+    }
+
+    // -----------------------------------------------------------------------
+    // Proton / Steam compatdata discovery (Linux)
+    // -----------------------------------------------------------------------
+
+    /// Create `{steam_root}/steamapps/compatdata/{app_id}/pfx/drive_c`.
+    #[cfg(target_os = "linux")]
+    fn create_proton_prefix(steam_root: &Path, app_id: &str) -> PathBuf {
+        let compatdata = steam_root.join("steamapps").join("compatdata");
+        fs::create_dir_all(compatdata.join(app_id).join("pfx").join("drive_c")).unwrap();
+        compatdata
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_libraryfolders(steam_root: &Path, libs: &[&Path]) {
+        let mut vdf = String::from("\"libraryfolders\"\n{\n");
+        for (i, lib) in libs.iter().enumerate() {
+            vdf.push_str(&format!(
+                "\t\"{}\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n",
+                i,
+                lib.display()
+            ));
+        }
+        vdf.push_str("}\n");
+        fs::create_dir_all(steam_root.join("steamapps")).unwrap();
+        fs::write(steam_root.join("steamapps").join("libraryfolders.vdf"), vdf).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn proton_paths(locations: &[SearchLocation]) -> Vec<PathBuf> {
+        locations
+            .iter()
+            .filter(|l| l.source == "Proton")
+            .map(|l| l.path.clone())
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proton_search_covers_modern_flatpak_and_snap_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let flatpak = home.join(".var/app/com.valvesoftware.Steam/data/Steam");
+        let snap = home.join("snap/steam/common/.local/share/Steam");
+        let flatpak_compat = create_proton_prefix(&flatpak, "489830");
+        let snap_compat = create_proton_prefix(&snap, "377160");
+
+        let locations = platform_search_locations(home);
+        let proton = proton_paths(&locations);
+        assert!(
+            proton.contains(&flatpak_compat),
+            "Flatpak data/Steam missing: {proton:?}"
+        );
+        assert!(
+            proton.contains(&snap_compat),
+            "Snap common Steam missing: {proton:?}"
+        );
+        assert!(proton.contains(&home.join(".steam/root/steamapps/compatdata")));
+
+        // End to end: both prefixes become Proton bottles.
+        let mut bottles = Vec::new();
+        for location in &locations {
+            collect_bottles_from(location, &mut bottles);
+        }
+        let paths: Vec<_> = bottles.iter().map(|b| b.path.clone()).collect();
+        assert!(paths.contains(&flatpak_compat.join("489830").join("pfx")));
+        assert!(paths.contains(&snap_compat.join("377160").join("pfx")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proton_search_preserves_source_and_legacy_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let locations = platform_search_locations(home);
+
+        let sources: Vec<&str> = locations.iter().map(|l| l.source).collect();
+        assert_eq!(
+            &sources[..5],
+            &["Wine", "Heroic", "Heroic", "Lutris", "Bottles"],
+            "non-Steam locations must keep their order"
+        );
+        assert!(sources[5..].iter().all(|s| *s == "Proton"));
+
+        let proton = proton_paths(&locations);
+        let compat = |s: &str| home.join(s).join("steamapps/compatdata");
+        assert_eq!(
+            &proton[..3],
+            &[
+                compat(".local/share/Steam"),
+                compat(".steam/steam"),
+                compat(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
+            ],
+            "previously scanned roots stay first, in original order"
+        );
+        let unique: std::collections::HashSet<_> = proton.iter().collect();
+        assert_eq!(
+            unique.len(),
+            proton.len(),
+            "no duplicate compatdata entries"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proton_search_includes_raw_var_home_variant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home/deck");
+        let raw_home = tmp.path().join("var/home/deck");
+        let raw_flatpak_compat = create_proton_prefix(
+            &raw_home.join(".var/app/com.valvesoftware.Steam/data/Steam"),
+            "72850",
+        );
+
+        let dirs = proton_compatdata_dirs(&home, &raw_home);
+        assert!(
+            dirs.contains(&raw_flatpak_compat),
+            "raw /var/home root missing: {dirs:?}"
+        );
+        let first_raw = dirs.iter().position(|d| d.starts_with(&raw_home)).unwrap();
+        assert!(
+            dirs[..first_raw].iter().all(|d| d.starts_with(&home)),
+            "normalized home roots come before raw variants"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proton_secondary_libraries_read_from_flatpak_and_snap_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let flatpak = home.join(".var/app/com.valvesoftware.Steam/data/Steam");
+        let snap = home.join("snap/steam/common/.local/share/Steam");
+        let sd_card = tmp.path().join("run/media/mmcblk0p1");
+        let usb = tmp.path().join("mnt/usb");
+        let missing = tmp.path().join("mnt/unplugged");
+        let sd_compat = create_proton_prefix(&sd_card, "1091500");
+        let usb_compat = create_proton_prefix(&usb, "22380");
+        let flatpak_compat = create_proton_prefix(&flatpak, "489830");
+        create_proton_prefix(&snap, "377160");
+
+        // Flatpak config lists itself (as Steam does) plus the SD card and a
+        // missing drive; Snap config lists the USB drive and the SD card again.
+        write_libraryfolders(&flatpak, &[&flatpak, &sd_card, &missing]);
+        fs::create_dir_all(snap.join("config")).unwrap();
+        fs::write(
+            snap.join("config").join("libraryfolders.vdf"),
+            format!(
+                "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n}}\n",
+                usb.display(),
+                sd_card.display()
+            ),
+        )
+        .unwrap();
+
+        let dirs = proton_compatdata_dirs(&home, &home);
+        let sd_pos = dirs
+            .iter()
+            .position(|d| d == &sd_compat)
+            .expect("SD card library");
+        let usb_pos = dirs
+            .iter()
+            .position(|d| d == &usb_compat)
+            .expect("USB library");
+        assert!(
+            sd_pos < usb_pos,
+            "secondary libraries follow root order: {dirs:?}"
+        );
+        assert_eq!(dirs.iter().filter(|d| **d == sd_compat).count(), 1);
+        assert_eq!(dirs.iter().filter(|d| **d == flatpak_compat).count(), 1);
+        assert!(!dirs.iter().any(|d| d.starts_with(&missing)));
+        let primary_count = proton_steam_roots(&home, &home).len();
+        assert!(
+            sd_pos >= primary_count,
+            "secondary libraries come after primary roots"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proton_search_collapses_symlinked_steam_aliases() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let real = home.join(".local/share/Steam");
+        let sd_card = tmp.path().join("sdcard");
+        let sd_compat = create_proton_prefix(&sd_card, "1091500");
+        create_proton_prefix(&real, "489830");
+        fs::create_dir_all(home.join(".steam")).unwrap();
+        symlink(&real, home.join(".steam/steam")).unwrap();
+        symlink(&real, home.join(".steam/root")).unwrap();
+        // A second spelling of the SD card path via a symlinked mount alias.
+        let sd_alias = tmp.path().join("sdcard-alias");
+        symlink(&sd_card, &sd_alias).unwrap();
+        write_libraryfolders(&real, &[&real, &sd_card, &sd_alias]);
+
+        let dirs = proton_compatdata_dirs(home, home);
+        let real_compat = real.join("steamapps/compatdata");
+        assert_eq!(
+            dirs[0], real_compat,
+            "real data dir keeps its legacy first slot"
+        );
+        assert!(!dirs.contains(&home.join(".steam/steam/steamapps/compatdata")));
+        assert!(!dirs.contains(&home.join(".steam/root/steamapps/compatdata")));
+        let canon: Vec<_> = dirs.iter().map(|d| path_identity(d)).collect();
+        let unique: std::collections::HashSet<_> = canon.iter().collect();
+        assert_eq!(unique.len(), canon.len(), "aliases collapsed: {dirs:?}");
+        assert_eq!(
+            dirs.iter()
+                .filter(|d| path_identity(d) == path_identity(&sd_compat))
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_libraryfolders_rejects_unsafe_paths() {
+        let vdf = "\"libraryfolders\"\n{\n\t\"0\"\n\t{\n\t\t\"path\"\t\t\"/mnt/games\"\n\t}\n\
+                   \t\"1\"\n\t{\n\t\t\"path\"\t\t\"relative/lib\"\n\t}\n\
+                   \t\"2\"\n\t{\n\t\t\"path\"\t\t\"/mnt/../etc\"\n\t}\n\
+                   \t\"3\"\n\t{\n\t\t\"path\"\t\t\"\"\n\t}\n}\n";
+        assert_eq!(
+            parse_libraryfolders_paths(vdf),
+            vec![PathBuf::from("/mnt/games")]
+        );
     }
 }

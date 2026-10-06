@@ -2,6 +2,12 @@
 
 All notable changes to Corkscrew are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.14.18] - 2026-10-06
+
+### Fixed
+
+- **Proton prefixes missed in modern Flatpak/Snap Steam and secondary libraries**: Proton bottle discovery only scanned `compatdata` under `~/.local/share/Steam`, `~/.steam/steam`, and the legacy Flatpak `~/.var/app/com.valvesoftware.Steam/.local/share/Steam`, and read secondary `libraryfolders.vdf` only from the two native roots. It now reuses the same Steam root list as Steam detection (`~/.steam/root`, Flatpak `data/Steam`, Snap `~/snap/steam/...`, and raw `/var/home` homes on Fedora Atomic / Bazzite), reads `libraryfolders.vdf` from every root, and collapses symlinked aliases so each library is scanned once. Previously scanned roots keep their order, and Wine/Heroic/Lutris/Bottles locations are unchanged. Library paths from `libraryfolders.vdf` must be absolute and free of `..`.
+
 ## [0.14.17] - 2026-10-06
 
 ### Fixed
