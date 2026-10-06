@@ -2,6 +2,12 @@
 
 All notable changes to Corkscrew are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.14.14] - 2026-10-06
+
+### Fixed
+
+- **Linux reflink detection picked the wrong mount**: copy-method detection matched `/proc/mounts` entries with a plain string prefix, so a path under `/mnt/games2` could be attributed to a `/mnt/games` mount, and mount points containing spaces (kernel-escaped as `\040`, e.g. `Steam Library` drives) never matched at all. Detection now decodes the kernel's octal escapes and picks the most specific mount by path component, so btrfs/xfs drives get copy-on-write reflink copies reliably. Copy fallback behavior is unchanged.
+
 ## [0.14.13] - 2026-10-06
 
 ### Fixed
