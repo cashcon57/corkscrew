@@ -47,15 +47,16 @@ pub fn is_flatpak() -> bool {
 /// is a per-revision symlinked view that is not always populated.
 ///
 /// Flatpak Steam roots live under the app dir `.var/app/com.valvesoftware.Steam`,
-/// checked in this order (the first two match the Flatpak paths `proton.rs`
-/// scans):
+/// checked in this order (`proton.rs` scans all three for
+/// `compatibilitytools.d`, but its Proton library scan currently uses only the
+/// first two):
 /// - `data/Steam` — the sandbox's `$XDG_DATA_HOME/Steam`, where current
 ///   Flatpak Steam keeps its real data;
 /// - `.local/share/Steam` — the sandboxed-home `~/.local/share/Steam` layout
 ///   used by some (older) installs instead of `data/Steam`;
 /// - `.steam/steam` — the legacy symlink inside the app dir, which may be
-///   absent or dangling, so it is only a final detection fallback here (not
-///   used by `proton.rs`).
+///   absent or dangling, so it is only a final fallback (for detection and
+///   compatibility-tool discovery; not part of the Proton library scan).
 const STEAM_ROOT_SUFFIXES: &[&str] = &[
     ".steam/steam",
     ".steam/root",

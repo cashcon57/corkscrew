@@ -558,54 +558,70 @@ fn find_steam_common_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// System-installed compatibility tools (e.g., Proton-CachyOS via pacman/AUR).
+const SYSTEM_COMPAT_TOOLS_DIR: &str = "/usr/share/steam/compatibilitytools.d";
+
+/// Steam roots whose `compatibilitytools.d` was scanned before the shared
+/// candidate list was adopted, kept first in their original order so the
+/// first-wins alias dedup keeps reporting the same path for existing setups.
+const LEGACY_COMPAT_TOOLS_ROOT_SUFFIXES: &[&str] = &[
+    ".steam/root",
+    ".steam/steam",
+    ".local/share/Steam",
+    ".var/app/com.valvesoftware.Steam/data/Steam", // Flatpak (XDG data)
+    ".var/app/com.valvesoftware.Steam/.local/share/Steam", // Flatpak (legacy layout)
+];
+
 fn find_compat_tools_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-
-    if let Some(home) = dirs::home_dir() {
-        // ~/.steam/root/compatibilitytools.d (often a symlink, but cover it)
-        let steam_root = home.join(".steam/root/compatibilitytools.d");
-        if steam_root.is_dir() {
-            dirs.push(steam_root);
+    let dirs = match dirs::home_dir() {
+        Some(raw_home) => {
+            // Normalize for Fedora Atomic / Bazzite (/var/home -> /home)
+            let home = crate::bottles::normalize_container_path(&raw_home);
+            compat_tools_dirs_in(&home, &raw_home, Path::new(SYSTEM_COMPAT_TOOLS_DIR))
         }
-
-        // ~/.steam/steam/compatibilitytools.d (alternate Steam layout)
-        let steam_steam = home.join(".steam/steam/compatibilitytools.d");
-        if steam_steam.is_dir() && !dirs.iter().any(|d| same_dir(d, &steam_steam)) {
-            dirs.push(steam_steam);
-        }
-
-        // XDG / standard local install: ~/.local/share/Steam/compatibilitytools.d
-        let xdg = home.join(".local/share/Steam/compatibilitytools.d");
-        if xdg.is_dir() && !dirs.iter().any(|d| same_dir(d, &xdg)) {
-            dirs.push(xdg);
-        }
-
-        // Flatpak Steam: ~/.var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d
-        let flatpak_data = home
-            .join(".var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d");
-        if flatpak_data.is_dir() && !dirs.iter().any(|d| same_dir(d, &flatpak_data)) {
-            dirs.push(flatpak_data);
-        }
-
-        // Flatpak Steam (legacy layout): .../.local/share/Steam/compatibilitytools.d
-        let flatpak_legacy = home
-            .join(".var/app/com.valvesoftware.Steam/.local/share/Steam/compatibilitytools.d");
-        if flatpak_legacy.is_dir() && !dirs.iter().any(|d| same_dir(d, &flatpak_legacy)) {
-            dirs.push(flatpak_legacy);
-        }
-    }
-
-    // System-installed compatibility tools (e.g., Proton-CachyOS via pacman/AUR)
-    let system = PathBuf::from("/usr/share/steam/compatibilitytools.d");
-    if system.is_dir() && !dirs.iter().any(|d| same_dir(d, &system)) {
-        dirs.push(system);
-    }
+        None => compat_tools_dirs_in_roots(Vec::new(), Path::new(SYSTEM_COMPAT_TOOLS_DIR)),
+    };
 
     debug!("Scanned {} compatibilitytools.d locations", dirs.len());
     for d in &dirs {
         debug!("  compatibilitytools.d: {}", d.display());
     }
 
+    dirs
+}
+
+/// `find_compat_tools_dirs` with the home paths and system dir injected.
+///
+/// Searches `compatibilitytools.d` under the legacy roots first, then every
+/// remaining `steam_integration::steam_root_candidates` entry (Flatpak legacy
+/// symlink, Snap revision and common data, raw `/var/home` variants), then
+/// `system_dir`. Only existing directories are returned, and symlinked
+/// aliases of one directory are listed once (first occurrence wins).
+fn compat_tools_dirs_in(home: &Path, raw_home: &Path, system_dir: &Path) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = LEGACY_COMPAT_TOOLS_ROOT_SUFFIXES
+        .iter()
+        .map(|s| home.join(s))
+        .collect();
+    for candidate in crate::steam_integration::steam_root_candidates(home, raw_home) {
+        if !roots.contains(&candidate) {
+            roots.push(candidate);
+        }
+    }
+    compat_tools_dirs_in_roots(roots, system_dir)
+}
+
+fn compat_tools_dirs_in_roots(roots: Vec<PathBuf>, system_dir: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let candidates = roots
+        .into_iter()
+        .map(|root| root.join("compatibilitytools.d"))
+        .chain(std::iter::once(system_dir.to_path_buf()));
+    for dir in candidates {
+        if dir.is_dir() && seen.insert(dir.canonicalize().unwrap_or_else(|_| dir.clone())) {
+            dirs.push(dir);
+        }
+    }
     dirs
 }
 
@@ -1053,6 +1069,118 @@ mod tests {
         // We can't reliably mock /usr/share/steam in unit tests, but we can at
         // least call the function and assert it returns without panicking.
         let _ = find_compat_tools_dirs();
+    }
+
+    fn mk_compat_dir(root: &Path) -> PathBuf {
+        let dir = root.join("compatibilitytools.d");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_compat_tools_dirs_finds_snap_common_and_revision_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let system = tmp.path().join("system/compatibilitytools.d");
+        std::fs::create_dir_all(&system).unwrap();
+
+        let snap_rev = mk_compat_dir(&home.join("snap/steam/current/.steam/steam"));
+        let snap_common = mk_compat_dir(&home.join("snap/steam/common/.local/share/Steam"));
+
+        let dirs = compat_tools_dirs_in(home, home, &system);
+        assert_eq!(dirs, vec![snap_rev, snap_common, system]);
+    }
+
+    #[test]
+    fn test_compat_tools_dirs_preserves_native_flatpak_order_before_snap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let system = tmp.path().join("system/compatibilitytools.d");
+        std::fs::create_dir_all(&system).unwrap();
+
+        // Created in reverse to prove ordering comes from the root list, not
+        // from directory creation order.
+        let snap_common = mk_compat_dir(&home.join("snap/steam/common/.local/share/Steam"));
+        let flatpak_legacy =
+            mk_compat_dir(&home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"));
+        let flatpak_data = mk_compat_dir(&home.join(".var/app/com.valvesoftware.Steam/data/Steam"));
+        let xdg = mk_compat_dir(&home.join(".local/share/Steam"));
+        let steam_steam = mk_compat_dir(&home.join(".steam/steam"));
+        let steam_root = mk_compat_dir(&home.join(".steam/root"));
+
+        let dirs = compat_tools_dirs_in(home, home, &system);
+        assert_eq!(
+            dirs,
+            vec![
+                steam_root,
+                steam_steam,
+                xdg,
+                flatpak_data,
+                flatpak_legacy,
+                snap_common,
+                system
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_compat_tools_dirs_dedups_symlinked_aliases() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let missing_system = tmp.path().join("no-system");
+
+        // Native: ~/.steam/root and ~/.steam/steam both point at the real data dir.
+        let real = home.join(".local/share/Steam");
+        mk_compat_dir(&real);
+        std::fs::create_dir_all(home.join(".steam")).unwrap();
+        symlink(&real, home.join(".steam/root")).unwrap();
+        symlink(&real, home.join(".steam/steam")).unwrap();
+
+        // Snap: the revision view's .steam/steam points at the common data dir.
+        let snap_common = home.join("snap/steam/common/.local/share/Steam");
+        mk_compat_dir(&snap_common);
+        std::fs::create_dir_all(home.join("snap/steam/current/.steam")).unwrap();
+        symlink(&snap_common, home.join("snap/steam/current/.steam/steam")).unwrap();
+
+        let dirs = compat_tools_dirs_in(home, home, &missing_system);
+        assert_eq!(
+            dirs,
+            vec![
+                home.join(".steam/root/compatibilitytools.d"),
+                home.join("snap/steam/current/.steam/steam/compatibilitytools.d"),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_compat_tools_dirs_raw_home_variant() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home/user");
+        let raw_home = tmp.path().join("var/home/user");
+        let missing_system = tmp.path().join("no-system");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&raw_home).unwrap();
+
+        // Snap install visible only under the raw /var/home path.
+        let raw_snap = mk_compat_dir(&raw_home.join("snap/steam/common/.local/share/Steam"));
+        let dirs = compat_tools_dirs_in(&home, &raw_home, &missing_system);
+        assert_eq!(dirs, vec![raw_snap]);
+
+        // When the normalized home aliases the raw one, the install is listed once,
+        // under the normalized path.
+        let aliased_home = tmp.path().join("home/alias");
+        symlink(&raw_home, &aliased_home).unwrap();
+        let dirs = compat_tools_dirs_in(&aliased_home, &raw_home, &missing_system);
+        assert_eq!(
+            dirs,
+            vec![aliased_home.join("snap/steam/common/.local/share/Steam/compatibilitytools.d")]
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -2,6 +2,12 @@
 
 All notable changes to Corkscrew are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.14.19] - 2026-10-06
+
+### Fixed
+
+- **Custom Proton builds missed in Snap Steam**: `compatibilitytools.d` discovery (GE-Proton, CachyOS-Proton and other custom builds) only checked `~/.steam/root`, `~/.steam/steam`, `~/.local/share/Steam`, and the two Flatpak layouts, so tools installed into Snap Steam (`~/snap/steam/common/.local/share/Steam` or the `~/snap/steam/current/.steam/steam` revision view) were never detected. It now reuses the same Steam root list as Steam detection, including raw `/var/home` homes on Fedora Atomic / Bazzite. Previously scanned locations keep their order, `/usr/share/steam/compatibilitytools.d` is still checked last, and symlinked aliases of one directory are listed only once.
+
 ## [0.14.18] - 2026-10-06
 
 ### Fixed
