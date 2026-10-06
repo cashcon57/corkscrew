@@ -120,7 +120,8 @@
     warnings = [];
     sortMessage = null;
     try {
-      plugins = await getPluginOrder(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
+      plugins = (await getPluginOrder(game.game_id, (wineCtx(game)?.bottle_name ?? ""))) ?? [];
+      console.log(`[perf] loadPlugins: ${(performance.now() - t0).toFixed(0)}ms (${plugins.length} plugins)`);
       // Load masterlist freshness info in parallel (non-blocking)
       getMasterlistStatus(game.game_id)
         .then(s => masterlistInfo = s)
@@ -130,7 +131,6 @@
       plugins = [];
     } finally {
       loading = false;
-      console.log(`[perf] loadPlugins: ${(performance.now() - t0).toFixed(0)}ms (${plugins.length} plugins)`);
     }
   }
 
@@ -147,10 +147,10 @@
 
       if (result.plugins_moved > 0) {
         // Reload plugins from disk to get the sorted order
-        plugins = await getPluginOrder(
+        plugins = (await getPluginOrder(
           $selectedGame.game_id,
           (wineCtx($selectedGame)?.bottle_name ?? "")
-        );
+        )) ?? [];
         sortMessage = `Sorted — ${result.plugins_moved} plugin${result.plugins_moved !== 1 ? "s" : ""} moved`;
       } else {
         sortMessage = "Load order is already optimal";
