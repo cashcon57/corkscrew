@@ -27,22 +27,45 @@ function ensureSandbox(): string {
   let dir = process.env[SANDBOX_ENV];
   if (!dir) {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "corkscrew-e2e-"));
+    seedFixtureGame(path.join(dir, "home"));
     process.env[SANDBOX_ENV] = dir;
     createdSandbox = dir;
   }
   return dir;
 }
 
+/**
+ * Plant a minimal Skyrim SE install in a Wine prefix under the sandbox home, so
+ * game-dependent specs run against a real detected game (via the app's normal
+ * bottle discovery) on machines with no games, CI included. The prefix sits
+ * where each platform's scanner looks: `~/.wine` on Linux, a CrossOver bottle
+ * on macOS. Detection only needs the executable to exist.
+ */
+function seedFixtureGame(home: string): void {
+  const prefix =
+    process.platform === "darwin"
+      ? path.join(home, "Library", "Application Support", "CrossOver", "Bottles", "E2E")
+      : path.join(home, ".wine");
+  const gameDir = path.join(
+    prefix, "drive_c", "Program Files (x86)", "Steam", "steamapps", "common", "Skyrim Special Edition"
+  );
+  fs.mkdirSync(path.join(gameDir, "Data"), { recursive: true });
+  fs.writeFileSync(path.join(gameDir, "SkyrimSE.exe"), "e2e fixture");
+}
+
 /** App environment confined to the sandbox; an explicit CORKSCREW_DATA_DIR (e.g. fixtures) wins. */
 function sandboxedEnv(): NodeJS.ProcessEnv {
   const sandbox = ensureSandbox();
+  const home = path.join(sandbox, "home");
   return {
     ...process.env,
+    // Bottle discovery scans $HOME: the app sees only the fixture game, never real installs.
+    HOME: home,
     CORKSCREW_DATA_DIR: process.env.CORKSCREW_DATA_DIR ?? path.join(sandbox, "corkscrew"),
     // Linux: also covers paths resolved via `dirs` directly and WebKitGTK storage.
-    XDG_DATA_HOME: path.join(sandbox, "data"),
-    XDG_CONFIG_HOME: path.join(sandbox, "config"),
-    XDG_CACHE_HOME: path.join(sandbox, "cache"),
+    XDG_DATA_HOME: path.join(home, ".local", "share"),
+    XDG_CONFIG_HOME: path.join(home, ".config"),
+    XDG_CACHE_HOME: path.join(home, ".cache"),
   };
 }
 
