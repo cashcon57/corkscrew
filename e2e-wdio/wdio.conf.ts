@@ -15,21 +15,38 @@ const STATUS_URL = `http://127.0.0.1:${WEBDRIVER_PORT}/status`;
 const APP_READY_TIMEOUT_MS = 60_000;
 const APP_EXIT_TIMEOUT_MS = 10_000;
 
-// Scratch home for the app under test, shared by every spec in one run (the
-// launcher creates it in onPrepare; workers inherit it via the environment).
-// Without it the app opens the developer's real mods.db and config.
+// Scratch home for the app under test, shared by every spec in one run. The
+// launcher creates a fresh one in onPrepare; workers inherit it via the
+// environment. Without it the app opens the developer's real mods.db and config.
 const SANDBOX_ENV = "CORKSCREW_E2E_SANDBOX";
+const SANDBOX_PREFIX = "corkscrew-e2e-";
 
 let appProcess: ChildProcess | undefined;
 let createdSandbox: string | undefined;
 
-function ensureSandbox(): string {
-  let dir = process.env[SANDBOX_ENV];
-  if (!dir) {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), "corkscrew-e2e-"));
-    seedFixtureGame(path.join(dir, "home"));
-    process.env[SANDBOX_ENV] = dir;
-    createdSandbox = dir;
+/** Launcher only: always a new temp dir, never one named by the caller's environment. */
+function createSandbox(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), SANDBOX_PREFIX));
+  seedFixtureGame(path.join(dir, "home"));
+  process.env[SANDBOX_ENV] = dir;
+  createdSandbox = dir;
+  return dir;
+}
+
+/**
+ * Workers: the sandbox the launcher created. Refuse anything that isn't a
+ * mkdtemp dir of ours, so an inherited value can't aim the app (or onComplete's
+ * cleanup) at real data.
+ */
+function sandboxDir(): string {
+  const dir = process.env[SANDBOX_ENV];
+  if (
+    !dir ||
+    path.dirname(path.resolve(dir)) !== path.resolve(os.tmpdir()) ||
+    !path.basename(dir).startsWith(SANDBOX_PREFIX) ||
+    !fs.existsSync(dir)
+  ) {
+    throw new Error(`[wdio] ${SANDBOX_ENV} is not a sandbox created by onPrepare: ${dir ?? "(unset)"}`);
   }
   return dir;
 }
@@ -53,15 +70,17 @@ function seedFixtureGame(home: string): void {
   fs.writeFileSync(path.join(gameDir, "SkyrimSE.exe"), "e2e fixture");
 }
 
-/** App environment confined to the sandbox; an explicit CORKSCREW_DATA_DIR (e.g. fixtures) wins. */
+/** App environment confined to the sandbox. */
 function sandboxedEnv(): NodeJS.ProcessEnv {
-  const sandbox = ensureSandbox();
+  const sandbox = sandboxDir();
   const home = path.join(sandbox, "home");
   return {
     ...process.env,
     // Bottle discovery scans $HOME: the app sees only the fixture game, never real installs.
     HOME: home,
-    CORKSCREW_DATA_DIR: process.env.CORKSCREW_DATA_DIR ?? path.join(sandbox, "corkscrew"),
+    // Always inside the sandbox, even if the caller exported CORKSCREW_DATA_DIR:
+    // the mod lifecycle specs install, deploy and purge for real.
+    CORKSCREW_DATA_DIR: path.join(sandbox, "corkscrew"),
     // Linux: also covers paths resolved via `dirs` directly and WebKitGTK storage.
     XDG_DATA_HOME: path.join(home, ".local", "share"),
     XDG_CONFIG_HOME: path.join(home, ".config"),
@@ -69,28 +88,18 @@ function sandboxedEnv(): NodeJS.ProcessEnv {
   };
 }
 
+/**
+ * The plain debug executable that `tauri build --debug --no-bundle` writes, on
+ * every platform. Never a `bundle/macos/Corkscrew.app`: no-bundle builds don't
+ * refresh it, so any .app found there is a leftover from an older build.
+ */
 function resolveBinaryPath(): string {
   const srcTauri = path.resolve(__dirname, "..", "src-tauri");
   const targetDir = process.env.CARGO_TARGET_DIR
     ? path.resolve(srcTauri, process.env.CARGO_TARGET_DIR)
     : path.join(srcTauri, "target");
-  const target = path.join(targetDir, "debug");
-
-  if (process.platform === "darwin") {
-    // macOS: prefer .app bundle if it exists (full native webview)
-    const appBundle = path.join(
-      target,
-      "bundle",
-      "macos",
-      "Corkscrew.app",
-      "Contents",
-      "MacOS",
-      "corkscrew"
-    );
-    if (fs.existsSync(appBundle)) return appBundle;
-  }
-
-  return path.join(target, "corkscrew");
+  const exe = process.platform === "win32" ? "corkscrew.exe" : "corkscrew";
+  return path.join(targetDir, "debug", exe);
 }
 
 async function webdriverReady(): Promise<boolean> {
@@ -178,7 +187,7 @@ export const config = {
 
   // Build the debug binary if it doesn't exist (skip in CI — CI builds separately)
   onPrepare() {
-    console.log("[wdio] App sandbox:", ensureSandbox());
+    console.log("[wdio] App sandbox:", createSandbox());
     if (process.env.CI) return;
 
     const binaryPath = resolveBinaryPath();
