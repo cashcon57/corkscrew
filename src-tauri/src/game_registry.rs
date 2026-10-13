@@ -238,31 +238,15 @@ fn has_file_case_insensitive(dir: &Path, filename_lower: &str) -> bool {
 }
 
 fn find_file_case_insensitive(dir: &Path, filename_lower: &str) -> Option<PathBuf> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return None;
-    };
-    for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().to_lowercase() == filename_lower {
-            return Some(entry.path());
-        }
-    }
-    None
+    // Delegates to the shared helper, which case-folds the target itself —
+    // callers no longer need to pre-lowercase (a contract that silently
+    // broke lookups when violated).
+    crate::fs_ci::find_file_ci(dir, filename_lower)
 }
 
 /// Find a child whose name matches case-insensitively.
 fn find_child_case_insensitive(parent: &Path, target: &str) -> Option<PathBuf> {
-    let exact = parent.join(target);
-    if exact.exists() {
-        return Some(exact);
-    }
-    let target_lower = target.to_lowercase();
-    let entries = fs::read_dir(parent).ok()?;
-    for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().to_lowercase() == target_lower {
-            return Some(entry.path());
-        }
-    }
-    None
+    crate::fs_ci::find_child_ci(parent, target)
 }
 
 /// Parse Steam's `libraryfolders.vdf` to extract library paths.

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getNexusModDetail, getModDependencies, getModDependents } from "$lib/api";
+  import { absoluteDate } from "$lib/relativeTime";
   import { installedMods } from "$lib/stores";
   import type { InstalledMod, ModUpdateInfo, NexusModInfo, ModDependency } from "$lib/types";
   import ModVersionHistory from "$lib/components/ModVersionHistory.svelte";
@@ -48,7 +49,7 @@
   let editingNotesValue = $state("");
 
   function formatDate(iso: string): string {
-    return new Date(iso).toLocaleDateString();
+    return absoluteDate(iso) || "—";
   }
 
   function originLabel(t: string): string {

@@ -388,20 +388,7 @@ fn find_executable(game_path: &Path) -> Option<PathBuf> {
 /// Find a child entry of `parent` whose name matches `target`
 /// case-insensitively.
 fn find_child_case_insensitive(parent: &Path, target: &str) -> Option<PathBuf> {
-    // Fast path.
-    let exact = parent.join(target);
-    if exact.exists() {
-        return Some(exact);
-    }
-
-    let target_lower = target.to_lowercase();
-    let entries = fs::read_dir(parent).ok()?;
-    for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().to_lowercase() == target_lower {
-            return Some(entry.path());
-        }
-    }
-    None
+    crate::fs_ci::find_child_ci(parent, target)
 }
 
 // ---------------------------------------------------------------------------

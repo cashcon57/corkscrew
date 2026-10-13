@@ -13,6 +13,7 @@
     ddListManifests,
     ddDownloadDepot,
     ddCheckPartialDownload,
+    ddApplyDepot,
   } from "$lib/api";
   import { listen } from "@tauri-apps/api/event";
   import { onDestroy } from "svelte";
@@ -173,12 +174,9 @@
         );
 
         depotDowngradePhase = "Applying downgrade...";
-        const { invoke } = await import("@tauri-apps/api/core");
-        const filesCopied = await invoke("dd_apply_depot", {
-          gameId: game.game_id,
-          bottleName: (wineCtx(game)?.bottle_name ?? ""),
-          depotDir,
-        });
+        const filesCopied = await ddApplyDepot(
+          game.game_id, (wineCtx(game)?.bottle_name ?? ""), depotDir
+        );
 
         depotDownloading = false;
         depotDowngradePhase = "";

@@ -5,6 +5,7 @@
   import { page } from "$app/state";
   import { currentPage, errorMessage, successMessage, selectedGame, selectedBottle, showError, showSuccess, appVersion, collectionInstallStatus, collectionUninstallStatus, wjInstallStatus, updateReady as updateReadyStore, updateVersion as updateVersionStore, updateNotes as updateNotesStore, updateChecking as updateCheckingStore, updateError as updateErrorStore, setUpdateCheckFn, notificationCount, showNotificationLog, activeProfile, profileList, activeCollection, collectionList, sidebarCollapsed, controllerMode, pendingNxmInstall, nxmInstallComplete, showUninstalledGames, uninstalledGames, nativeMode, nativeModeVisible } from "$lib/stores";
   import { initTheme } from "$lib/theme";
+  import { formatBytes } from "$lib/format";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
   import { getVersion } from "@tauri-apps/api/app";
@@ -1006,13 +1007,6 @@
   // NOTE: Post-install results persist until user explicitly dismisses them.
   // No auto-dismiss — the user clicks "View Mods", "Back to Collections", etc.
 
-  function formatBytes(bytes: number): string {
-    if (bytes === 0) return "0 B";
-    const k = 1024;
-    const sizes = ["B", "KB", "MB", "GB"];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
-  }
 </script>
 
 <div class="app-shell" class:controller-mode={$controllerMode}>

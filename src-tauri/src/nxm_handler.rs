@@ -249,26 +249,12 @@ pub fn parse_corkscrew_url(url: &str) -> Result<CorkscrewAction, String> {
     }
 }
 
-/// Simple percent-decoding for URL path segments.
+/// Percent-decoding for URL path segments. Delegates to the shared decoder
+/// in `oauth.rs`, which accumulates raw bytes and converts via UTF-8 —
+/// the previous byte-as-char version decoded multi-byte UTF-8 (e.g. `%C3%A9`)
+/// as Latin-1 mojibake, breaking non-ASCII bottle names.
 fn urlencoding_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.bytes();
-    while let Some(b) = chars.next() {
-        if b == b'%' {
-            let hi = chars.next().and_then(|c| (c as char).to_digit(16));
-            let lo = chars.next().and_then(|c| (c as char).to_digit(16));
-            if let (Some(h), Some(l)) = (hi, lo) {
-                result.push((h * 16 + l) as u8 as char);
-            } else {
-                result.push('%');
-            }
-        } else if b == b'+' {
-            result.push(' ');
-        } else {
-            result.push(b as char);
-        }
-    }
-    result
+    crate::oauth::percent_decode(s)
 }
 
 /// Outcome of [`route_nxm_game`] — describes how an NXM URL's `game_domain`

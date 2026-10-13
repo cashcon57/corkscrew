@@ -742,27 +742,28 @@ pub struct ScriptExtenderInfo {
 }
 
 /// Known script extenders and their Steam app IDs.
+/// Loader exe + display name come from the shared registry in `games.rs`;
+/// only the Steam app-id mapping lives here.
 pub fn known_script_extenders() -> Vec<ScriptExtenderInfo> {
-    vec![
-        ScriptExtenderInfo {
-            game_id: "skyrimse".into(),
-            display_name: "SKSE64".into(),
-            exe_name: "skse64_loader.exe".into(),
-            steam_app_id: 489830,
-        },
-        ScriptExtenderInfo {
-            game_id: "fallout4".into(),
-            display_name: "F4SE".into(),
-            exe_name: "f4se_loader.exe".into(),
-            steam_app_id: 377160,
-        },
-        ScriptExtenderInfo {
-            game_id: "oblivion".into(),
-            display_name: "OBSE".into(),
-            exe_name: "obse_loader.exe".into(),
-            steam_app_id: 22330,
-        },
+    [
+        ("skyrimse", 489830u32),
+        ("fallout4", 377160),
+        ("oblivion", 22330),
+        ("skyrim", 72850),
+        ("falloutnv", 22380),
+        ("fallout3", 22300),
+        ("starfield", 1716740),
     ]
+    .iter()
+    .filter_map(|&(game_id, steam_app_id)| {
+        Some(ScriptExtenderInfo {
+            game_id: game_id.into(),
+            display_name: crate::games::script_extender_name(game_id)?.into(),
+            exe_name: crate::games::script_extender_loader(game_id)?.into(),
+            steam_app_id,
+        })
+    })
+    .collect()
 }
 
 /// Status of Steam launch options for a game.

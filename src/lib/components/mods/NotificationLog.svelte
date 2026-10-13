@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getNotificationLog, clearNotificationLog } from "$lib/api";
+  import { relativeTime } from "$lib/relativeTime";
   import { showNotificationLog, notificationCount } from "$lib/stores";
   import type { NotificationEntry } from "$lib/types";
 
@@ -52,8 +53,7 @@
   }
 
   function formatTime(iso: string): string {
-    const d = new Date(iso);
-    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return relativeTime(iso) || "—";
   }
 </script>
 

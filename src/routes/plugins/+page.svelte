@@ -256,6 +256,9 @@
 
   const enabledCount = $derived(plugins.filter((p) => p.enabled).length);
 
+  // O(1) filename → load-order index lookup (avoids per-row plugins.indexOf with 3000+ plugins)
+  const pluginIndex = $derived(new Map(plugins.map((p, i) => [p.filename, i])));
+
   // Keyboard shortcuts
   function handlePluginKeydown(e: KeyboardEvent) {
     const isCmd = e.metaKey || e.ctrlKey;
@@ -493,9 +496,9 @@
       </div>
 
       <div class="list-body">
-        {#each filteredPlugins as plugin, i}
+        {#each filteredPlugins as plugin, i (plugin.filename)}
           {@const pluginWarnings = getWarningsForPlugin(plugin.filename)}
-          {@const realIndex = plugins.indexOf(plugin)}
+          {@const realIndex = pluginIndex.get(plugin.filename) ?? -1}
           <div
             class="list-row"
             class:row-disabled={!plugin.enabled}

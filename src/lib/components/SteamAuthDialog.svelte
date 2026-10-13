@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { ddAuthenticate } from "$lib/api";
 
   interface Props {
     onauth: () => void;
@@ -20,11 +20,7 @@
     errorMessage = "";
 
     try {
-      await invoke("dd_authenticate", {
-        username: username.trim(),
-        password: password.trim(),
-        steamGuardCode: null,
-      });
+      await ddAuthenticate(username.trim(), password.trim(), null);
       password = "";
       onauth();
     } catch (e: unknown) {
@@ -51,11 +47,7 @@
     errorMessage = "";
 
     try {
-      await invoke("dd_authenticate", {
-        username: username.trim(),
-        password: password.trim(),
-        steamGuardCode: null,
-      });
+      await ddAuthenticate(username.trim(), password.trim(), null);
       password = "";
       onauth();
     } catch (e: unknown) {
@@ -77,11 +69,7 @@
     errorMessage = "";
 
     try {
-      await invoke("dd_authenticate", {
-        username: username.trim(),
-        password: password.trim(),
-        steamGuardCode: steamGuardCode.trim(),
-      });
+      await ddAuthenticate(username.trim(), password.trim(), steamGuardCode.trim());
       password = "";
       steamGuardCode = "";
       onauth();

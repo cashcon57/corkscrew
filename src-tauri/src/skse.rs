@@ -830,61 +830,13 @@ pub fn check_skse_compatibility(
 // ---------------------------------------------------------------------------
 
 /// Find a file by name (case-insensitive) in a directory (non-recursive).
-#[allow(dead_code)]
 pub fn find_file_case_insensitive(dir: &Path, target: &str) -> Option<PathBuf> {
-    if !dir.is_dir() {
-        return None;
-    }
-
-    let target_lower = target.to_lowercase();
-
-    // Fast path: try exact match.
-    let exact = dir.join(target);
-    if exact.exists() {
-        return Some(exact);
-    }
-
-    // Case-insensitive scan.
-    let entries = fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
-            let name = entry.file_name().to_string_lossy().to_lowercase();
-            if name == target_lower {
-                return Some(entry.path());
-            }
-        }
-    }
-
-    None
+    crate::fs_ci::find_file_ci(dir, target)
 }
 
 /// Find a subdirectory by name (case-insensitive) in a directory.
-#[allow(dead_code)]
 fn find_subdirectory_case_insensitive(dir: &Path, target: &str) -> Option<PathBuf> {
-    if !dir.is_dir() {
-        return None;
-    }
-
-    let target_lower = target.to_lowercase();
-
-    // Fast path: try exact match.
-    let exact = dir.join(target);
-    if exact.is_dir() {
-        return Some(exact);
-    }
-
-    // Case-insensitive scan.
-    let entries = fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-            let name = entry.file_name().to_string_lossy().to_lowercase();
-            if name == target_lower {
-                return Some(entry.path());
-            }
-        }
-    }
-
-    None
+    crate::fs_ci::find_dir_ci(dir, target)
 }
 
 /// Recursively copy the contents of `src` into `dst`.
@@ -2031,8 +1983,11 @@ pub async fn install_engine_fixes_wine(data_dir: &Path) -> Result<bool> {
     }
     let plugins_dir = data_dir.join("SKSE").join("Plugins");
 
+    // Connect timeout matches the blocking twin (install_engine_fixes_wine_blocking):
+    // a stalled GitHub call must not hang a collection install indefinitely.
     let client = reqwest::Client::builder()
         .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| SkseError::Other(format!("HTTP client error: {}", e)))?;
 

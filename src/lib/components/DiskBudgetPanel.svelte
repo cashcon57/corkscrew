@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getDiskBudget } from "$lib/api";
+  import { formatBytes } from "$lib/format";
   import type { DiskBudget } from "$lib/types";
 
   interface Props {
@@ -11,13 +12,6 @@
   let budget = $state<DiskBudget | null>(null);
   let loading = $state(false);
   let expanded = $state(false);
-
-  function formatBytes(bytes: number): string {
-    if (bytes === 0) return "0 B";
-    const units = ["B", "KB", "MB", "GB"];
-    const i = Math.floor(Math.log(bytes) / Math.log(1024));
-    return `${(bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
-  }
 
   const usageRatio = $derived.by(() => {
     if (!budget || budget.available_bytes === 0) return 0;

@@ -35,7 +35,7 @@ pub async fn thunderstore_install_package(
     bottle_name: String,
     state: State<'_, AppState>,
 ) -> Result<InstallReport, String> {
-    let _guard = DeployGuard::new(state.deploy_in_progress.clone(), app.clone());
+    let _guard = DeployGuard::try_acquire(state.deploy_in_progress.clone(), app.clone())?;
     install_one_no_guard(
         state.db.clone(),
         &community,
@@ -130,7 +130,7 @@ pub async fn thunderstore_install_with_dependencies(
         .collect();
     ordered.push(root.full_name.clone());
 
-    let _guard = DeployGuard::new(state.deploy_in_progress.clone(), app.clone());
+    let _guard = DeployGuard::try_acquire(state.deploy_in_progress.clone(), app.clone())?;
     let db = state.db.clone();
     let mut reports = Vec::with_capacity(ordered.len());
     for name in ordered {

@@ -120,6 +120,10 @@ pub struct AppConfig {
     /// launches. This is opt-in because the Wine fork is in active development
     /// and may introduce issues. May fix some Wine-specific crashes in large
     /// modlists.
+    ///
+    /// Read this through [`engine_fixes_wine_enabled`] — never gate on the
+    /// legacy `use_original_engine_fixes` field, which previously caused
+    /// redeploy and launch to disagree about whether the Wine fork is active.
     #[serde(default)]
     pub use_wine_engine_fixes: bool,
 
@@ -284,6 +288,14 @@ fn save_config_inner(config: &AppConfig) -> Result<()> {
 pub fn get_config() -> Result<AppConfig> {
     let _lock = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     get_config_inner()
+}
+
+/// Single source of truth for the "deploy SSEEngineFixesForWine" decision.
+/// Opt-in, default off. Every gate (launch, CLI, redeploy, collection
+/// install) must use this so the deployed state can't depend on which code
+/// path ran last.
+pub fn engine_fixes_wine_enabled() -> bool {
+    get_config().map(|c| c.use_wine_engine_fixes).unwrap_or(false)
 }
 
 /// Persists the given configuration to disk, creating parent directories as

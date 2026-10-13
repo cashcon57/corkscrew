@@ -1276,17 +1276,23 @@ pub fn cli_launch(game_id: &str, bottle_name: &str, use_skse: bool, db: &Arc<Mod
     };
     let game_path = PathBuf::from(&game.game_path);
 
-    let exe_name = if use_skse && game_id == "skyrimse" {
-        "skse64_loader.exe".to_string()
+    // Script-extender loader from the shared registry (games.rs) — covers
+    // every supported extender, not just SKSE64.
+    let extender_exe = if use_skse {
+        games::script_extender_loader(game_id)
     } else {
-        games::with_plugin(game_id, |plugin| {
+        None
+    };
+    let exe_name = match extender_exe {
+        Some(loader) => loader.to_string(),
+        None => games::with_plugin(game_id, |plugin| {
             plugin
                 .executables()
                 .first()
                 .map(|s| s.to_string())
                 .unwrap_or_default()
         })
-        .unwrap_or_default()
+        .unwrap_or_default(),
     };
 
     if exe_name.is_empty() {
@@ -1339,9 +1345,7 @@ pub fn cli_launch(game_id: &str, bottle_name: &str, use_skse: bool, db: &Arc<Mod
             println!("[corkscrew] Fixed {} SKSE plugin DLL(s)", fixes);
         }
 
-        let use_wine_ef = config::get_config()
-            .map(|c| c.use_wine_engine_fixes)
-            .unwrap_or(false);
+        let use_wine_ef = config::engine_fixes_wine_enabled();
 
         if use_wine_ef {
             let ef = skse::fix_engine_fixes_for_wine(&data_dir, db, game_id, bottle_name);

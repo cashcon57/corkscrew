@@ -90,7 +90,7 @@ pub async fn switch_collection_cmd(
     check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
     let db = state.db.clone();
     let app = app.clone();
-    let _guard = DeployGuard::new(state.deploy_in_progress.clone(), app.clone());
+    let _guard = DeployGuard::try_acquire(state.deploy_in_progress.clone(), app.clone())?;
     tokio::task::spawn_blocking(move || {
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
@@ -155,9 +155,8 @@ pub async fn switch_collection_cmd(
         let _ = deploy_journal::complete(&journal_id);
 
         // 5. Sync plugins if Skyrim SE
-        if game_id == "skyrimse" {
-            let _ = crate::sync_plugins_for_game(&game, &bottle);
-        }
+        // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
+        let _ = crate::sync_plugins_for_game(&game, &bottle);
 
         Ok(serde_json::json!({
             "deployed_count": result.deployed_count,
@@ -490,9 +489,8 @@ pub async fn delete_collection_cmd(
             serde_json::json!({ "kind": "redeployCompleted" }),
         );
 
-        if game_id == "skyrimse" {
-            let _ = crate::sync_plugins_for_game(&game, &bottle);
-        }
+        // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
+        let _ = crate::sync_plugins_for_game(&game, &bottle);
 
         // Clean up game-specific framework files deployed outside data_dir.
         // For Hogwarts Legacy: remove UE4SS from Phoenix/Binaries/Win64/ if no
@@ -776,9 +774,8 @@ pub async fn uninstall_wabbajack_modlist(
             serde_json::json!({ "kind": "redeployCompleted" }),
         );
 
-        if game_id == "skyrimse" {
-            let _ = crate::sync_plugins_for_game(&game, &bottle);
-        }
+        // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
+        let _ = crate::sync_plugins_for_game(&game, &bottle);
 
         // Clean up HL-specific framework files (UE4SS) if no remaining mods need them
         if game_id == "hogwartslegacy" {
@@ -905,9 +902,8 @@ pub async fn restore_mod_snapshot(
             serde_json::json!({ "kind": "redeployCompleted" }),
         );
 
-        if game_id == "skyrimse" {
-            let _ = crate::sync_plugins_for_game(&game, &bottle);
-        }
+        // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
+        let _ = crate::sync_plugins_for_game(&game, &bottle);
 
         Ok(serde_json::json!({
             "mods_enabled": result.mods_enabled,
@@ -973,9 +969,8 @@ pub async fn return_to_vanilla(
             0
         };
 
-        if game_id == "skyrimse" {
-            let _ = crate::sync_plugins_for_game(&game, &bottle);
-        }
+        // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
+        let _ = crate::sync_plugins_for_game(&game, &bottle);
 
         Ok(serde_json::json!({
             "mods_disabled": mods_disabled,

@@ -107,18 +107,10 @@ impl GameLockManager {
 /// Known game executable names per game_id.
 /// When the SKSE loader (registered PID) becomes a zombie, we fall back to
 /// checking if any of these executables are still running system-wide.
-fn game_exe_names(game_id: &str) -> &'static [&'static str] {
-    match game_id {
-        "skyrimse" => &["SkyrimSE.exe", "skse64_loader.exe"],
-        "skyrim" => &["TESV.exe", "skse_loader.exe"],
-        "fallout4" => &["Fallout4.exe", "f4se_loader.exe"],
-        "falloutnv" => &["FalloutNV.exe", "nvse_loader.exe"],
-        "fallout3" => &["Fallout3.exe", "fose_loader.exe"],
-        "oblivion" => &["Oblivion.exe", "obse_loader.exe"],
-        "starfield" => &["Starfield.exe", "sfse_loader.exe"],
-        "hogwartslegacy" => &["HogwartsLegacy.exe"],
-        _ => &[], // Unknown game — fall back to PID-only check
-    }
+/// Sourced from the shared table in `games.rs` — unknown games fall back to
+/// a PID-only check.
+fn game_exe_names(game_id: &str) -> Vec<&'static str> {
+    crate::games::known_game_executables(game_id)
 }
 
 /// Check if a game is still running.

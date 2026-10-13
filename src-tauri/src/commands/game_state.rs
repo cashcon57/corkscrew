@@ -276,8 +276,12 @@ pub async fn rollback_mod_version(
     version_id: i64,
     game_id: String,
     bottle_name: String,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ModVersion, String> {
+    crate::check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
+    let _guard =
+        crate::DeployGuard::try_acquire(state.deploy_in_progress.clone(), app.clone())?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         // 1. Update database to mark the target version as current

@@ -1414,19 +1414,35 @@ pub fn uninstall_mod_files(data_dir: &Path, installed_files: &[String]) -> Resul
     let mut removed: Vec<String> = Vec::new();
 
     for rel_path_str in installed_files {
+        // installed_files comes from the database — an external source per
+        // the path-safety invariant. Reject traversal before joining so a
+        // tampered/legacy row can never delete outside data_dir.
+        if !crate::staging::is_safe_relative_path(rel_path_str) {
+            warn!("Uninstall: skipping unsafe relative path: {}", rel_path_str);
+            continue;
+        }
+
         let rel_path = Path::new(rel_path_str);
         let full_path = data_dir.join(rel_path);
+
+        // Never delete through a symlink (checked before the remove, TOCTOU).
+        if let Ok(meta) = fs::symlink_metadata(&full_path) {
+            if meta.file_type().is_symlink() {
+                warn!("Uninstall: skipping symlink: {}", full_path.display());
+                continue;
+            }
+        }
 
         if full_path.exists() {
             fs::remove_file(&full_path)?;
             debug!("Removed: {}", full_path.display());
             removed.push(rel_path_str.clone());
 
-            // Walk upward and prune empty directories.
+            // Walk upward and prune empty directories, never leaving data_dir.
             let mut current = full_path.parent().map(|p| p.to_path_buf());
             while let Some(dir) = current {
-                // Never delete data_dir itself.
-                if dir == data_dir {
+                // Never delete data_dir itself, and never prune outside it.
+                if dir == data_dir || !dir.starts_with(data_dir) {
                     break;
                 }
                 // Only remove if the directory is empty.

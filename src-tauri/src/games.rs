@@ -586,6 +586,57 @@ impl std::ops::Deref for PluginRef {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Game executables + script extenders (single source of truth)
+// ---------------------------------------------------------------------------
+
+/// (game_id, primary game exe, Some((script-extender loader exe, display name))).
+///
+/// Consumed by game launch, the CLI, game-lock liveness checks, and Steam
+/// launch options. This used to be four hand-maintained match tables with
+/// different coverage — e.g. launch knew 3 extenders while the game lock knew
+/// 7, so an NVSE user silently got vanilla FalloutNV.exe. Add new games HERE.
+const GAME_EXECUTABLES: &[(&str, &str, Option<(&str, &str)>)] = &[
+    ("skyrimse", "SkyrimSE.exe", Some(("skse64_loader.exe", "SKSE64"))),
+    ("skyrim", "TESV.exe", Some(("skse_loader.exe", "SKSE"))),
+    ("fallout4", "Fallout4.exe", Some(("f4se_loader.exe", "F4SE"))),
+    ("falloutnv", "FalloutNV.exe", Some(("nvse_loader.exe", "NVSE"))),
+    ("fallout3", "Fallout3.exe", Some(("fose_loader.exe", "FOSE"))),
+    ("oblivion", "Oblivion.exe", Some(("obse_loader.exe", "OBSE"))),
+    ("starfield", "Starfield.exe", Some(("sfse_loader.exe", "SFSE"))),
+    ("hogwartslegacy", "HogwartsLegacy.exe", None),
+];
+
+fn game_executables_entry(game_id: &str) -> Option<&'static (&'static str, &'static str, Option<(&'static str, &'static str)>)> {
+    GAME_EXECUTABLES.iter().find(|(id, ..)| *id == game_id)
+}
+
+/// Script-extender loader executable for a game (e.g. `skse64_loader.exe`).
+pub fn script_extender_loader(game_id: &str) -> Option<&'static str> {
+    game_executables_entry(game_id).and_then(|(_, _, se)| se.map(|(loader, _)| loader))
+}
+
+/// Script-extender display name for a game (e.g. `SKSE64`).
+pub fn script_extender_name(game_id: &str) -> Option<&'static str> {
+    game_executables_entry(game_id).and_then(|(_, _, se)| se.map(|(_, name)| name))
+}
+
+/// All executable names that indicate a game is running: the game exe plus
+/// its script-extender loader. Used by the game-lock liveness fallback —
+/// under Wine the loader becomes a zombie while the game exe runs as a
+/// sibling, so liveness must check both by name.
+pub fn known_game_executables(game_id: &str) -> Vec<&'static str> {
+    game_executables_entry(game_id)
+        .map(|(_, exe, se)| {
+            let mut names = vec![*exe];
+            if let Some((loader, _)) = se {
+                names.push(*loader);
+            }
+            names
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

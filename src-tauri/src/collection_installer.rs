@@ -2814,9 +2814,15 @@ pub async fn install_collection(
 
     // EngineFixes Wine compatibility: disable all patches and deploy Wine-safe replacement
     if game_id == "skyrimse" {
-        let ef_fixes = skse::fix_engine_fixes_for_wine(&data_dir, db, game_id, bottle_name);
-        if ef_fixes > 0 {
-            log::info!("EngineFixes Wine fix: patched {} TOML file(s)", ef_fixes);
+        // TOML patching and DLL deploy are two halves of the same opt-in
+        // feature — gate both on the same flag so install/launch/redeploy
+        // can never disagree about whether the Wine fork is active.
+        let use_wine_ef = crate::config::engine_fixes_wine_enabled();
+        if use_wine_ef {
+            let ef_fixes = skse::fix_engine_fixes_for_wine(&data_dir, db, game_id, bottle_name);
+            if ef_fixes > 0 {
+                log::info!("EngineFixes Wine fix: patched {} TOML file(s)", ef_fixes);
+            }
         }
 
         // Disable Wine-incompatible SKSE plugins (CrashLogger, etc.)
@@ -2827,9 +2833,6 @@ pub async fn install_collection(
         }
 
         // Auto-deploy SSE Engine Fixes for Wine (opt-in via settings)
-        let use_wine_ef = crate::config::get_config()
-            .map(|c| c.use_wine_engine_fixes)
-            .unwrap_or(false);
         if use_wine_ef {
             match skse::install_engine_fixes_wine(&data_dir).await {
                 Ok(true) => log::info!("Auto-deployed SSE Engine Fixes for Wine"),

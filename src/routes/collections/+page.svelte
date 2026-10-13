@@ -2,6 +2,8 @@
   import { onMount, onDestroy, untrack } from "svelte";
   import { goto } from "$app/navigation";
   import { gameToNexusSlug } from "$lib/gameSupport";
+  import { formatBytes as formatSize } from "$lib/format";
+  import { relativeTime } from "$lib/relativeTime";
   import InstructionParser from "$lib/components/InstructionParser.svelte";
   import { selectedGame, showError, showSuccess, collectionInstallStatus, collectionUninstallStatus, modStateVersion, installedMods, collectionList, activeCollection } from "$lib/stores";
   import type { CollectionInfo, CollectionMod, CollectionSearchResult, InstalledMod, NexusModInfo, CollectionRevision } from "$lib/types";
@@ -959,20 +961,7 @@
   }
 
   function formatDate(dateStr: string | null | undefined): string {
-    if (!dateStr) return "Unknown";
-    try {
-      const d = new Date(dateStr);
-      const now = new Date();
-      const diffMs = now.getTime() - d.getTime();
-      const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-      if (diffDays === 0) return "Today";
-      if (diffDays === 1) return "Yesterday";
-      if (diffDays < 30) return `${diffDays} days ago`;
-      if (diffDays < 365) return `${Math.floor(diffDays / 30)} months ago`;
-      return `${Math.floor(diffDays / 365)}y ${Math.floor((diffDays % 365) / 30)}m ago`;
-    } catch {
-      return dateStr;
-    }
+    return relativeTime(dateStr) || "Unknown";
   }
 
   function formatDateFull(dateStr: string | null | undefined): string {
@@ -986,13 +975,6 @@
     } catch {
       return dateStr;
     }
-  }
-
-  function formatSize(bytes: number): string {
-    if (bytes >= 1073741824) return `${(bytes / 1073741824).toFixed(1)} GB`;
-    if (bytes >= 1048576) return `${(bytes / 1048576).toFixed(0)} MB`;
-    if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-    return `${bytes} B`;
   }
 
   function formatNumber(n: number): string {
@@ -1982,6 +1964,11 @@
         game={$selectedGame}
         {account}
         {allDetectedGames}
+        onModInstalled={async () => {
+          // Invalidate the mods page cache so it reloads (loadMods + refreshHealth)
+          // the next time it observes the bump — same mechanism as collection switch.
+          modStateVersion.update((n) => n + 1);
+        }}
       />
     {:else}
       <div class="empty-state">

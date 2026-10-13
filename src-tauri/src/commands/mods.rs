@@ -603,7 +603,7 @@ pub async fn install_mod_cmd(
         }
 
         // Step 5: Sync plugins
-        if game_id == "skyrimse" {
+        if crate::plugins::skyrim_plugins::supports_plugin_order(&game_id) {
             let _ = app.emit(
                 INSTALL_PROGRESS_EVENT,
                 InstallProgress::StepChanged {
@@ -657,6 +657,13 @@ pub async fn uninstall_mod(
 
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
+        crate::auto_snapshot_before_destructive(
+            &db,
+            &game_id,
+            &bottle_name,
+            &format!("Before uninstalling '{}'", installed_mod.name),
+        );
+
         // Disable the mod first so restore_next_winner won't re-deploy its files
         // during undeploy (it checks m.enabled when finding candidates).
         let _ = db.set_enabled(mod_id, false);
@@ -691,9 +698,8 @@ pub async fn uninstall_mod(
         db.remove_mod(mod_id).map_err(|e| e.to_string())?;
 
         // Sync Skyrim plugins if applicable
-        if game_id == "skyrimse" {
-            let _ = crate::sync_plugins_for_game(&game, &bottle);
-        }
+        // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
+        let _ = crate::sync_plugins_for_game(&game, &bottle);
 
         // Post-undeploy hook (e.g. sync Mods.txt for HL Lua mods)
         games::with_plugin(&game_id, |plugin| {
@@ -712,9 +718,11 @@ pub async fn toggle_mod(
     game_id: String,
     bottle_name: String,
     enabled: bool,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
+    let _guard = crate::DeployGuard::try_acquire(state.deploy_in_progress.clone(), app.clone())?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let installed_mod = db
@@ -791,9 +799,8 @@ pub async fn toggle_mod(
             let _ = deploy_journal::complete(&journal_id);
 
             // Sync Skyrim plugins if applicable
-            if game_id == "skyrimse" {
-                let _ = crate::sync_plugins_for_game(&game, &bottle);
-            }
+            // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
+            let _ = crate::sync_plugins_for_game(&game, &bottle);
         }
         // Legacy mods (no staging_path): only the DB flag changes
 
@@ -816,6 +823,7 @@ pub async fn batch_toggle_mods(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
+    let _guard = crate::DeployGuard::try_acquire(state.deploy_in_progress.clone(), app.clone())?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
@@ -884,7 +892,7 @@ pub async fn batch_toggle_mods(
                 }
             }
 
-            if game_id == "skyrimse" {
+            if crate::plugins::skyrim_plugins::supports_plugin_order(&game_id) {
                 let _ = app.emit(
                     "bulk-operation-progress",
                     serde_json::json!({
@@ -990,9 +998,8 @@ pub async fn batch_toggle_mods(
                 count += 1;
             }
 
-            if game_id == "skyrimse" {
-                let _ = crate::sync_plugins_for_game(&game, &bottle);
-            }
+            // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
+            let _ = crate::sync_plugins_for_game(&game, &bottle);
 
             if errors.is_empty() {
                 Ok(format!("{}", count))
@@ -1197,9 +1204,8 @@ pub async fn download_from_nexus(
         }
         let _ = db.set_deploy_target_for_mod(mod_id, deploy_target_str);
 
-        if game_id == "skyrimse" {
-            let _ = crate::sync_plugins_for_game(&game, &bottle);
-        }
+        // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
+        let _ = crate::sync_plugins_for_game(&game, &bottle);
 
         // Auto-delete archive if setting is enabled
         if cfg
@@ -1863,13 +1869,9 @@ pub async fn launch_game_cmd(
     // 2. Plugin's launch_executable() for games with launcher stubs (e.g. HL)
     // 3. Plugin's detected exe_path
     // 4. Fallback: search game root for executable name
-    // Map game IDs to their script extender loader executables
-    let script_extender_exe = match game_id.as_str() {
-        "skyrimse" => Some("skse64_loader.exe"),
-        "fallout4" => Some("f4se_loader.exe"),
-        "oblivion" => Some("obse_loader.exe"),
-        _ => None,
-    };
+    // Script-extender loader from the shared registry (games.rs) — covers
+    // SKSE64/SKSE/F4SE/NVSE/FOSE/OBSE/SFSE, not just the Skyrim family.
+    let script_extender_exe = games::script_extender_loader(&game_id);
 
     let exe_path = if use_skse && script_extender_exe.is_some() {
         let exe_name = script_extender_exe.unwrap();
@@ -2073,9 +2075,7 @@ pub async fn launch_game_cmd(
         log::info!("Pre-launch: SKSE plugin conflict fix ({} swapped, {}ms)", skse_fixes, t.elapsed().as_millis());
 
         // Check if user wants Wine fork of Engine Fixes
-        let use_wine_ef = config::get_config()
-            .map(|c| c.use_wine_engine_fixes)
-            .unwrap_or(false);
+        let use_wine_ef = config::engine_fixes_wine_enabled();
 
         if use_wine_ef {
             // EngineFixes Wine compatibility: disable all patches (they crash under Wine)
@@ -2434,27 +2434,51 @@ pub async fn downgrade_skyrim(
         return Err("Downgrade is only available for Skyrim SE".to_string());
     }
 
-    let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
+    let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
     let game_path = PathBuf::from(&game.game_path);
-    let download_dir = config::get_config()
-        .ok()
-        .and_then(|c| c.download_dir.map(PathBuf::from))
-        .unwrap_or_else(config::downloads_dir);
 
-    // Create a downgrade copy of the game files
-    let downgrade_dir = download_dir
-        .parent()
-        .unwrap_or(&download_dir)
-        .join("downgraded_games");
-    let downgrade_path =
-        downgrader::create_downgrade_copy(&game_path, &downgrade_dir).map_err(|e| e.to_string())?;
+    let status = {
+        let game_id = game_id.clone();
+        let game_path = game_path.clone();
+        tokio::task::spawn_blocking(move || -> Result<DowngradeStatus, String> {
+            // A cached v1.5.97 exe can be swapped in directly.
+            let cached = downgrader::list_cached_versions(&game_id);
+            if let Some(se) = cached.iter().find(|c| c.version.starts_with("1.5.97")) {
+                let version = se.version.clone();
+                return downgrader::swap_to_version(&game_path, &game_id, &version)
+                    .map_err(|e| e.to_string());
+            }
 
-    // Store downgrade path in config
-    let config_key = format!("downgrade:{}:{}", game_id, bottle_name);
-    let _ = config::set_config_value(&config_key, &downgrade_path.to_string_lossy());
+            // A depot download already on disk can be applied.
+            for steam_dir in downgrader::depot_search_dirs(&bottle.path) {
+                if let Some(depot_exe) = downgrader::check_depot_downloaded(
+                    &steam_dir,
+                    downgrader::SKYRIM_APP_ID,
+                    downgrader::SKYRIM_DEPOT_ID,
+                ) {
+                    return downgrader::apply_depot_downgrade(&game_path, &depot_exe, &game_id)
+                        .map_err(|e| e.to_string());
+                }
+            }
 
-    // Return status (actual USSEDP patching is a future enhancement)
-    downgrader::detect_skyrim_version(&downgrade_path).map_err(|e| e.to_string())
+            Err("NEEDS_DEPOT_DOWNLOAD".to_string())
+        })
+        .await
+        .map_err(crate::format_join_error)??
+    };
+
+    // The v1.5.97 exe needs the matching SKSE build.
+    if status.is_downgraded && skse::get_skse_preference(&game_id, &bottle_name) {
+        match skse::install_skse_auto(&game_path, &status.current_version).await {
+            Ok(skse_status) => log::info!(
+                "Auto-reinstalled SKSE after downgrade: {:?}",
+                skse_status.version
+            ),
+            Err(e) => log::warn!("SKSE auto-reinstall failed after downgrade: {}", e),
+        }
+    }
+
+    Ok(status)
 }
 
 #[tauri::command]
@@ -2486,15 +2510,17 @@ pub async fn start_depot_download(game_id: String) -> Result<bool, String> {
 pub async fn check_depot_ready(game_id: String, bottle_name: String) -> Result<Option<String>, String> {
     tokio::task::spawn_blocking(move || {
         let (bottle, _, _) = resolve_game(&game_id, &bottle_name)?;
-        let steam_dir = downgrader::find_steam_dir(&bottle.path)
-            .ok_or_else(|| "Steam directory not found in bottle".to_string())?;
 
-        Ok(downgrader::check_depot_downloaded(
-            &steam_dir,
-            downgrader::SKYRIM_APP_ID,
-            downgrader::SKYRIM_DEPOT_ID,
-        )
-        .map(|p| p.to_string_lossy().into_owned()))
+        Ok(downgrader::depot_search_dirs(&bottle.path)
+            .into_iter()
+            .find_map(|steam_dir| {
+                downgrader::check_depot_downloaded(
+                    &steam_dir,
+                    downgrader::SKYRIM_APP_ID,
+                    downgrader::SKYRIM_DEPOT_ID,
+                )
+            })
+            .map(|p| p.to_string_lossy().into_owned()))
     })
     .await
     .map_err(crate::format_join_error)?
@@ -2508,17 +2534,20 @@ pub async fn apply_downgrade_cmd(
     tokio::task::spawn_blocking(move || {
         let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
         let game_path = PathBuf::from(&game.game_path);
-        let steam_dir = downgrader::find_steam_dir(&bottle.path)
-            .ok_or_else(|| "Steam directory not found in bottle".to_string())?;
 
-        let depot_exe = downgrader::check_depot_downloaded(
-            &steam_dir,
-            downgrader::SKYRIM_APP_ID,
-            downgrader::SKYRIM_DEPOT_ID,
-        )
-        .ok_or_else(|| {
-            "Depot files not downloaded yet. Run download_depot in Steam console first.".to_string()
-        })?;
+        let depot_exe = downgrader::depot_search_dirs(&bottle.path)
+            .into_iter()
+            .find_map(|steam_dir| {
+                downgrader::check_depot_downloaded(
+                    &steam_dir,
+                    downgrader::SKYRIM_APP_ID,
+                    downgrader::SKYRIM_DEPOT_ID,
+                )
+            })
+            .ok_or_else(|| {
+                "Depot files not downloaded yet. Run download_depot in Steam console first."
+                    .to_string()
+            })?;
 
         downgrader::apply_depot_downgrade(&game_path, &depot_exe, &game_id)
             .map_err(|e| e.to_string())

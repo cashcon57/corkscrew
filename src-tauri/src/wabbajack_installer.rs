@@ -13,7 +13,7 @@ use crate::database::ModDatabase;
 use crate::nexus;
 use crate::oauth;
 use crate::wabbajack_directives::DirectiveProcessor;
-use crate::wabbajack_downloader::{verify_xxhash64, WjDownloader};
+use crate::wabbajack_downloader::{verify_xxhash64_async, WjDownloader};
 use crate::wabbajack_types::*;
 
 use serde::Serialize;
@@ -1000,7 +1000,10 @@ pub async fn install_wabbajack_modlist(
             let dest = download_dir.join(sanitize_for_filename(&archive_name));
             if dest.exists() && extract_dest.exists() {
                 // Both download and extraction present — skip entirely
-                if verify_xxhash64(&dest, &archive.hash).is_ok() {
+                if verify_xxhash64_async(dest.clone(), archive.hash.clone())
+                    .await
+                    .is_ok()
+                {
                     emit_progress(
                         app,
                         &WjInstallProgressEvent::DownloadSkipped {
@@ -1034,7 +1037,11 @@ pub async fn install_wabbajack_modlist(
         // Check shared cache
         if let Ok(Some(cached_path)) = db.find_download_by_xxhash(&hash_str) {
             let cached = PathBuf::from(&cached_path);
-            if cached.exists() && verify_xxhash64(&cached, &archive.hash).is_ok() {
+            if cached.exists()
+                && verify_xxhash64_async(cached.clone(), archive.hash.clone())
+                    .await
+                    .is_ok()
+            {
                 // Have download cached but still need extraction — check if extracted dir exists
                 if extract_dest.exists() {
                     emit_progress(
@@ -1123,13 +1130,20 @@ pub async fn install_wabbajack_modlist(
             // Check if download already exists (cached but needs extraction)
             let checkpoint_file = checkpoint_dir_c
                 .join(format!("{}.done", sanitize_for_filename(&hash_str)));
-            let cached_download = db_c
+            let mut cached_download = db_c
                 .find_download_by_xxhash(&hash_str)
                 .ok()
                 .flatten()
                 .map(PathBuf::from)
-                .filter(|p| p.exists())
-                .filter(|p| verify_xxhash64(p, &archive.hash).is_ok());
+                .filter(|p| p.exists());
+            if let Some(ref p) = cached_download {
+                if verify_xxhash64_async(p.clone(), archive.hash.clone())
+                    .await
+                    .is_err()
+                {
+                    cached_download = None;
+                }
+            }
 
             let download_path = if let Some(cached) = cached_download {
                 // Already have a valid download — skip downloading
@@ -1170,7 +1184,7 @@ pub async fn install_wabbajack_modlist(
                 match dl_result {
                     Ok(path) => {
                         // Verify hash
-                        match verify_xxhash64(&path, &archive.hash) {
+                        match verify_xxhash64_async(path.clone(), archive.hash.clone()).await {
                             Ok(()) => {
                                 emit_progress(
                                     &app_c,
@@ -1222,8 +1236,10 @@ pub async fn install_wabbajack_modlist(
                 }
             };
 
-            // If download failed, skip extraction
-            let download_path = match download_path {
+            // If download failed, skip extraction.
+            // `mut` because the extraction-retry path re-downloads and must
+            // extract the NEW file, not the original (possibly deleted) path.
+            let mut download_path = match download_path {
                 Some(p) => p,
                 None => return,
             };
@@ -1409,9 +1425,22 @@ pub async fn install_wabbajack_modlist(
                             e
                         );
                         if attempt < max_extract_retries {
-                            // Clean up failed extraction dir and archive, then retry
+                            // Clean up failed extraction dir, then retry.
                             let _ = tokio::fs::remove_dir_all(&extract_dest).await;
-                            let _ = tokio::fs::remove_file(&download_path).await;
+                            // Only delete the corrupt archive if it lives in
+                            // THIS install's download dir. A path resolved via
+                            // the shared download registry may be another
+                            // install's cache — deleting it would destroy a
+                            // file other installs depend on.
+                            if download_path.starts_with(task_downloader.download_dir()) {
+                                let _ = tokio::fs::remove_file(&download_path).await;
+                            } else {
+                                log::warn!(
+                                    "Extraction failed for shared-cache archive {} — \
+                                     re-downloading locally without deleting the cache copy",
+                                    download_path.display()
+                                );
+                            }
                             // Re-download
                             log::info!(
                                 "Re-downloading '{}' after extraction failure (attempt {})",
@@ -1424,7 +1453,12 @@ pub async fn install_wabbajack_modlist(
                                 .download_archive(&app_c, &archive, install_id, &db_c)
                                 .await
                             {
-                                Ok(_new_path) => continue, // retry extraction
+                                Ok(new_path) => {
+                                    // Extract the freshly downloaded file, not
+                                    // the stale (possibly deleted) old path.
+                                    download_path = new_path;
+                                    continue;
+                                }
                                 Err(dl_err) => {
                                     let err_msg = format!(
                                         "Re-download failed for '{}': {}",
@@ -1950,34 +1984,6 @@ pub async fn install_wabbajack_modlist(
 // Tauri commands
 // ---------------------------------------------------------------------------
 
-/// Tauri command: Run pre-flight check for a Wabbajack modlist.
-///
-/// Returns a WjPreflightReport with disk space, archive counts, and any
-/// issues that would prevent installation.
-#[tauri::command]
-pub(crate) async fn wabbajack_preflight_cmd(
-    app: AppHandle,
-    state: tauri::State<'_, crate::AppState>,
-    wabbajack_path: String,
-    game_id: String,
-    bottle_name: String,
-    install_dir: String,
-    download_dir: String,
-) -> Result<WjPreflightReport, String> {
-    let db = state.db.clone();
-    preflight_check(
-        &app,
-        &db,
-        Path::new(&wabbajack_path),
-        &game_id,
-        &bottle_name,
-        Path::new(&install_dir),
-        Path::new(&download_dir),
-    )
-    .await
-    .map_err(|e| e.to_string())
-}
-
 /// Tauri command: Start a Wabbajack modlist installation.
 ///
 /// Spawns the installation in a background tokio task and returns the
@@ -1993,6 +1999,14 @@ pub(crate) async fn install_wabbajack_modlist_cmd(
     install_dir: String,
     download_dir: String,
 ) -> Result<i64, String> {
+    // The install pipeline deploys into the game directory (step 7), so it
+    // must respect the same exclusivity rules as any other deploy: refuse
+    // while the game is running, and hold the deploy flag for the whole
+    // install so manual deploys can't interleave with it.
+    crate::check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
+    let deploy_guard =
+        crate::DeployGuard::try_acquire(state.deploy_in_progress.clone(), app.clone())?;
+
     let db = state.db.clone();
     let wj_path = PathBuf::from(&wabbajack_path);
     let inst_dir = PathBuf::from(&install_dir);
@@ -2024,10 +2038,13 @@ pub(crate) async fn install_wabbajack_modlist_cmd(
         .unwrap()
         .insert(install_id, cancel_token.clone());
 
-    // Spawn the installation task
+    // Spawn the installation task. The DeployGuard moves into the task so
+    // the deploy flag stays held (and is RAII-cleared) for the install's
+    // entire lifetime, including panic/cancel paths.
     let app_clone = app.clone();
     let cancel_clone = cancel_token;
     tokio::spawn(async move {
+        let _deploy_guard = deploy_guard;
         let result = install_wabbajack_modlist(
             &app_clone,
             &db,
