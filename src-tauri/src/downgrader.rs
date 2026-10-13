@@ -119,55 +119,7 @@ pub fn detect_skyrim_version(game_path: &Path) -> Result<DowngradeStatus> {
 
     info!("Detecting Skyrim version from: {}", exe_path.display());
 
-    // Get file metadata for size-based heuristic.
-    let metadata = fs::metadata(&exe_path)?;
-    let file_size = metadata.len();
-
-    debug!("SkyrimSE.exe file size: {} bytes", file_size);
-
-    // Fast path: check file size first.
-    let (current_version, is_downgraded) = if file_size == SIZE_SE_1_5_97 {
-        // Exact size match — very likely v1.5.97, but verify with hash.
-        let hash = compute_sha256(&exe_path)?;
-        if hash == HASH_SE_1_5_97 {
-            info!("Confirmed Skyrim SE v1.5.97 via SHA-256");
-            ("1.5.97".to_string(), true)
-        } else {
-            // Same size but different hash — unusual, treat as unknown SE-era build.
-            info!(
-                "SkyrimSE.exe matches v1.5.97 size but has unexpected hash: {}",
-                hash
-            );
-            ("1.5.97 (unverified)".to_string(), true)
-        }
-    } else if file_size > SIZE_AE_THRESHOLD {
-        // Clearly an AE build — the executable is much larger.
-        let hash = compute_sha256(&exe_path)?;
-        let version = identify_ae_version(&hash, file_size);
-        info!("Detected Anniversary Edition: {}", version);
-        (version, false)
-    } else if file_size < SIZE_SE_1_5_97 {
-        // Smaller than expected — could be an older SE build or something unusual.
-        let hash = compute_sha256(&exe_path)?;
-        if hash == HASH_SE_1_5_97 {
-            ("1.5.97".to_string(), true)
-        } else {
-            info!(
-                "SkyrimSE.exe is smaller than expected ({} bytes, hash: {})",
-                file_size, hash
-            );
-            (format!("Unknown ({}B)", file_size), false)
-        }
-    } else {
-        // Between SE and AE sizes — hash to determine.
-        let hash = compute_sha256(&exe_path)?;
-        if hash == HASH_SE_1_5_97 {
-            ("1.5.97".to_string(), true)
-        } else {
-            let version = identify_ae_version(&hash, file_size);
-            (version, false)
-        }
-    };
+    let (current_version, is_downgraded) = classify_exe(&exe_path)?;
 
     // Check for existing downgrade copy path.
     let downgrade_path = get_downgrade_path_from_config(game_path);
@@ -178,6 +130,58 @@ pub fn detect_skyrim_version(game_path: &Path) -> Result<DowngradeStatus> {
         is_downgraded,
         downgrade_path: downgrade_path.map(|p| p.to_string_lossy().into_owned()),
     })
+}
+
+/// Read the FileVersion (e.g. "1.5.97") from a PE executable's version resource.
+///
+/// This is authoritative — Bethesda stamps every SkyrimSE.exe with its build
+/// number, so it works for versions we have no hash table entry for, and for
+/// GOG/Epic builds whose hashes differ from the Steam depot.
+fn pe_file_version(exe_path: &Path) -> Option<String> {
+    use pelite::pe64::{Pe, PeFile};
+
+    let bytes = fs::read(exe_path).ok()?;
+    let pe = PeFile::from_bytes(&bytes).ok()?;
+    let resources = pe.resources().ok()?;
+    let info = resources.version_info().ok()?;
+    let fixed = info.fixed()?;
+    let v = fixed.dwFileVersion;
+    Some(format!("{}.{}.{}", v.Major, v.Minor, v.Patch))
+}
+
+/// Classify a SkyrimSE.exe as (version string, is at target SE version).
+///
+/// Primary: the PE version resource. Fallback: size/hash heuristics for
+/// executables whose version resource cannot be read.
+fn classify_exe(exe_path: &Path) -> Result<(String, bool)> {
+    if let Some(version) = pe_file_version(exe_path) {
+        let is_se = version.starts_with(TARGET_VERSION);
+        info!("SkyrimSE.exe PE version resource: {}", version);
+        return Ok((version, is_se));
+    }
+
+    // Fallback: file size + hash heuristics.
+    let metadata = fs::metadata(exe_path)?;
+    let file_size = metadata.len();
+    debug!("SkyrimSE.exe file size: {} bytes", file_size);
+
+    let hash = compute_sha256(exe_path)?;
+    if hash == HASH_SE_1_5_97 || file_size == SIZE_SE_1_5_97 {
+        return Ok(("1.5.97".to_string(), true));
+    }
+    if file_size > SIZE_AE_THRESHOLD {
+        let version = identify_ae_version(&hash, file_size);
+        info!("Detected Anniversary Edition: {}", version);
+        return Ok((version, false));
+    }
+    if file_size < SIZE_SE_1_5_97 {
+        info!(
+            "SkyrimSE.exe is smaller than expected ({} bytes, hash: {})",
+            file_size, hash
+        );
+        return Ok((format!("Unknown ({}B)", file_size), false));
+    }
+    Ok((identify_ae_version(&hash, file_size), false))
 }
 
 /// Identify a specific AE version from its hash, or return a generic label.
@@ -233,8 +237,12 @@ fn compute_sha256(path: &Path) -> Result<String> {
 
 /// Steam depot constants for Skyrim SE downgrade.
 pub const SKYRIM_APP_ID: u32 = 489830;
+/// Depot 489833 is "Skyrim Special Edition exe" — it contains only SkyrimSE.exe.
 pub const SKYRIM_DEPOT_ID: u32 = 489833;
-pub const SKYRIM_SE_MANIFEST: &str = "4063321535627579835";
+/// Manifest for the v1.5.97.0 executable in depot 489833 (the Nov 20 2019
+/// build, the last before AE). This is the manifest every community
+/// downgrade guide uses with `download_depot 489830 489833 <manifest>`.
+pub const SKYRIM_SE_MANIFEST: &str = "2289561010626853674";
 
 /// A cached game executable version.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -276,22 +284,10 @@ fn version_cache_dir(game_id: &str) -> PathBuf {
 pub fn cache_current_version(game_path: &Path, game_id: &str) -> Result<CachedVersion> {
     let exe_path = find_skyrim_exe(game_path)?;
     let hash = compute_sha256(&exe_path)?;
-    let metadata = fs::metadata(&exe_path)?;
-    let file_size = metadata.len();
-
-    // Determine version string
-    let version = if hash == HASH_SE_1_5_97 || file_size == SIZE_SE_1_5_97 {
-        "1.5.97".to_string()
-    } else {
-        identify_ae_version(&hash, file_size)
-    };
+    let (version, is_se) = classify_exe(&exe_path)?;
 
     // Determine cache subdirectory
-    let subdir = if version == "1.5.97" || version == "1.5.97 (unverified)" {
-        "se"
-    } else {
-        "ae"
-    };
+    let subdir = if is_se { "se" } else { "ae" };
 
     let cache_dir = version_cache_dir(game_id).join(subdir).join(&version);
     fs::create_dir_all(&cache_dir)?;
@@ -405,17 +401,12 @@ pub fn import_depot_exe(depot_exe_path: &Path, game_id: &str) -> Result<CachedVe
     }
 
     let hash = compute_sha256(depot_exe_path)?;
-    let metadata = fs::metadata(depot_exe_path)?;
-    let file_size = metadata.len();
 
     // Determine version — depot download should be 1.5.97
-    let version = if hash == HASH_SE_1_5_97 || file_size == SIZE_SE_1_5_97 {
-        "1.5.97".to_string()
-    } else {
-        identify_ae_version(&hash, file_size)
-    };
+    let (version, is_se) = classify_exe(depot_exe_path)?;
+    let subdir = if is_se { "se" } else { "ae" };
 
-    let cache_dir = version_cache_dir(game_id).join("se").join(&version);
+    let cache_dir = version_cache_dir(game_id).join(subdir).join(&version);
     fs::create_dir_all(&cache_dir)?;
 
     let dest = cache_dir.join("SkyrimSE.exe");
@@ -456,6 +447,33 @@ pub fn find_steam_dir(bottle_path: &Path) -> Option<PathBuf> {
     }
 
     None
+}
+
+/// All Steam installations whose `steamapps/content/` may hold a depot
+/// download: the bottle's Windows Steam plus the host's native Steam.
+///
+/// The `steam://open/console` automation opens the NATIVE Steam client, so
+/// its `download_depot` output lands in the native Steam directory — while a
+/// user pasting the command into the bottle's Windows Steam produces files
+/// inside the bottle. Both must be searched.
+pub fn depot_search_dirs(bottle_path: &Path) -> Vec<PathBuf> {
+    let mut dirs_found = Vec::new();
+    if let Some(dir) = find_steam_dir(bottle_path) {
+        dirs_found.push(dir);
+    }
+    if let Some(home) = dirs::home_dir() {
+        let native_candidates = [
+            home.join("Library/Application Support/Steam"), // macOS
+            home.join(".steam/steam"),                      // Linux
+            home.join(".local/share/Steam"),                // Linux
+        ];
+        for candidate in native_candidates {
+            if candidate.exists() {
+                dirs_found.push(candidate);
+            }
+        }
+    }
+    dirs_found
 }
 
 /// Get the expected depot download path after `download_depot` completes.
@@ -503,8 +521,11 @@ pub fn get_depot_download_info(game_id: &str, bottle_path: &Path) -> Result<Depo
         ));
     }
 
-    let steam_dir = find_steam_dir(bottle_path).ok_or_else(|| {
-        DowngraderError::Other("Steam directory not found in the bottle".to_string())
+    let steam_dir = depot_search_dirs(bottle_path).into_iter().next().ok_or_else(|| {
+        DowngraderError::Other(
+            "No Steam installation found (checked the bottle and the native Steam client)"
+                .to_string(),
+        )
     })?;
 
     let expected_path = get_depot_download_path(&steam_dir, SKYRIM_APP_ID, SKYRIM_DEPOT_ID);

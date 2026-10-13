@@ -88,6 +88,10 @@ pub struct LaunchResult {
 const CROSSOVER_WINE: &str =
     "/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/wine";
 
+/// Path from a CrossOver.app bundle root to its Wine binary.
+#[cfg(target_os = "macos")]
+const CROSSOVER_WINE_SUFFIX: &str = "Contents/SharedSupport/CrossOver/bin/wine";
+
 /// Base container path for Whisky on macOS.
 #[cfg(target_os = "macos")]
 const WHISKY_CONTAINER: &str = "Library/Containers/com.isaacmarovitz.Whisky";
@@ -95,20 +99,33 @@ const WHISKY_CONTAINER: &str = "Library/Containers/com.isaacmarovitz.Whisky";
 /// Attempt to locate the Wine binary for a CrossOver bottle.
 #[cfg(target_os = "macos")]
 fn find_crossover_wine() -> Option<PathBuf> {
-    let path = PathBuf::from(CROSSOVER_WINE);
-    if path.exists() {
-        Some(path)
-    } else {
-        // Also check a user-local install via Homebrew Cask / alternate location.
-        let alt = PathBuf::from("/opt/homebrew/Caskroom/crossover")
-            .join("bin")
-            .join("wine");
-        if alt.exists() {
-            Some(alt)
-        } else {
-            None
+    // System-wide and per-user Applications folders.
+    let mut bundles = vec![PathBuf::from("/Applications/CrossOver.app")];
+    if let Some(home) = dirs::home_dir() {
+        bundles.push(home.join("Applications").join("CrossOver.app"));
+    }
+    for bundle in &bundles {
+        let wine = bundle.join(CROSSOVER_WINE_SUFFIX);
+        if wine.exists() {
+            return Some(wine);
         }
     }
+
+    // Fall back to a Spotlight lookup by bundle identifier, which finds
+    // CrossOver wherever the user moved it.
+    let output = std::process::Command::new("mdfind")
+        .arg("kMDItemCFBundleIdentifier == 'com.codeweavers.CrossOver'")
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let wine = Path::new(line.trim()).join(CROSSOVER_WINE_SUFFIX);
+        if wine.exists() {
+            return Some(wine);
+        }
+    }
+
+    None
 }
 
 /// Attempt to locate a Wine binary shipped inside the Whisky container.
@@ -186,7 +203,10 @@ fn resolve_wine_binary(bottle: &Bottle) -> Result<WineCommand> {
         "CrossOver" => {
             let wine = find_crossover_wine().ok_or_else(|| LauncherError::WineNotFound {
                 bottle_source: source.to_string(),
-                tried: CROSSOVER_WINE.to_string(),
+                tried: format!(
+                    "{}, ~/Applications/CrossOver.app, and Spotlight (com.codeweavers.CrossOver)",
+                    CROSSOVER_WINE
+                ),
             })?;
             // Validate bottle name with a whitelist of safe characters.
             // CrossOver bottle names are directory names (e.g. "Skyrim: Anniversary Edition").
