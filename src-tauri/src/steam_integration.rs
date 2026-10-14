@@ -778,6 +778,109 @@ pub struct LaunchOptionsStatus {
     pub current_options: Option<String>,
 }
 
+/// Split a text-VDF line into its key/value tokens, following Valve's
+/// KeyValues tokenizer rules:
+///
+/// - Quoted tokens run to the next unescaped `"` (or end of line) and have
+///   escapes decoded. Steam writes `"` as `\"` and `\` as `\\` inside values,
+///   so Proton launch options such as `WINEDLLOVERRIDES="winhttp=n,b" %command%`
+///   are stored as `"WINEDLLOVERRIDES=\"winhttp=n,b\" %command%"`.
+/// - Unquoted tokens run to whitespace, `"`, `{` or `}` and are taken verbatim.
+/// - `//` at the start of a token begins a comment running to end of line, so
+///   commented-out `"LaunchOptions"` lines are never mistaken for settings.
+/// - `{` and `}` are structural and are not returned as tokens.
+fn vdf_line_tokens(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut chars = line.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        match c {
+            c if c.is_whitespace() || c == '{' || c == '}' => {
+                chars.next();
+            }
+            '/' if line_rest_starts_with_comment(&chars) => break,
+            '"' => {
+                chars.next();
+                let mut token = String::new();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => break,
+                        '\\' => match chars.next() {
+                            Some(esc) => match unescape_vdf_char(esc) {
+                                Some(decoded) => token.push(decoded),
+                                // Not a Valve escape: keep the backslash literally.
+                                None => {
+                                    token.push('\\');
+                                    token.push(esc);
+                                }
+                            },
+                            None => token.push('\\'),
+                        },
+                        _ => token.push(c),
+                    }
+                }
+                tokens.push(token);
+            }
+            _ => {
+                let mut token = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c.is_whitespace() || matches!(c, '"' | '{' | '}') {
+                        break;
+                    }
+                    token.push(c);
+                    chars.next();
+                }
+                tokens.push(token);
+            }
+        }
+    }
+    tokens
+}
+
+fn line_rest_starts_with_comment(chars: &std::iter::Peekable<std::str::Chars<'_>>) -> bool {
+    let mut ahead = chars.clone();
+    ahead.next() == Some('/') && ahead.next() == Some('/')
+}
+
+/// Decode the character after a `\` in a quoted text-VDF token.
+///
+/// This is Valve's C-string escape table (`s_CStringCharConversion` in
+/// tier1/utlbuffer.cpp, mirrored by ValvePython/vdf's `_unescape_char_map`):
+/// `\n \t \v \b \r \f \a \\ \? \' \"`. Any other sequence is not an escape and
+/// returns `None`.
+fn unescape_vdf_char(c: char) -> Option<char> {
+    Some(match c {
+        'n' => '\n',
+        't' => '\t',
+        'v' => '\u{0B}',
+        'b' => '\u{08}',
+        'r' => '\r',
+        'f' => '\u{0C}',
+        'a' => '\u{07}',
+        '\\' | '?' | '\'' | '"' => c,
+        _ => return None,
+    })
+}
+
+/// Escape a string for use as a quoted text-VDF value.
+///
+/// Matches Valve's KeyValues writer (`\` → `\\`, `"` → `\"`), and additionally
+/// escapes line breaks and tabs so a value can never split the line-oriented
+/// localconfig.vdf; Valve's reader decodes those escapes back.
+fn escape_vdf_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Parse a text-format VDF file into nested sections.
 /// Steam's localconfig.vdf uses indented key-value pairs with quoted strings.
 ///
@@ -814,16 +917,13 @@ fn parse_text_vdf_launch_options(content: &str, app_id: u32) -> Option<String> {
         }
 
         // Parse quoted key-value pairs: "key" "value" or just "key"
-        let parts: Vec<&str> = trimmed
-            .split('"')
-            .filter(|s| !s.trim().is_empty())
-            .collect();
+        let parts = vdf_line_tokens(trimmed);
 
         if parts.is_empty() {
             continue;
         }
 
-        let key = parts[0];
+        let key = parts[0].as_str();
 
         // Track section entry
         if key.eq_ignore_ascii_case("apps") || key == "Apps" {
@@ -834,7 +934,7 @@ fn parse_text_vdf_launch_options(content: &str, app_id: u32) -> Option<String> {
             app_depth = depth;
         } else if in_target_app && key.eq_ignore_ascii_case("LaunchOptions") {
             if parts.len() >= 2 {
-                return Some(parts[1].to_string());
+                return Some(parts[1].clone());
             }
             return Some(String::new());
         }
@@ -886,17 +986,14 @@ fn set_text_vdf_launch_options(
             continue;
         }
 
-        let parts: Vec<&str> = trimmed
-            .split('"')
-            .filter(|s| !s.trim().is_empty())
-            .collect();
+        let parts = vdf_line_tokens(&trimmed);
 
         if parts.is_empty() {
             prev_was_app_id = false;
             continue;
         }
 
-        let key = parts[0];
+        let key = parts[0].as_str();
 
         if key.eq_ignore_ascii_case("apps") || key == "Apps" {
             in_apps = true;
@@ -910,7 +1007,11 @@ fn set_text_vdf_launch_options(
                 // Replace existing line
                 let indent = lines[i].len() - lines[i].trim_start().len();
                 let indent_str: String = std::iter::repeat(' ').take(indent).collect();
-                lines[i] = format!("{}\"LaunchOptions\"\t\t\"{}\"", indent_str, opts);
+                lines[i] = format!(
+                    "{}\"LaunchOptions\"\t\t\"{}\"",
+                    indent_str,
+                    escape_vdf_value(opts)
+                );
             } else {
                 // Remove the line
                 lines.remove(i);
@@ -931,7 +1032,11 @@ fn set_text_vdf_launch_options(
                 let indent_str: String = std::iter::repeat(' ').take(indent + 1).collect();
                 lines.insert(
                     close_line,
-                    format!("{}\"LaunchOptions\"\t\t\"{}\"", indent_str, opts),
+                    format!(
+                        "{}\"LaunchOptions\"\t\t\"{}\"",
+                        indent_str,
+                        escape_vdf_value(opts)
+                    ),
                 );
             } else {
                 anyhow::bail!(
@@ -1175,6 +1280,222 @@ mod tests {
         // Unknown app
         let result3 = parse_text_vdf_launch_options(vdf, 999999);
         assert_eq!(result3, None);
+    }
+
+    /// Steam escapes quotes inside values; common Proton launch options
+    /// (DLL overrides, the bash `exec` SKSE trick) must not be truncated.
+    #[test]
+    fn test_parse_text_vdf_launch_options_escaped_quotes() {
+        let vdf = r#""UserLocalConfigStore"
+{
+	"Software"
+	{
+		"Valve"
+		{
+			"Steam"
+			{
+				"apps"
+				{
+					"489830"
+					{
+						"LaunchOptions"		"bash -c 'exec \"${@/SkyrimSELauncher.exe/skse64_loader.exe}\"' -- %command%"
+					}
+					"377160"
+					{
+						"LaunchOptions"		"WINEDLLOVERRIDES=\"winhttp=n,b\" %command%"
+					}
+					"22380"
+					{
+						"LaunchOptions"		"\"C:\\Games\\fnv4gb.exe\" %command%"
+					}
+				}
+			}
+		}
+	}
+}"#;
+        let skyrim = parse_text_vdf_launch_options(vdf, 489830).unwrap();
+        assert_eq!(
+            skyrim,
+            r#"bash -c 'exec "${@/SkyrimSELauncher.exe/skse64_loader.exe}"' -- %command%"#
+        );
+        assert!(skyrim.contains("skse64_loader.exe"));
+        assert_eq!(
+            parse_text_vdf_launch_options(vdf, 377160).as_deref(),
+            Some(r#"WINEDLLOVERRIDES="winhttp=n,b" %command%"#)
+        );
+        assert_eq!(
+            parse_text_vdf_launch_options(vdf, 22380).as_deref(),
+            Some(r#""C:\Games\fnv4gb.exe" %command%"#)
+        );
+    }
+
+    #[test]
+    fn test_set_text_vdf_launch_options_escapes_value() {
+        let vdf = r#""UserLocalConfigStore"
+{
+	"Software"
+	{
+		"Valve"
+		{
+			"Steam"
+			{
+				"apps"
+				{
+					"489830"
+					{
+						"LaunchOptions"		"WINEDLLOVERRIDES=\"dxgi=n,b\" %command%"
+					}
+				}
+			}
+		}
+	}
+}"#;
+        let opts = r#"WINEDLLOVERRIDES="winhttp=n,b" "C:\x\y.exe" %command%"#;
+        let updated = set_text_vdf_launch_options(vdf, 489830, Some(opts)).unwrap();
+        assert!(updated.contains(
+            r#""LaunchOptions"		"WINEDLLOVERRIDES=\"winhttp=n,b\" \"C:\\x\\y.exe\" %command%""#
+        ));
+        assert_eq!(
+            parse_text_vdf_launch_options(&updated, 489830).as_deref(),
+            Some(opts)
+        );
+    }
+
+    /// Rewriting the stored SKSE bash trick with the same value must leave
+    /// every localconfig.vdf token unchanged (escapes included).
+    #[test]
+    fn test_set_text_vdf_launch_options_skse_bash_round_trip() {
+        let vdf = "\"apps\"\n{\n\t\"489830\"\n\t{\n\t\t\"LaunchOptions\"\t\t\"bash -c 'exec \\\"${@/SkyrimSELauncher.exe/skse64_loader.exe}\\\"' -- %command%\"\n\t}\n}";
+        let opts = r#"bash -c 'exec "${@/SkyrimSELauncher.exe/skse64_loader.exe}"' -- %command%"#;
+        assert_eq!(
+            parse_text_vdf_launch_options(vdf, 489830).as_deref(),
+            Some(opts)
+        );
+        // Existing indentation is tabs; the replacement re-indents with spaces,
+        // so compare the structural content of the rewritten line.
+        let updated = set_text_vdf_launch_options(vdf, 489830, Some(opts)).unwrap();
+        assert_eq!(
+            updated.lines().map(str::trim).collect::<Vec<_>>(),
+            vdf.lines().map(str::trim).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            parse_text_vdf_launch_options(&updated, 489830).as_deref(),
+            Some(opts)
+        );
+    }
+
+    /// `//` comments that contain a quoted LaunchOptions pair must not be read
+    /// as the setting, nor be replaced/removed in place of the real line.
+    #[test]
+    fn test_text_vdf_launch_options_ignores_comments() {
+        let vdf = r#""UserLocalConfigStore"
+{
+	"apps"
+	{
+		// "489830" { "LaunchOptions" "decoy" }
+		"489830"
+		{
+			// "LaunchOptions"		"skse64_loader.exe"
+			"LaunchOptions"		"real %command%" // trailing note
+		}
+		"22380"
+		{
+			// "LaunchOptions"		"nvse_loader.exe"
+		}
+	}
+}"#;
+        assert_eq!(
+            parse_text_vdf_launch_options(vdf, 489830).as_deref(),
+            Some("real %command%")
+        );
+        // Only a commented-out entry: no launch options are set.
+        assert_eq!(parse_text_vdf_launch_options(vdf, 22380), None);
+
+        let cleared = set_text_vdf_launch_options(vdf, 489830, None).unwrap();
+        assert!(cleared.contains(r#"// "LaunchOptions"		"skse64_loader.exe""#));
+        assert!(cleared.contains(r#"// "489830" { "LaunchOptions" "decoy" }"#));
+        assert!(!cleared.contains("real %command%"));
+        assert_eq!(parse_text_vdf_launch_options(&cleared, 489830), None);
+
+        let replaced = set_text_vdf_launch_options(vdf, 489830, Some("new %command%")).unwrap();
+        assert!(replaced.contains(r#"// "LaunchOptions"		"skse64_loader.exe""#));
+        assert_eq!(
+            parse_text_vdf_launch_options(&replaced, 489830).as_deref(),
+            Some("new %command%")
+        );
+
+        // Clearing an app whose only entry is a comment leaves the file intact.
+        assert_eq!(set_text_vdf_launch_options(vdf, 22380, None).unwrap(), vdf);
+        // Setting it inserts a real line and keeps the comment.
+        let inserted = set_text_vdf_launch_options(vdf, 22380, Some("x %command%")).unwrap();
+        assert!(inserted.contains(r#"// "LaunchOptions"		"nvse_loader.exe""#));
+        assert_eq!(
+            parse_text_vdf_launch_options(&inserted, 22380).as_deref(),
+            Some("x %command%")
+        );
+    }
+
+    /// Valve KeyValues allows unquoted keys and values; the pre-escape parser
+    /// recognised unquoted section names (`apps`, app IDs), so keep that.
+    #[test]
+    fn test_text_vdf_launch_options_unquoted_tokens() {
+        let vdf = "UserLocalConfigStore\n{\n\tapps\n\t{\n\t\t489830\n\t\t{\n\t\t\tLaunchOptions\t\t\"-skse %command%\"\n\t\t}\n\t\t22380\n\t\t{\n\t\t\tLaunchOptions -nosplash\n\t\t}\n\t\t377160\n\t\t{\n\t\t\tName\t\"Fallout 4\"\n\t\t}\n\t}\n}";
+        assert_eq!(
+            parse_text_vdf_launch_options(vdf, 489830).as_deref(),
+            Some("-skse %command%")
+        );
+        assert_eq!(
+            parse_text_vdf_launch_options(vdf, 22380).as_deref(),
+            Some("-nosplash")
+        );
+
+        let replaced = set_text_vdf_launch_options(vdf, 489830, Some("new %command%")).unwrap();
+        assert_eq!(
+            parse_text_vdf_launch_options(&replaced, 489830).as_deref(),
+            Some("new %command%")
+        );
+        let cleared = set_text_vdf_launch_options(vdf, 22380, None).unwrap();
+        assert_eq!(parse_text_vdf_launch_options(&cleared, 22380), None);
+        assert!(cleared.contains("-skse %command%"));
+        let inserted = set_text_vdf_launch_options(vdf, 377160, Some("f4se %command%")).unwrap();
+        assert_eq!(
+            parse_text_vdf_launch_options(&inserted, 377160).as_deref(),
+            Some("f4se %command%")
+        );
+    }
+
+    #[test]
+    fn test_vdf_line_tokens_escape_semantics() {
+        // Full Valve C-string escape table is decoded.
+        assert_eq!(
+            vdf_line_tokens(r#""k" "a\nb\tc\rd\'e\"f\\g\?h\vi\bj\fk\al""#),
+            vec![
+                "k".to_string(),
+                "a\nb\tc\rd'e\"f\\g?h\u{0B}i\u{08}j\u{0C}k\u{07}l".to_string()
+            ]
+        );
+        // Unknown escapes keep the backslash (e.g. unescaped Windows paths).
+        assert_eq!(
+            vdf_line_tokens(r#""k" "C:\Games\x.exe""#),
+            vec!["k".to_string(), r"C:\Games\x.exe".to_string()]
+        );
+        // Unterminated quoted token runs to end of line.
+        assert_eq!(
+            vdf_line_tokens(r#""k" "abc"#),
+            vec!["k".to_string(), "abc".to_string()]
+        );
+        // `//` inside a quoted value is data, not a comment; a lone `/` in an
+        // unquoted token is data too.
+        assert_eq!(
+            vdf_line_tokens(r#""k" "http://x/y" a/b // c"#),
+            vec!["k".to_string(), "http://x/y".to_string(), "a/b".to_string()]
+        );
+        // Writer escapes round-trip through the reader.
+        let value = "a\"b\\c\nd\re\tf 'g'";
+        assert_eq!(
+            vdf_line_tokens(&format!("\"k\" \"{}\"", escape_vdf_value(value))),
+            vec!["k".to_string(), value.to_string()]
+        );
     }
 
     #[test]
