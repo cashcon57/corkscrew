@@ -539,12 +539,8 @@ fn find_steam_common_dirs_in_home(home: &Path) -> Vec<PathBuf> {
     for libraryfolders_path in find_library_folders_paths(home) {
         if let Ok(content) = std::fs::read_to_string(&libraryfolders_path) {
             for line in content.lines() {
-                let line = line.trim();
-                if line.starts_with('"') && line.contains("\"path\"") {
-                    // VDF format: "path"        "/mnt/games/SteamLibrary"
-                    if let Some(path_str) = extract_vdf_value(line) {
-                        add_common(PathBuf::from(path_str).join("steamapps/common"));
-                    }
+                if let Some(path_str) = extract_library_path(line) {
+                    add_common(PathBuf::from(path_str).join("steamapps/common"));
                 }
             }
         }
@@ -624,18 +620,32 @@ fn find_library_folders_paths(home: &Path) -> Vec<PathBuf> {
     paths
 }
 
-fn extract_vdf_value(line: &str) -> Option<&str> {
-    // Parse VDF line: "key"		"value"
-    let mut parts = line.splitn(2, "\"path\"");
-    parts.next()?;
-    let rest = parts.next()?.trim();
-    if rest.starts_with('"') {
-        // Skip opening quote
-        let inner = &rest[1..];
-        inner.find('"').map(|end| &inner[..end])
+/// Extract a Steam library root from one `libraryfolders.vdf` line.
+///
+/// Accepts both on-disk forms:
+/// - modern: `"path"		"/mnt/games/SteamLibrary"` (inside a numbered block)
+/// - legacy: `"1"		"/mnt/games/SteamLibrary"` (numeric index maps straight to the path)
+///
+/// Numeric keys only count when the value is an absolute path, so app-size
+/// entries such as `"228980"		"0"` and metadata like `"ContentStatsID"` are
+/// ignored. Callers must still canonicalize the result before use.
+fn extract_library_path(line: &str) -> Option<&str> {
+    let (key, value) = split_vdf_key_value(line)?;
+    let is_index = !key.is_empty() && key.bytes().all(|b| b.is_ascii_digit());
+    if key == "path" || (is_index && value.starts_with('/')) {
+        (!value.is_empty() && !value.contains('\0')).then_some(value)
     } else {
         None
     }
+}
+
+/// Split a VDF line of the form `"key"<whitespace>"value"` into its two tokens.
+fn split_vdf_key_value(line: &str) -> Option<(&str, &str)> {
+    let rest = line.trim().strip_prefix('"')?;
+    let (key, rest) = rest.split_once('"')?;
+    let rest = rest.trim_start().strip_prefix('"')?;
+    let (value, _) = rest.split_once('"')?;
+    Some((key, value))
 }
 
 fn scan_proton_dir(dir: &Path, versions: &mut Vec<ProtonVersion>) {
@@ -1034,12 +1044,84 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_vdf_value() {
+    fn test_extract_library_path_modern() {
         assert_eq!(
-            extract_vdf_value(r#""path"		"/mnt/games/SteamLibrary""#),
+            extract_library_path(r#"		"path"		"/mnt/games/SteamLibrary""#),
             Some("/mnt/games/SteamLibrary")
         );
-        assert_eq!(extract_vdf_value(r#""1"		"something""#), None);
+        assert_eq!(
+            extract_library_path(r#""path" "/mnt/my games/SteamLibrary""#),
+            Some("/mnt/my games/SteamLibrary")
+        );
+    }
+
+    #[test]
+    fn test_extract_library_path_legacy_numeric() {
+        assert_eq!(
+            extract_library_path(r#"	"1"		"/mnt/games/SteamLibrary""#),
+            Some("/mnt/games/SteamLibrary")
+        );
+        assert_eq!(
+            extract_library_path(r#""12" "/media/user/Steam Library""#),
+            Some("/media/user/Steam Library")
+        );
+    }
+
+    #[test]
+    fn test_extract_library_path_ignores_non_path_lines() {
+        for line in [
+            // Non-path keys from both formats
+            r#""label"		"""#,
+            r#""contentid"		"1234567890""#,
+            r#""totalsize"		"0""#,
+            r#""TimeNextStatsReport"		"1700000000""#,
+            r#""ContentStatsID"		"-123456789""#,
+            r#""mounted"		"1""#,
+            // App-size entries inside modern "apps" blocks: numeric key, non-path value
+            r#""228980"		"0""#,
+            r#""1"		"something""#,
+            r#""1"		"relative/SteamLibrary""#,
+            // Block headers and braces
+            r#""libraryfolders""#,
+            r#""0""#,
+            "{",
+            "}",
+            "",
+            // Malformed
+            r#""path"		"#,
+            r#""path"		"/unterminated"#,
+            r#""path" /unquoted"#,
+            r#""path"		"""#,
+            r#""-1"		"/mnt/games/SteamLibrary""#,
+            r#""1a"		"/mnt/games/SteamLibrary""#,
+            r#"path		"/mnt/games/SteamLibrary""#,
+            "\"path\"\t\"/mnt/ga\0mes\"",
+        ] {
+            assert_eq!(extract_library_path(line), None, "line: {line:?}");
+        }
+    }
+
+    #[test]
+    fn test_legacy_libraryfolders_secondary_library() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let native = home.join(".local/share/Steam");
+        let secondary = home.join("legacy library/SteamLibrary");
+        let proton = fixture_proton(&secondary, "Proton 8.0");
+        std::fs::create_dir_all(native.join("steamapps")).unwrap();
+        std::fs::write(
+            native.join("steamapps/libraryfolders.vdf"),
+            format!(
+                "\"LibraryFolders\"\n{{\n\t\"TimeNextStatsReport\"\t\t\"1700000000\"\n\t\
+                 \"ContentStatsID\"\t\t\"-123456789\"\n\t\"1\"\t\t\"{}\"\n}}\n",
+                secondary.display()
+            ),
+        )
+        .unwrap();
+
+        let versions = fixture_official_versions(home);
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].path, proton);
     }
 
     // -----------------------------------------------------------------------
