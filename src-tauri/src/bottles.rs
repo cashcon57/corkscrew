@@ -407,25 +407,18 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
             let vdf_path = steam_dir.join(vdf_name);
             if let Ok(content) = fs::read_to_string(&vdf_path) {
                 for line in content.lines() {
-                    let trimmed = line.trim();
-                    if let Some(rest) = trimmed.strip_prefix("\"path\"") {
-                        let rest = rest.trim().trim_matches('"');
-                        if !rest.is_empty() {
-                            let lib_path =
-                                PathBuf::from(rest.replace('\\', "/"))
-                                    .join("steamapps")
-                                    .join("compatdata");
-                            // Avoid duplicates
-                            if !locations.iter().any(|l| l.path == lib_path) && lib_path.is_dir() {
-                                log::info!(
-                                    "Found additional Steam library: {}",
-                                    lib_path.display()
-                                );
-                                locations.push(SearchLocation {
-                                    source: "Proton",
-                                    path: lib_path,
-                                });
-                            }
+                    if let Some(root) = steam_library_root_from_vdf_line(line) {
+                        let lib_path = root.join("steamapps").join("compatdata");
+                        // Avoid duplicates
+                        if !locations.iter().any(|l| l.path == lib_path) && lib_path.is_dir() {
+                            log::info!(
+                                "Found additional Steam library: {}",
+                                lib_path.display()
+                            );
+                            locations.push(SearchLocation {
+                                source: "Proton",
+                                path: lib_path,
+                            });
                         }
                     }
                 }
@@ -434,6 +427,40 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
     }
 
     locations
+}
+
+/// Extract a Steam library root from one `libraryfolders.vdf` line.
+///
+/// Accepts both on-disk forms:
+/// - modern: `"path"		"/mnt/games/SteamLibrary"` (inside a numbered block)
+/// - legacy: `"1"		"/mnt/games/SteamLibrary"` (numeric index maps straight to the path)
+///
+/// The value comes from an external file, so only absolute paths without
+/// `..` components or NUL bytes are accepted. This also filters out numeric
+/// app-size entries such as `"228980"		"0"` in modern `"apps"` blocks.
+#[cfg(target_os = "linux")]
+fn steam_library_root_from_vdf_line(line: &str) -> Option<PathBuf> {
+    let rest = line.trim().strip_prefix('"')?;
+    let (key, rest) = rest.split_once('"')?;
+    let rest = rest.trim_start().strip_prefix('"')?;
+    let (value, _) = rest.split_once('"')?;
+
+    let is_index = !key.is_empty() && key.bytes().all(|b| b.is_ascii_digit());
+    if key != "path" && !is_index {
+        return None;
+    }
+    if value.contains('\0') {
+        return None;
+    }
+    let root = PathBuf::from(value.replace('\\', "/"));
+    if !root.is_absolute()
+        || root
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    Some(root)
 }
 
 // ---------------------------------------------------------------------------
@@ -1145,6 +1172,157 @@ mod tests {
         assert_eq!(bottles[1].name, "NativeGame");
         assert_eq!(bottles[1].path, native);
         assert_eq!(bottles[1].source, "Bottles");
+    }
+
+    /// Create `compatdata/{app_id}/pfx/drive_c` plus an appmanifest under
+    /// `library/steamapps` and return the expected prefix path.
+    #[cfg(target_os = "linux")]
+    fn create_fake_proton_prefix(library: &Path, app_id: &str, name: &str) -> PathBuf {
+        let steamapps = library.join("steamapps");
+        let pfx = steamapps.join("compatdata").join(app_id).join("pfx");
+        fs::create_dir_all(pfx.join("drive_c")).expect("create pfx/drive_c");
+        fs::write(
+            steamapps.join(format!("appmanifest_{app_id}.acf")),
+            format!(
+                "\"AppState\"\n{{\n\t\"appid\"\t\t\"{app_id}\"\n\t\"name\"\t\t\"{name}\"\n}}\n"
+            ),
+        )
+        .expect("write appmanifest");
+        pfx
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_libraryfolders(home: &Path, content: &str) {
+        let steamapps = home.join(".local/share/Steam/steamapps");
+        fs::create_dir_all(&steamapps).expect("create steamapps");
+        fs::write(steamapps.join("libraryfolders.vdf"), content).expect("write vdf");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn proton_bottles(home: &Path) -> Vec<Bottle> {
+        collect_fixture_bottles(home)
+            .into_iter()
+            .filter(|b| b.source == "Proton")
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn secondary_steam_library_modern_vdf_discovers_proton_prefix() {
+        let home = tempfile::tempdir().unwrap();
+        let library = tempfile::tempdir().unwrap();
+        let pfx = create_fake_proton_prefix(library.path(), "489830", "Skyrim Special Edition");
+        write_libraryfolders(
+            home.path(),
+            &format!(
+                "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{home}/.local/share/Steam\"\n\t\t\"apps\"\n\t\t{{\n\t\t\t\"228980\"\t\t\"0\"\n\t\t}}\n\t}}\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{lib}\"\n\t\t\"label\"\t\t\"\"\n\t\t\"apps\"\n\t\t{{\n\t\t\t\"489830\"\t\t\"12345\"\n\t\t}}\n\t}}\n}}\n",
+                home = home.path().display(),
+                lib = library.path().display(),
+            ),
+        );
+
+        let bottles = proton_bottles(home.path());
+
+        assert_eq!(bottles.len(), 1, "bottles: {bottles:?}");
+        assert_eq!(bottles[0].name, "Skyrim Special Edition");
+        assert_eq!(bottles[0].path, pfx);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn secondary_steam_library_legacy_numeric_vdf_discovers_proton_prefix() {
+        let home = tempfile::tempdir().unwrap();
+        let library = tempfile::tempdir().unwrap();
+        let pfx = create_fake_proton_prefix(library.path(), "377160", "Fallout 4");
+        write_libraryfolders(
+            home.path(),
+            &format!(
+                "\"LibraryFolders\"\n{{\n\t\"TimeNextStatsReport\"\t\t\"1700000000\"\n\t\"ContentStatsID\"\t\t\"-123456789\"\n\t\"1\"\t\t\"{lib}\"\n}}\n",
+                lib = library.path().display(),
+            ),
+        );
+
+        let bottles = proton_bottles(home.path());
+
+        assert_eq!(bottles.len(), 1, "bottles: {bottles:?}");
+        assert_eq!(bottles[0].name, "Fallout 4");
+        assert_eq!(bottles[0].path, pfx);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn secondary_steam_library_listed_twice_is_scanned_once() {
+        let home = tempfile::tempdir().unwrap();
+        let library = tempfile::tempdir().unwrap();
+        create_fake_proton_prefix(library.path(), "489830", "Skyrim Special Edition");
+        let lib = library.path().display();
+        // Both the steamapps/ and config/ copies list the same library, in
+        // different formats.
+        write_libraryfolders(
+            home.path(),
+            &format!("\"LibraryFolders\"\n{{\n\t\"1\"\t\t\"{lib}\"\n}}\n"),
+        );
+        let config = home.path().join(".local/share/Steam/config");
+        fs::create_dir_all(&config).unwrap();
+        fs::write(
+            config.join("libraryfolders.vdf"),
+            format!("\"libraryfolders\"\n{{\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{lib}\"\n\t}}\n}}\n"),
+        )
+        .unwrap();
+
+        let locations: Vec<_> = platform_search_locations(home.path())
+            .into_iter()
+            .filter(|l| l.path.starts_with(library.path()))
+            .collect();
+        assert_eq!(locations.len(), 1);
+        assert_eq!(proton_bottles(home.path()).len(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn steam_library_root_from_vdf_line_accepts_modern_and_legacy() {
+        assert_eq!(
+            steam_library_root_from_vdf_line("\t\t\"path\"\t\t\"/mnt/games/SteamLibrary\""),
+            Some(PathBuf::from("/mnt/games/SteamLibrary"))
+        );
+        assert_eq!(
+            steam_library_root_from_vdf_line("\t\"1\"\t\t\"/run/media/deck/SD Card\""),
+            Some(PathBuf::from("/run/media/deck/SD Card"))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn steam_library_root_from_vdf_line_rejects_non_library_and_unsafe_lines() {
+        for line in [
+            r#""label"		"""#,
+            r#""contentid"		"1234567890""#,
+            r#""ContentStatsID"		"-123456789""#,
+            r#""TimeNextStatsReport"		"1700000000""#,
+            r#""228980"		"0""#,
+            r#""1"		"relative/SteamLibrary""#,
+            r#""path"		"relative/SteamLibrary""#,
+            r#""path"		"""#,
+            r#""path"		"/mnt/../etc""#,
+            r#""1"		"/mnt/games/../../etc""#,
+            r#""1a"		"/mnt/games/SteamLibrary""#,
+            r#""-1"		"/mnt/games/SteamLibrary""#,
+            r#""path"		"/unterminated"#,
+            r#""path" /unquoted"#,
+            r#"path		"/mnt/games/SteamLibrary""#,
+            r#""libraryfolders""#,
+            r#""0""#,
+            "{",
+            "}",
+            "",
+            "\"path\"\t\"/mnt/ga\0mes\"",
+        ] {
+            assert_eq!(
+                steam_library_root_from_vdf_line(line),
+                None,
+                "line: {line:?}"
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]
