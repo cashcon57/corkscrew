@@ -47,7 +47,7 @@ xz2 = { version = "0.1", features = ["static"] }
 bzip2 = "0.6"
 
 # XML parsing (FOMOD)
-quick-xml = { version = "0.38", features = ["serialize"] }
+quick-xml = { version = "0.39", features = ["serialize"] }
 
 # File system utilities
 walkdir = "2"
