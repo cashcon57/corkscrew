@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::fomod::{find_case_insensitive, resolve_path_case_insensitive};
+
 /// Enriched game info from Heroic Launcher.
 #[derive(Debug, Clone, Serialize)]
 pub struct HeroicGameInfo {
@@ -47,7 +49,7 @@ impl Bottle {
 
     /// Path to the `users` directory inside drive_c.
     pub fn users_dir(&self) -> PathBuf {
-        self.drive_c().join("users")
+        find_case_insensitive(&self.drive_c(), "users").unwrap_or_else(|| self.drive_c().join("users"))
     }
 
     /// Best-effort path to a user's `AppData\Local` directory.
@@ -66,14 +68,14 @@ impl Bottle {
                     }
 
                     // Standard AppData path
-                    let local = user_dir.join("AppData").join("Local");
-                    if local.exists() {
+                    if let Some(local) = resolve_path_case_insensitive(&user_dir, "AppData/Local") {
                         return local;
                     }
 
                     // Legacy path used by some bottles
-                    let legacy = user_dir.join("Local Settings").join("Application Data");
-                    if legacy.exists() {
+                    if let Some(legacy) =
+                        resolve_path_case_insensitive(&user_dir, "Local Settings/Application Data")
+                    {
                         return legacy;
                     }
                 }
@@ -99,14 +101,14 @@ impl Bottle {
                     }
 
                     // Standard Documents path
-                    let docs = user_dir.join("Documents");
-                    if docs.exists() {
+                    if let Some(docs) = resolve_path_case_insensitive(&user_dir, "Documents") {
                         return docs;
                     }
 
                     // Legacy "My Documents" path
-                    let my_docs = user_dir.join("My Documents");
-                    if my_docs.exists() {
+                    if let Some(my_docs) =
+                        resolve_path_case_insensitive(&user_dir, "My Documents")
+                    {
                         return my_docs;
                     }
                 }
@@ -341,12 +343,23 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
                 .join("wine")
                 .join("prefixes"),
         },
-        // Bottles (Flatpak-first app)
+        // Bottles (native install)
         SearchLocation {
             source: "Bottles",
             path: home
                 .join(".local")
                 .join("share")
+                .join("bottles")
+                .join("bottles"),
+        },
+        // Bottles (Flatpak)
+        SearchLocation {
+            source: "Bottles",
+            path: home
+                .join(".var")
+                .join("app")
+                .join("com.usebottles.bottles")
+                .join("data")
                 .join("bottles")
                 .join("bottles"),
         },
@@ -394,25 +407,18 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
             let vdf_path = steam_dir.join(vdf_name);
             if let Ok(content) = fs::read_to_string(&vdf_path) {
                 for line in content.lines() {
-                    let trimmed = line.trim();
-                    if let Some(rest) = trimmed.strip_prefix("\"path\"") {
-                        let rest = rest.trim().trim_matches('"');
-                        if !rest.is_empty() {
-                            let lib_path =
-                                PathBuf::from(rest.replace('\\', "/"))
-                                    .join("steamapps")
-                                    .join("compatdata");
-                            // Avoid duplicates
-                            if !locations.iter().any(|l| l.path == lib_path) && lib_path.is_dir() {
-                                log::info!(
-                                    "Found additional Steam library: {}",
-                                    lib_path.display()
-                                );
-                                locations.push(SearchLocation {
-                                    source: "Proton",
-                                    path: lib_path,
-                                });
-                            }
+                    if let Some(root) = steam_library_root_from_vdf_line(line) {
+                        let lib_path = root.join("steamapps").join("compatdata");
+                        // Avoid duplicates
+                        if !locations.iter().any(|l| l.path == lib_path) && lib_path.is_dir() {
+                            log::info!(
+                                "Found additional Steam library: {}",
+                                lib_path.display()
+                            );
+                            locations.push(SearchLocation {
+                                source: "Proton",
+                                path: lib_path,
+                            });
                         }
                     }
                 }
@@ -421,6 +427,40 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
     }
 
     locations
+}
+
+/// Extract a Steam library root from one `libraryfolders.vdf` line.
+///
+/// Accepts both on-disk forms:
+/// - modern: `"path"		"/mnt/games/SteamLibrary"` (inside a numbered block)
+/// - legacy: `"1"		"/mnt/games/SteamLibrary"` (numeric index maps straight to the path)
+///
+/// The value comes from an external file, so only absolute paths without
+/// `..` components or NUL bytes are accepted. This also filters out numeric
+/// app-size entries such as `"228980"		"0"` in modern `"apps"` blocks.
+#[cfg(target_os = "linux")]
+fn steam_library_root_from_vdf_line(line: &str) -> Option<PathBuf> {
+    let rest = line.trim().strip_prefix('"')?;
+    let (key, rest) = rest.split_once('"')?;
+    let rest = rest.trim_start().strip_prefix('"')?;
+    let (value, _) = rest.split_once('"')?;
+
+    let is_index = !key.is_empty() && key.bytes().all(|b| b.is_ascii_digit());
+    if key != "path" && !is_index {
+        return None;
+    }
+    if value.contains('\0') {
+        return None;
+    }
+    let root = PathBuf::from(value.replace('\\', "/"));
+    if !root.is_absolute()
+        || root
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    Some(root)
 }
 
 // ---------------------------------------------------------------------------
@@ -1035,10 +1075,275 @@ mod tests {
     use std::fs;
 
     /// Helper: create a minimal fake bottle on disk and return its path.
+    /// Asserts that `actual` names the same filesystem entry as `expected`.
+    /// Case-insensitive filesystems (the macOS default) reach one directory
+    /// through several spellings, so existing prefixes are compared by
+    /// identity and the not-yet-existing tail must match exactly.
+    fn assert_same_path(actual: &Path, expected: &Path) {
+        fn split(path: &Path) -> (PathBuf, Vec<std::ffi::OsString>) {
+            let mut base = path.to_path_buf();
+            let mut rest = Vec::new();
+            while !base.exists() {
+                match base.file_name() {
+                    Some(name) => rest.push(name.to_owned()),
+                    None => break,
+                }
+                base.pop();
+            }
+            rest.reverse();
+            (base, rest)
+        }
+        #[cfg(unix)]
+        fn same_entry(a: &Path, b: &Path) -> bool {
+            use std::os::unix::fs::MetadataExt;
+            match (fs::metadata(a), fs::metadata(b)) {
+                (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+                _ => a == b,
+            }
+        }
+        #[cfg(not(unix))]
+        fn same_entry(a: &Path, b: &Path) -> bool {
+            a.canonicalize().ok() == b.canonicalize().ok()
+        }
+        let (actual_base, actual_rest) = split(actual);
+        let (expected_base, expected_rest) = split(expected);
+        assert!(
+            actual_rest == expected_rest && same_entry(&actual_base, &expected_base),
+            "{} is not the same path as {}",
+            actual.display(),
+            expected.display()
+        );
+    }
+
     fn create_fake_bottle(parent: &Path, name: &str) -> PathBuf {
         let bottle = parent.join(name);
         fs::create_dir_all(bottle.join("drive_c")).expect("create drive_c");
         bottle
+    }
+
+    #[cfg(target_os = "linux")]
+    fn collect_fixture_bottles(home: &Path) -> Vec<Bottle> {
+        let mut bottles = Vec::new();
+        for location in platform_search_locations(home) {
+            collect_bottles_from(&location, &mut bottles);
+        }
+        deduplicate_bottles_by_name(bottles)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn flatpak_bottles_collects_prefix() {
+        let home = tempfile::tempdir().unwrap();
+        let parent = home
+            .path()
+            .join(".var/app/com.usebottles.bottles/data/bottles/bottles");
+        let prefix = create_fake_bottle(&parent, "FlatpakGame");
+
+        let bottles = collect_fixture_bottles(home.path());
+
+        assert_eq!(bottles.len(), 1);
+        assert_eq!(bottles[0].name, "FlatpakGame");
+        assert_eq!(bottles[0].path, prefix);
+        assert_eq!(bottles[0].source, "Bottles");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn flatpak_bottles_coexists_with_native_prefix() {
+        let home = tempfile::tempdir().unwrap();
+        let flatpak = create_fake_bottle(
+            &home
+                .path()
+                .join(".var/app/com.usebottles.bottles/data/bottles/bottles"),
+            "FlatpakGame",
+        );
+        let native = create_fake_bottle(
+            &home.path().join(".local/share/bottles/bottles"),
+            "NativeGame",
+        );
+
+        let mut bottles = collect_fixture_bottles(home.path());
+        bottles.sort_by(|a, b| a.name.cmp(&b.name));
+
+        assert_eq!(bottles.len(), 2);
+        assert_eq!(bottles[0].name, "FlatpakGame");
+        assert_eq!(bottles[0].path, flatpak);
+        assert_eq!(bottles[0].source, "Bottles");
+        assert_eq!(bottles[1].name, "NativeGame");
+        assert_eq!(bottles[1].path, native);
+        assert_eq!(bottles[1].source, "Bottles");
+    }
+
+    /// Create `compatdata/{app_id}/pfx/drive_c` plus an appmanifest under
+    /// `library/steamapps` and return the expected prefix path.
+    #[cfg(target_os = "linux")]
+    fn create_fake_proton_prefix(library: &Path, app_id: &str, name: &str) -> PathBuf {
+        let steamapps = library.join("steamapps");
+        let pfx = steamapps.join("compatdata").join(app_id).join("pfx");
+        fs::create_dir_all(pfx.join("drive_c")).expect("create pfx/drive_c");
+        fs::write(
+            steamapps.join(format!("appmanifest_{app_id}.acf")),
+            format!(
+                "\"AppState\"\n{{\n\t\"appid\"\t\t\"{app_id}\"\n\t\"name\"\t\t\"{name}\"\n}}\n"
+            ),
+        )
+        .expect("write appmanifest");
+        pfx
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_libraryfolders(home: &Path, content: &str) {
+        let steamapps = home.join(".local/share/Steam/steamapps");
+        fs::create_dir_all(&steamapps).expect("create steamapps");
+        fs::write(steamapps.join("libraryfolders.vdf"), content).expect("write vdf");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn proton_bottles(home: &Path) -> Vec<Bottle> {
+        collect_fixture_bottles(home)
+            .into_iter()
+            .filter(|b| b.source == "Proton")
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn secondary_steam_library_modern_vdf_discovers_proton_prefix() {
+        let home = tempfile::tempdir().unwrap();
+        let library = tempfile::tempdir().unwrap();
+        let pfx = create_fake_proton_prefix(library.path(), "489830", "Skyrim Special Edition");
+        write_libraryfolders(
+            home.path(),
+            &format!(
+                "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{home}/.local/share/Steam\"\n\t\t\"apps\"\n\t\t{{\n\t\t\t\"228980\"\t\t\"0\"\n\t\t}}\n\t}}\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{lib}\"\n\t\t\"label\"\t\t\"\"\n\t\t\"apps\"\n\t\t{{\n\t\t\t\"489830\"\t\t\"12345\"\n\t\t}}\n\t}}\n}}\n",
+                home = home.path().display(),
+                lib = library.path().display(),
+            ),
+        );
+
+        let bottles = proton_bottles(home.path());
+
+        assert_eq!(bottles.len(), 1, "bottles: {bottles:?}");
+        assert_eq!(bottles[0].name, "Skyrim Special Edition");
+        assert_eq!(bottles[0].path, pfx);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn secondary_steam_library_legacy_numeric_vdf_discovers_proton_prefix() {
+        let home = tempfile::tempdir().unwrap();
+        let library = tempfile::tempdir().unwrap();
+        let pfx = create_fake_proton_prefix(library.path(), "377160", "Fallout 4");
+        write_libraryfolders(
+            home.path(),
+            &format!(
+                "\"LibraryFolders\"\n{{\n\t\"TimeNextStatsReport\"\t\t\"1700000000\"\n\t\"ContentStatsID\"\t\t\"-123456789\"\n\t\"1\"\t\t\"{lib}\"\n}}\n",
+                lib = library.path().display(),
+            ),
+        );
+
+        let bottles = proton_bottles(home.path());
+
+        assert_eq!(bottles.len(), 1, "bottles: {bottles:?}");
+        assert_eq!(bottles[0].name, "Fallout 4");
+        assert_eq!(bottles[0].path, pfx);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn secondary_steam_library_listed_twice_is_scanned_once() {
+        let home = tempfile::tempdir().unwrap();
+        let library = tempfile::tempdir().unwrap();
+        create_fake_proton_prefix(library.path(), "489830", "Skyrim Special Edition");
+        let lib = library.path().display();
+        // Both the steamapps/ and config/ copies list the same library, in
+        // different formats.
+        write_libraryfolders(
+            home.path(),
+            &format!("\"LibraryFolders\"\n{{\n\t\"1\"\t\t\"{lib}\"\n}}\n"),
+        );
+        let config = home.path().join(".local/share/Steam/config");
+        fs::create_dir_all(&config).unwrap();
+        fs::write(
+            config.join("libraryfolders.vdf"),
+            format!("\"libraryfolders\"\n{{\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{lib}\"\n\t}}\n}}\n"),
+        )
+        .unwrap();
+
+        let locations: Vec<_> = platform_search_locations(home.path())
+            .into_iter()
+            .filter(|l| l.path.starts_with(library.path()))
+            .collect();
+        assert_eq!(locations.len(), 1);
+        assert_eq!(proton_bottles(home.path()).len(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn steam_library_root_from_vdf_line_accepts_modern_and_legacy() {
+        assert_eq!(
+            steam_library_root_from_vdf_line("\t\t\"path\"\t\t\"/mnt/games/SteamLibrary\""),
+            Some(PathBuf::from("/mnt/games/SteamLibrary"))
+        );
+        assert_eq!(
+            steam_library_root_from_vdf_line("\t\"1\"\t\t\"/run/media/deck/SD Card\""),
+            Some(PathBuf::from("/run/media/deck/SD Card"))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn steam_library_root_from_vdf_line_rejects_non_library_and_unsafe_lines() {
+        for line in [
+            r#""label"		"""#,
+            r#""contentid"		"1234567890""#,
+            r#""ContentStatsID"		"-123456789""#,
+            r#""TimeNextStatsReport"		"1700000000""#,
+            r#""228980"		"0""#,
+            r#""1"		"relative/SteamLibrary""#,
+            r#""path"		"relative/SteamLibrary""#,
+            r#""path"		"""#,
+            r#""path"		"/mnt/../etc""#,
+            r#""1"		"/mnt/games/../../etc""#,
+            r#""1a"		"/mnt/games/SteamLibrary""#,
+            r#""-1"		"/mnt/games/SteamLibrary""#,
+            r#""path"		"/unterminated"#,
+            r#""path" /unquoted"#,
+            r#"path		"/mnt/games/SteamLibrary""#,
+            r#""libraryfolders""#,
+            r#""0""#,
+            "{",
+            "}",
+            "",
+            "\"path\"\t\"/mnt/ga\0mes\"",
+        ] {
+            assert_eq!(
+                steam_library_root_from_vdf_line(line),
+                None,
+                "line: {line:?}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn flatpak_bottles_skips_missing_and_invalid_prefixes() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(collect_fixture_bottles(home.path()).is_empty());
+
+        let parent = home
+            .path()
+            .join(".var/app/com.usebottles.bottles/data/bottles/bottles");
+        fs::create_dir_all(parent.join("MissingDriveC")).unwrap();
+        fs::write(parent.join("NotADirectory"), "not a prefix").unwrap();
+        assert!(collect_fixture_bottles(home.path()).is_empty());
+
+        let valid = create_fake_bottle(&parent, "ValidGame");
+        let bottles = collect_fixture_bottles(home.path());
+        assert_eq!(bottles.len(), 1);
+        assert_eq!(bottles[0].name, "ValidGame");
+        assert_eq!(bottles[0].path, valid);
+        assert_eq!(bottles[0].source, "Bottles");
     }
 
     #[test]
@@ -1288,6 +1593,117 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let games = parse_heroic_epic_games(tmp.path());
         assert!(games.is_empty());
+    }
+
+    #[test]
+    fn user_data_paths_match_mixed_case_modern_and_legacy_layouts() {
+        for (local, documents) in [
+            ("aPpDaTa/lOcAl", "dOcUmEnTs"),
+            ("lOcAl SeTtInGs/aPpLiCaTiOn DaTa", "mY dOcUmEnTs"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let bottle = Bottle {
+                name: "Test".into(),
+                path: create_fake_bottle(tmp.path(), "Bottle"),
+                source: "Test".into(),
+            };
+            let users = bottle.drive_c().join("UsErS");
+            let user = users.join("Player");
+            fs::create_dir_all(user.join(local)).unwrap();
+            fs::create_dir_all(user.join(documents)).unwrap();
+
+            assert_same_path(&bottle.users_dir(), &users);
+            assert_same_path(&bottle.appdata_local(), &user.join(local));
+            assert_same_path(&bottle.documents_dir(), &user.join(documents));
+        }
+    }
+
+    #[test]
+    fn user_data_paths_prefer_modern_over_legacy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle = Bottle {
+            name: "Test".into(),
+            path: create_fake_bottle(tmp.path(), "Bottle"),
+            source: "Test".into(),
+        };
+        let user = bottle.drive_c().join("users/Player");
+        for relative in [
+            "aPpDaTa/lOcAl",
+            "Local Settings/Application Data",
+            "dOcUmEnTs",
+            "My Documents",
+        ] {
+            fs::create_dir_all(user.join(relative)).unwrap();
+        }
+        assert_same_path(&bottle.appdata_local(), &user.join("aPpDaTa/lOcAl"));
+        assert_same_path(&bottle.documents_dir(), &user.join("dOcUmEnTs"));
+    }
+
+    // Linux permits distinct entries whose names differ only in case.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn user_data_paths_prefer_exact_case() {
+        for (local, documents, alternate_local, alternate_documents) in [
+            ("AppData/Local", "Documents", "appdata/local", "documents"),
+            (
+                "Local Settings/Application Data",
+                "My Documents",
+                "local settings/application data",
+                "my documents",
+            ),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let bottle = Bottle {
+                name: "Test".into(),
+                path: create_fake_bottle(tmp.path(), "Bottle"),
+                source: "Test".into(),
+            };
+            let users = bottle.drive_c().join("users");
+            let user = users.join("Player");
+            fs::create_dir_all(bottle.drive_c().join("USERS/Other/AppData/Local")).unwrap();
+            fs::create_dir_all(bottle.drive_c().join("USERS/Other/Documents")).unwrap();
+            for relative in [alternate_local, alternate_documents, local, documents] {
+                fs::create_dir_all(user.join(relative)).unwrap();
+            }
+            // Also exercise exact preference at the final AppData component.
+            if local == "AppData/Local" {
+                fs::create_dir_all(user.join("AppData/local")).unwrap();
+            } else {
+                fs::create_dir_all(user.join("Local Settings/application data")).unwrap();
+            }
+            assert_eq!(bottle.users_dir(), users);
+            assert_eq!(bottle.appdata_local(), user.join(local));
+            assert_eq!(bottle.documents_dir(), user.join(documents));
+        }
+    }
+
+    #[test]
+    fn user_data_paths_preserve_cross_over_fallbacks() {
+        for users_name in ["users", "UsErS"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let bottle = Bottle {
+                name: "Test".into(),
+                path: create_fake_bottle(tmp.path(), "Bottle"),
+                source: "Test".into(),
+            };
+            let default_users = bottle.drive_c().join("users");
+            assert_same_path(&bottle.users_dir(), &default_users);
+            assert_same_path(&bottle.appdata_local(), &default_users.join("crossover/AppData/Local"));
+            assert_same_path(&bottle.documents_dir(), &default_users.join("crossover/Documents"));
+
+            let users = bottle.drive_c().join(users_name);
+            fs::create_dir_all(&users).unwrap();
+            for populated in [false, true] {
+                if populated {
+                    fs::create_dir_all(users.join("Player/AppData")).unwrap();
+                    fs::create_dir_all(users.join("Player/Local Settings")).unwrap();
+                    fs::write(users.join("not-a-user"), "").unwrap();
+                }
+                assert_same_path(&bottle.users_dir(), &users);
+                assert_same_path(&bottle.appdata_local(), &users.join("crossover/AppData/Local"));
+                assert_same_path(&bottle.documents_dir(), &users.join("crossover/Documents"));
+            }
+        }
     }
 
     #[test]

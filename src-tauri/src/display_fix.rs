@@ -306,13 +306,13 @@ fn detect_x11_resolution() -> Result<(u32, u32), String> {
 }
 
 /// Parse a resolution from an xrandr "connected" line.
-/// Format: `NAME connected [primary] WIDTHxHEIGHT+X+Y ...`
+/// Format: `NAME connected [primary] WIDTHxHEIGHT±X±Y ...`
 #[cfg(target_os = "linux")]
 fn parse_xrandr_connected_line(line: &str) -> Option<(u32, u32)> {
     for token in line.split_whitespace() {
-        // Match "WxH+X+Y" pattern (e.g., "2560x1440+0+0")
-        if token.contains('x') && token.contains('+') {
-            let res_part = token.split('+').next()?;
+        // Both offsets can be negative for displays left of or above the origin.
+        if token.contains('x') && token.contains(['+', '-']) {
+            let res_part = token.split(['+', '-']).next()?;
             return parse_resolution_string(res_part);
         }
     }
@@ -1615,6 +1615,23 @@ fMusicVolume=0.5
             ),
             None // No resolution shown = display not active
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_xrandr_connected_line_signed_offsets() {
+        for offsets in ["+1920+1080", "-1920+1080", "+1920-1080", "-1920-1080"] {
+            for primary in ["", "primary "] {
+                let line = format!(
+                    "DP-1 connected {primary}1920x1080{offsets} (normal left inverted right x axis y axis)"
+                );
+                assert_eq!(
+                    parse_xrandr_connected_line(&line),
+                    Some((1920, 1080)),
+                    "{line}"
+                );
+            }
+        }
     }
 
     #[test]

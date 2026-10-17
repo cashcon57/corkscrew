@@ -12,7 +12,7 @@ All platforms built in CI. Expects artifact directories with this layout:
       Corkscrew-VERSION-macOS-Intel.app.tar.gz + .sig
       Corkscrew-VERSION-macOS-Intel.dmg
     linux-x86_64-unknown-linux-gnu/
-      Corkscrew-VERSION-Linux.AppImage.tar.gz + .sig  (or .AppImage + .sig)
+      Corkscrew-VERSION-x86_64.AppImage.tar.gz + .sig  (or .AppImage + .sig)
 """
 
 import json

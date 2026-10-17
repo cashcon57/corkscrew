@@ -182,9 +182,11 @@ jobs:
         working-directory: e2e-wdio
         run: npm ci
 
+      # `tauri build --debug` keeps debug_assertions (tauri-plugin-webdriver) but
+      # embeds the built frontend; plain `cargo build` would load devUrl
+      # (localhost:1420), which nothing serves in CI.
       - name: Build Tauri app (debug)
-        working-directory: src-tauri
-        run: cargo build
+        run: npm run tauri build -- --debug --no-bundle
 
       - name: Run WebdriverIO E2E tests
         working-directory: e2e-wdio
