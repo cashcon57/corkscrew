@@ -363,46 +363,18 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
                 .join("bottles")
                 .join("bottles"),
         },
-        // Steam / Proton (primary library)
-        SearchLocation {
-            source: "Proton",
-            path: home
-                .join(".local")
-                .join("share")
-                .join("Steam")
-                .join("steamapps")
-                .join("compatdata"),
-        },
-        // Steam via symlink (common on SteamOS)
-        SearchLocation {
-            source: "Proton",
-            path: home
-                .join(".steam")
-                .join("steam")
-                .join("steamapps")
-                .join("compatdata"),
-        },
-        // Flatpak Steam
-        SearchLocation {
-            source: "Proton",
-            path: home
-                .join(".var")
-                .join("app")
-                .join("com.valvesoftware.Steam")
-                .join(".local")
-                .join("share")
-                .join("Steam")
-                .join("steamapps")
-                .join("compatdata"),
-        },
     ];
 
-    // Also scan secondary Steam library folders (e.g. SD card on Steam Deck)
-    let steam_dirs = [
-        home.join(".local/share/Steam"),
-        home.join(".steam/steam"),
-    ];
-    for steam_dir in &steam_dirs {
+    // Steam / Proton: each root's primary library, then any secondary
+    // libraries (e.g. SD card on Steam Deck) its libraryfolders.vdf lists.
+    let steam_roots = linux_steam_roots(home);
+    for steam_root in &steam_roots {
+        locations.push(SearchLocation {
+            source: "Proton",
+            path: steam_root.join("steamapps").join("compatdata"),
+        });
+    }
+    for steam_dir in &steam_roots {
         for vdf_name in &["steamapps/libraryfolders.vdf", "config/libraryfolders.vdf"] {
             let vdf_path = steam_dir.join(vdf_name);
             if let Ok(content) = fs::read_to_string(&vdf_path) {
@@ -427,6 +399,32 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
     }
 
     locations
+}
+
+/// Steam installation roots to scan on Linux, relative to `home`.
+#[cfg(target_os = "linux")]
+fn linux_steam_roots(home: &Path) -> Vec<PathBuf> {
+    let flatpak = home
+        .join(".var")
+        .join("app")
+        .join("com.valvesoftware.Steam");
+    vec![
+        // Native install
+        home.join(".local").join("share").join("Steam"),
+        // Native via symlink (common on SteamOS)
+        home.join(".steam").join("steam"),
+        // Flatpak Steam (legacy layout)
+        flatpak.join(".local").join("share").join("Steam"),
+        // Flatpak Steam (current layout)
+        flatpak.join("data").join("Steam"),
+        // Snap Steam
+        home.join("snap")
+            .join("steam")
+            .join("common")
+            .join(".local")
+            .join("share")
+            .join("Steam"),
+    ]
 }
 
 /// Extract a Steam library root from one `libraryfolders.vdf` line.
@@ -479,16 +477,31 @@ const DIRECT_PREFIX_SOURCE: &str = "Wine";
 /// unsandboxed and sandboxed CrossOver paths), retain only the instance whose
 /// `bottle.toml` has the most recent modification time.  If no `bottle.toml`
 /// is found in either path, the first occurrence wins.
+///
+/// Proton prefixes are exempt from name dedup: native, Flatpak and Snap Steam
+/// installs of the same game share an appmanifest name but are distinct
+/// prefixes.  They are instead deduplicated by canonical path, so one prefix
+/// reached through several aliases (e.g. `~/.steam/steam` symlinked to
+/// `~/.local/share/Steam`) is kept once, first occurrence winning.
 fn deduplicate_bottles_by_name(bottles: Vec<Bottle>) -> Vec<Bottle> {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     // Preserve insertion order so that the output is deterministic.  We build
     // a map from lowercase name -> index into `result`, and update the entry
     // whenever we find a newer mtime.
     let mut result: Vec<Bottle> = Vec::with_capacity(bottles.len());
     let mut name_to_idx: HashMap<String, usize> = HashMap::new();
+    let mut proton_paths: HashSet<PathBuf> = HashSet::new();
 
     for bottle in bottles {
+        if bottle.source == "Proton" {
+            let canonical = fs::canonicalize(&bottle.path).unwrap_or_else(|_| bottle.path.clone());
+            if proton_paths.insert(canonical) {
+                result.push(bottle);
+            }
+            continue;
+        }
+
         let key = bottle.name.to_lowercase();
         match name_to_idx.get(&key).copied() {
             None => {
@@ -1193,10 +1206,20 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn write_libraryfolders(home: &Path, content: &str) {
-        let steamapps = home.join(".local/share/Steam/steamapps");
+        write_libraryfolders_at(&home.join(".local/share/Steam"), content);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_libraryfolders_at(steam_root: &Path, content: &str) {
+        let steamapps = steam_root.join("steamapps");
         fs::create_dir_all(&steamapps).expect("create steamapps");
         fs::write(steamapps.join("libraryfolders.vdf"), content).expect("write vdf");
     }
+
+    #[cfg(target_os = "linux")]
+    const FLATPAK_STEAM_ROOT: &str = ".var/app/com.valvesoftware.Steam/data/Steam";
+    #[cfg(target_os = "linux")]
+    const SNAP_STEAM_ROOT: &str = "snap/steam/common/.local/share/Steam";
 
     #[cfg(target_os = "linux")]
     fn proton_bottles(home: &Path) -> Vec<Bottle> {
@@ -1276,6 +1299,168 @@ mod tests {
             .collect();
         assert_eq!(locations.len(), 1);
         assert_eq!(proton_bottles(home.path()).len(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn flatpak_and_snap_steam_primary_libraries_discover_proton_prefixes() {
+        for (steam_root, app_id, name) in [
+            (FLATPAK_STEAM_ROOT, "489830", "Skyrim Special Edition"),
+            (SNAP_STEAM_ROOT, "377160", "Fallout 4"),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let pfx = create_fake_proton_prefix(&home.path().join(steam_root), app_id, name);
+
+            let bottles = proton_bottles(home.path());
+
+            assert_eq!(bottles.len(), 1, "{steam_root}: {bottles:?}");
+            assert_eq!(bottles[0].name, name);
+            assert_eq!(bottles[0].path, pfx);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn same_name_proton_prefixes_in_native_flatpak_and_snap_are_all_kept() {
+        let home = tempfile::tempdir().unwrap();
+        let name = "Skyrim Special Edition";
+        let roots = [".local/share/Steam", FLATPAK_STEAM_ROOT, SNAP_STEAM_ROOT];
+        let mut expected: Vec<PathBuf> = roots
+            .iter()
+            .map(|root| create_fake_proton_prefix(&home.path().join(root), "489830", name))
+            .collect();
+
+        let mut paths: Vec<PathBuf> = proton_bottles(home.path())
+            .into_iter()
+            .inspect(|b| assert_eq!(b.name, name))
+            .map(|b| b.path)
+            .collect();
+        paths.sort();
+        expected.sort();
+
+        assert_eq!(paths, expected);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proton_prefix_reached_through_symlinked_steam_root_is_kept_once() {
+        let home = tempfile::tempdir().unwrap();
+        let pfx = create_fake_proton_prefix(
+            &home.path().join(".local/share/Steam"),
+            "489830",
+            "Skyrim Special Edition",
+        );
+        // SteamOS layout: ~/.steam/steam -> ~/.local/share/Steam
+        fs::create_dir_all(home.path().join(".steam")).unwrap();
+        std::os::unix::fs::symlink(
+            home.path().join(".local/share/Steam"),
+            home.path().join(".steam/steam"),
+        )
+        .unwrap();
+
+        let bottles = proton_bottles(home.path());
+
+        assert_eq!(bottles.len(), 1, "bottles: {bottles:?}");
+        assert_eq!(bottles[0].path, pfx);
+    }
+
+    #[test]
+    fn non_proton_same_name_bottles_still_dedup_to_newest_bottle_toml() {
+        let roots = tempfile::tempdir().unwrap();
+        let older = create_fake_bottle(&roots.path().join("a"), "Steam");
+        let newer = create_fake_bottle(&roots.path().join("b"), "steam");
+        fs::write(older.join("bottle.toml"), "").unwrap();
+        fs::write(newer.join("bottle.toml"), "").unwrap();
+        let old_time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        fs::File::options()
+            .write(true)
+            .open(older.join("bottle.toml"))
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+
+        let bottles = deduplicate_bottles_by_name(
+            [&older, &newer]
+                .into_iter()
+                .map(|path| Bottle {
+                    name: path.file_name().unwrap().to_string_lossy().into_owned(),
+                    path: path.clone(),
+                    source: "CrossOver".to_string(),
+                })
+                .collect(),
+        );
+
+        assert_eq!(bottles.len(), 1);
+        assert_eq!(bottles[0].path, newer);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn flatpak_and_snap_steam_secondary_libraries_discover_proton_prefixes() {
+        for steam_root in [FLATPAK_STEAM_ROOT, SNAP_STEAM_ROOT] {
+            let home = tempfile::tempdir().unwrap();
+            let library = tempfile::tempdir().unwrap();
+            let pfx = create_fake_proton_prefix(library.path(), "489830", "Skyrim Special Edition");
+            let root = home.path().join(steam_root);
+            write_libraryfolders_at(
+                &root,
+                &format!(
+                    "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{root}\"\n\t}}\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{lib}\"\n\t}}\n}}\n",
+                    root = root.display(),
+                    lib = library.path().display(),
+                ),
+            );
+
+            let bottles = proton_bottles(home.path());
+
+            assert_eq!(bottles.len(), 1, "{steam_root}: {bottles:?}");
+            assert_eq!(bottles[0].name, "Skyrim Special Edition");
+            assert_eq!(bottles[0].path, pfx);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn secondary_steam_library_shared_by_native_flatpak_and_snap_is_scanned_once() {
+        let home = tempfile::tempdir().unwrap();
+        let library = tempfile::tempdir().unwrap();
+        create_fake_proton_prefix(library.path(), "489830", "Skyrim Special Edition");
+        let vdf = format!(
+            "\"LibraryFolders\"\n{{\n\t\"1\"\t\t\"{}\"\n}}\n",
+            library.path().display()
+        );
+        for steam_root in [".local/share/Steam", FLATPAK_STEAM_ROOT, SNAP_STEAM_ROOT] {
+            write_libraryfolders_at(&home.path().join(steam_root), &vdf);
+        }
+
+        let locations: Vec<_> = platform_search_locations(home.path())
+            .into_iter()
+            .filter(|l| l.path.starts_with(library.path()))
+            .collect();
+        assert_eq!(locations.len(), 1);
+        assert_eq!(proton_bottles(home.path()).len(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn flatpak_and_snap_steam_vdf_rejects_relative_and_traversal_paths() {
+        for steam_root in [FLATPAK_STEAM_ROOT, SNAP_STEAM_ROOT] {
+            let home = tempfile::tempdir().unwrap();
+            let root = home.path().join(steam_root);
+            // A relative library that would resolve under the cwd, and a
+            // traversal path that would resolve back to an existing library.
+            let escaped = home.path().join("escaped");
+            create_fake_proton_prefix(&escaped, "489830", "Skyrim Special Edition");
+            write_libraryfolders_at(
+                &root,
+                &format!(
+                    "\"LibraryFolders\"\n{{\n\t\"1\"\t\t\"escaped\"\n\t\"2\"\t\t\"{}/x/../escaped\"\n}}\n",
+                    home.path().display()
+                ),
+            );
+
+            assert!(proton_bottles(home.path()).is_empty(), "{steam_root}");
+        }
     }
 
     #[cfg(target_os = "linux")]
