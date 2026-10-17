@@ -477,16 +477,31 @@ const DIRECT_PREFIX_SOURCE: &str = "Wine";
 /// unsandboxed and sandboxed CrossOver paths), retain only the instance whose
 /// `bottle.toml` has the most recent modification time.  If no `bottle.toml`
 /// is found in either path, the first occurrence wins.
+///
+/// Proton prefixes are exempt from name dedup: native, Flatpak and Snap Steam
+/// installs of the same game share an appmanifest name but are distinct
+/// prefixes.  They are instead deduplicated by canonical path, so one prefix
+/// reached through several aliases (e.g. `~/.steam/steam` symlinked to
+/// `~/.local/share/Steam`) is kept once, first occurrence winning.
 fn deduplicate_bottles_by_name(bottles: Vec<Bottle>) -> Vec<Bottle> {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     // Preserve insertion order so that the output is deterministic.  We build
     // a map from lowercase name -> index into `result`, and update the entry
     // whenever we find a newer mtime.
     let mut result: Vec<Bottle> = Vec::with_capacity(bottles.len());
     let mut name_to_idx: HashMap<String, usize> = HashMap::new();
+    let mut proton_paths: HashSet<PathBuf> = HashSet::new();
 
     for bottle in bottles {
+        if bottle.source == "Proton" {
+            let canonical = fs::canonicalize(&bottle.path).unwrap_or_else(|_| bottle.path.clone());
+            if proton_paths.insert(canonical) {
+                result.push(bottle);
+            }
+            continue;
+        }
+
         let key = bottle.name.to_lowercase();
         match name_to_idx.get(&key).copied() {
             None => {
@@ -1302,6 +1317,81 @@ mod tests {
             assert_eq!(bottles[0].name, name);
             assert_eq!(bottles[0].path, pfx);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn same_name_proton_prefixes_in_native_flatpak_and_snap_are_all_kept() {
+        let home = tempfile::tempdir().unwrap();
+        let name = "Skyrim Special Edition";
+        let roots = [".local/share/Steam", FLATPAK_STEAM_ROOT, SNAP_STEAM_ROOT];
+        let mut expected: Vec<PathBuf> = roots
+            .iter()
+            .map(|root| create_fake_proton_prefix(&home.path().join(root), "489830", name))
+            .collect();
+
+        let mut paths: Vec<PathBuf> = proton_bottles(home.path())
+            .into_iter()
+            .inspect(|b| assert_eq!(b.name, name))
+            .map(|b| b.path)
+            .collect();
+        paths.sort();
+        expected.sort();
+
+        assert_eq!(paths, expected);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proton_prefix_reached_through_symlinked_steam_root_is_kept_once() {
+        let home = tempfile::tempdir().unwrap();
+        let pfx = create_fake_proton_prefix(
+            &home.path().join(".local/share/Steam"),
+            "489830",
+            "Skyrim Special Edition",
+        );
+        // SteamOS layout: ~/.steam/steam -> ~/.local/share/Steam
+        fs::create_dir_all(home.path().join(".steam")).unwrap();
+        std::os::unix::fs::symlink(
+            home.path().join(".local/share/Steam"),
+            home.path().join(".steam/steam"),
+        )
+        .unwrap();
+
+        let bottles = proton_bottles(home.path());
+
+        assert_eq!(bottles.len(), 1, "bottles: {bottles:?}");
+        assert_eq!(bottles[0].path, pfx);
+    }
+
+    #[test]
+    fn non_proton_same_name_bottles_still_dedup_to_newest_bottle_toml() {
+        let roots = tempfile::tempdir().unwrap();
+        let older = create_fake_bottle(&roots.path().join("a"), "Steam");
+        let newer = create_fake_bottle(&roots.path().join("b"), "steam");
+        fs::write(older.join("bottle.toml"), "").unwrap();
+        fs::write(newer.join("bottle.toml"), "").unwrap();
+        let old_time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        fs::File::options()
+            .write(true)
+            .open(older.join("bottle.toml"))
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+
+        let bottles = deduplicate_bottles_by_name(
+            [&older, &newer]
+                .into_iter()
+                .map(|path| Bottle {
+                    name: path.file_name().unwrap().to_string_lossy().into_owned(),
+                    path: path.clone(),
+                    source: "CrossOver".to_string(),
+                })
+                .collect(),
+        );
+
+        assert_eq!(bottles.len(), 1);
+        assert_eq!(bottles[0].path, newer);
     }
 
     #[cfg(target_os = "linux")]
