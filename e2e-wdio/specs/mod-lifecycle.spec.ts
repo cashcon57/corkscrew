@@ -33,9 +33,27 @@ async function tauriInvoke(cmd: string, args: Record<string, any> = {}): Promise
 async function navigateToMods() {
   const shell = await $(".app-shell");
   await shell.waitForExist({ timeout: 10_000 });
-  const navItems = await $$(".nav-item");
-  await navItems[1].click();
+  // The app opens on Mods, mounted before the mod was installed over raw IPC
+  // (which skips the UI's own loadMods()). Leave and return so the page
+  // remounts and reloads from the backend.
+  await $('.nav-item[title="Settings"]').click();
+  await browser.pause(1_000);
+  await $('.nav-item[title="Mods"]').click();
   await browser.pause(2_000);
+}
+
+/** Click the test mod's enable/disable switch, wherever it currently renders. */
+async function clickTestModSwitch() {
+  const selector = `[role='switch'][aria-label$=' E2E Test Mod']`;
+  // Disabled mods move into a "Disabled" section that starts collapsed.
+  if (!(await $(selector).isExisting())) {
+    await $("button.disabled-separator").click();
+    await browser.pause(500);
+  }
+  const toggle = await $(selector);
+  await toggle.waitForExist({ timeout: 5_000 });
+  // Use JavaScript click to avoid any overlay issues
+  await browser.execute((el: any) => el.click(), toggle);
 }
 
 describe("Mod Lifecycle", () => {
@@ -47,10 +65,13 @@ describe("Mod Lifecycle", () => {
     const shell = await $(".app-shell");
     await shell.waitForExist({ timeout: 20_000 });
 
+    // wdio.conf.ts seeds a Skyrim SE Wine prefix in the sandbox, so a Wine
+    // game is always detectable (bottle name lives under `runtime`).
     const games = await tauriInvoke("get_all_games") as any[];
-    expect(games?.length).toBeGreaterThan(0);
-    gameId = games[0].game_id;
-    bottleName = games[0].bottle_name;
+    const wineGame = games?.find((g: any) => g.runtime?.runtime === "wine");
+    expect(wineGame).toBeDefined();
+    gameId = wineGame.game_id;
+    bottleName = wineGame.runtime.bottle_name;
   });
 
   after(async () => {
@@ -170,8 +191,7 @@ describe("Mod Lifecycle", () => {
     const toggles = await $$("[role='switch']");
     expect(toggles.length).toBeGreaterThan(0);
 
-    // Use JavaScript click to avoid any overlay issues
-    await browser.execute((el: any) => el.click(), toggles[0]);
+    await clickTestModSwitch();
     await browser.pause(2_000);
 
     body = await $("body");
@@ -191,13 +211,12 @@ describe("Mod Lifecycle", () => {
     }
 
     // Restore
-    await browser.execute((el: any) => el.click(), toggles[0]);
+    await clickTestModSwitch();
     await browser.pause(1_000);
   });
 
   it("toggle updates backend state", async () => {
-    const toggles = await $$("[role='switch']");
-    await browser.execute((el: any) => el.click(), toggles[0]);
+    await clickTestModSwitch();
     await browser.pause(2_000);
 
     const mods = await tauriInvoke("get_installed_mods_summary", { gameId, bottleName }) as any[];
@@ -205,7 +224,7 @@ describe("Mod Lifecycle", () => {
     expect(hasDisabled).toBe(true);
 
     // Restore
-    await browser.execute((el: any) => el.click(), toggles[0]);
+    await clickTestModSwitch();
     await browser.pause(1_000);
   });
 
