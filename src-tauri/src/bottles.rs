@@ -471,6 +471,36 @@ fn platform_search_locations_with_xdg(
     locations
 }
 
+/// Compatdata root(s) that should win name-collision deduplication
+/// (`deduplicate_bottles_by_name_preferring`) regardless of mtime: the
+/// directory that the active `$XDG_DATA_HOME` Steam install's compatdata
+/// resolves to among the locations actually scanned. If that directory
+/// collapses onto one of the default locations (same directory, verbatim or
+/// via canonicalization — see `same_dir`), the existing location's path is
+/// returned instead of a freshly-built one, so later `starts_with` checks
+/// line up with the paths bottles were actually collected from.
+///
+/// Empty when `$XDG_DATA_HOME` is unset or invalid.
+#[cfg(target_os = "linux")]
+fn preferred_bottle_roots(home: &Path, xdg_data_home: Option<&OsStr>) -> Vec<PathBuf> {
+    let home = normalize_container_path(home);
+    let Some(xdg_root) =
+        crate::proton::xdg_steam_root(xdg_data_home).map(|p| normalize_container_path(&p))
+    else {
+        return Vec::new();
+    };
+    let compatdata = xdg_root.join("steamapps").join("compatdata");
+
+    let locations = platform_search_locations_with_xdg(&home, xdg_data_home);
+    let resolved = locations
+        .iter()
+        .find(|l| l.source == "Proton" && same_dir(&l.path, &compatdata))
+        .map(|l| l.path.clone())
+        .unwrap_or(compatdata);
+
+    vec![resolved]
+}
+
 /// Extract a Steam library root from one `libraryfolders.vdf` line.
 ///
 /// Accepts both on-disk forms:
@@ -522,11 +552,34 @@ const DIRECT_PREFIX_SOURCE: &str = "Wine";
 /// `bottle.toml` has the most recent modification time.  If no `bottle.toml`
 /// is found in either path, the first occurrence wins.
 fn deduplicate_bottles_by_name(bottles: Vec<Bottle>) -> Vec<Bottle> {
+    deduplicate_bottles_by_name_preferring(bottles, &[])
+}
+
+/// Deduplicate a list of bottles by name (case-insensitive), with a
+/// deterministic override for `preferred_roots`.
+///
+/// A bottle is "preferred" when its path starts with one of `preferred_roots`
+/// (used on Linux to mark the active `$XDG_DATA_HOME` Steam compatdata root).
+/// When both same-name duplicates are Proton prefixes and exactly one is
+/// preferred, the preferred one always wins, regardless of mtime — this keeps
+/// a stale default-root Proton prefix from shadowing the active custom-XDG
+/// one. Collisions involving any non-Proton bottle (Heroic, Bottles, Wine,
+/// CrossOver, ...) are never overridden. Otherwise, the existing behavior
+/// applies: the instance with the most
+/// recent `bottle.toml` (or `drive_c`) mtime wins, and the first occurrence
+/// wins on a tie.
+fn deduplicate_bottles_by_name_preferring(
+    bottles: Vec<Bottle>,
+    preferred_roots: &[PathBuf],
+) -> Vec<Bottle> {
     use std::collections::HashMap;
+
+    let is_preferred =
+        |bottle: &Bottle| preferred_roots.iter().any(|root| bottle.path.starts_with(root));
 
     // Preserve insertion order so that the output is deterministic.  We build
     // a map from lowercase name -> index into `result`, and update the entry
-    // whenever we find a newer mtime.
+    // whenever a replacement should win.
     let mut result: Vec<Bottle> = Vec::with_capacity(bottles.len());
     let mut name_to_idx: HashMap<String, usize> = HashMap::new();
 
@@ -539,9 +592,19 @@ fn deduplicate_bottles_by_name(bottles: Vec<Bottle>) -> Vec<Bottle> {
                 result.push(bottle);
             }
             Some(existing_idx) => {
-                // We've already seen a bottle with this name — keep the one
-                // with the newer bottle.toml (or drive_c) mtime.
-                if bottle_mtime(&bottle) > bottle_mtime(&result[existing_idx]) {
+                let existing = &result[existing_idx];
+                // The preferred-root override only arbitrates Proton-vs-Proton
+                // collisions; any pairing involving a non-Proton bottle keeps
+                // the plain mtime/first-wins policy.
+                let both_proton = bottle.source == "Proton" && existing.source == "Proton";
+                let replace = match (both_proton, is_preferred(&bottle), is_preferred(existing)) {
+                    (true, true, false) => true,
+                    (true, false, true) => false,
+                    // Otherwise fall back to mtime, keep the one with the
+                    // newer bottle.toml (or drive_c) mtime.
+                    _ => bottle_mtime(&bottle) > bottle_mtime(existing),
+                };
+                if replace {
                     log::debug!(
                         "CrossOver bottle '{}': preferring path {} over {}",
                         bottle.name,
@@ -1074,8 +1137,14 @@ pub fn detect_bottles() -> Vec<Bottle> {
     // sandboxed and unsandboxed CrossOver paths), keep the one whose
     // bottle.toml has the most recent mtime.  This ensures we always point at
     // the active install regardless of which CrossOver distribution variant the
-    // user has.
-    bottles = deduplicate_bottles_by_name(bottles);
+    // user has. On Linux, same-name Proton prefixes under the active custom
+    // `$XDG_DATA_HOME` compatdata root always win over default-root
+    // duplicates, regardless of mtime — see `preferred_bottle_roots`.
+    #[cfg(target_os = "linux")]
+    let preferred_roots = preferred_bottle_roots(&home, crate::proton::xdg_data_home_env().as_deref());
+    #[cfg(not(target_os = "linux"))]
+    let preferred_roots: Vec<PathBuf> = Vec::new();
+    bottles = deduplicate_bottles_by_name_preferring(bottles, &preferred_roots);
 
     // Enrich Heroic bottles with game metadata
     let heroic_games = detect_heroic_games();
@@ -1174,7 +1243,8 @@ mod tests {
         for location in platform_search_locations_with_xdg(home, xdg) {
             collect_bottles_from(&location, &mut bottles);
         }
-        deduplicate_bottles_by_name(bottles)
+        let preferred_roots = preferred_bottle_roots(home, xdg);
+        deduplicate_bottles_by_name_preferring(bottles, &preferred_roots)
     }
 
     #[cfg(target_os = "linux")]
@@ -1958,5 +2028,150 @@ mod tests {
 
         let deduped = deduplicate_bottles_by_name(bottles);
         assert_eq!(deduped.len(), 1, "case-insensitive duplicate should be collapsed to one entry");
+    }
+
+    /// Non-preferred duplicates still fall back to mtime/first-wins.
+    #[test]
+    fn deduplicate_bottles_by_name_preferring_falls_back_to_mtime_when_not_preferred() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let path_old = create_fake_bottle(tmp.path(), "MySkyrim_old");
+        let old_toml = path_old.join("bottle.toml");
+        fs::write(&old_toml, "[bottle]\nname = \"MySkyrim\"\n").unwrap();
+        filetime::set_file_mtime(&old_toml, filetime::FileTime::from_unix_time(1_000_000, 0))
+            .unwrap();
+
+        let path_new = create_fake_bottle(tmp.path(), "MySkyrim_new");
+        let new_toml = path_new.join("bottle.toml");
+        fs::write(&new_toml, "[bottle]\nname = \"MySkyrim\"\n").unwrap();
+        filetime::set_file_mtime(&new_toml, filetime::FileTime::from_unix_time(2_000_000, 0))
+            .unwrap();
+
+        let bottles = vec![
+            Bottle { name: "MySkyrim".into(), path: path_old.clone(), source: "CrossOver".into() },
+            Bottle { name: "MySkyrim".into(), path: path_new.clone(), source: "CrossOver".into() },
+        ];
+
+        // Neither path is under the (unrelated) preferred root, so this must
+        // behave exactly like `deduplicate_bottles_by_name` (mtime wins).
+        let unrelated_root = tmp.path().join("somewhere-else");
+        let deduped = deduplicate_bottles_by_name_preferring(bottles, &[unrelated_root]);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].path, path_new, "newer bottle.toml should still win");
+    }
+
+    /// A preferred-root bottle wins over a same-name duplicate even when the
+    /// non-preferred duplicate has a strictly newer mtime.
+    #[test]
+    fn deduplicate_bottles_by_name_preferring_ignores_mtime_for_preferred_root() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let preferred_root = tmp.path().join("preferred");
+        let path_preferred = create_fake_bottle(&preferred_root, "MySkyrim_preferred");
+        filetime::set_file_mtime(
+            path_preferred.join("drive_c"),
+            filetime::FileTime::from_unix_time(1_000_000, 0),
+        )
+        .unwrap();
+
+        let path_stale = create_fake_bottle(tmp.path(), "MySkyrim_stale");
+        filetime::set_file_mtime(
+            path_stale.join("drive_c"),
+            filetime::FileTime::from_unix_time(2_000_000, 0),
+        )
+        .unwrap();
+
+        let bottles = vec![
+            Bottle { name: "MySkyrim".into(), path: path_stale.clone(), source: "Proton".into() },
+            Bottle { name: "MySkyrim".into(), path: path_preferred.clone(), source: "Proton".into() },
+        ];
+
+        let deduped = deduplicate_bottles_by_name_preferring(bottles, &[preferred_root]);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(
+            deduped[0].path, path_preferred,
+            "preferred root should win regardless of mtime"
+        );
+    }
+
+    /// Regression: the preferred-root override is scoped to Proton-vs-Proton
+    /// collisions. A custom-XDG Proton prefix must NOT automatically shadow a
+    /// newer same-name non-Proton bottle — mtime still decides, in either
+    /// insertion order.
+    #[test]
+    fn deduplicate_bottles_by_name_preferring_does_not_override_non_proton() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let preferred_root = tmp.path().join("preferred");
+        let path_proton = create_fake_bottle(&preferred_root, "MySkyrim_proton");
+        filetime::set_file_mtime(
+            path_proton.join("drive_c"),
+            filetime::FileTime::from_unix_time(1_000_000, 0),
+        )
+        .unwrap();
+
+        let path_heroic = create_fake_bottle(tmp.path(), "MySkyrim_heroic");
+        filetime::set_file_mtime(
+            path_heroic.join("drive_c"),
+            filetime::FileTime::from_unix_time(2_000_000, 0),
+        )
+        .unwrap();
+
+        let proton =
+            Bottle { name: "MySkyrim".into(), path: path_proton.clone(), source: "Proton".into() };
+        let heroic =
+            Bottle { name: "MySkyrim".into(), path: path_heroic.clone(), source: "Heroic".into() };
+
+        for bottles in [vec![proton.clone(), heroic.clone()], vec![heroic, proton]] {
+            let deduped =
+                deduplicate_bottles_by_name_preferring(bottles, &[preferred_root.clone()]);
+            assert_eq!(deduped.len(), 1);
+            assert_eq!(
+                deduped[0].path, path_heroic,
+                "newer non-Proton bottle should win over preferred-root Proton prefix"
+            );
+        }
+    }
+
+    /// Regression: a same-name Proton prefix under the active custom
+    /// `$XDG_DATA_HOME` compatdata root must win over a stale duplicate under
+    /// the default `~/.local/share/Steam` root, even when the default
+    /// prefix's mtime is newer.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn xdg_proton_prefix_wins_over_newer_stale_default_prefix() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+
+        // Default library: ~/.local/share/Steam/steamapps/compatdata/489830
+        let default_library = home.path().join(".local/share/Steam");
+        let default_pfx =
+            create_fake_proton_prefix(&default_library, "489830", "Skyrim Special Edition");
+
+        // Custom XDG library: $XDG_DATA_HOME/Steam/steamapps/compatdata/489830
+        let xdg_steam = xdg.path().join("Steam");
+        let xdg_pfx =
+            create_fake_proton_prefix(&xdg_steam, "489830", "Skyrim Special Edition");
+
+        // Give the default (stale) prefix a strictly newer mtime than the
+        // active XDG one — a plain mtime-based dedupe would pick it, which
+        // is the bug this test guards against.
+        filetime::set_file_mtime(
+            xdg_pfx.join("drive_c"),
+            filetime::FileTime::from_unix_time(1_000_000, 0),
+        )
+        .unwrap();
+        filetime::set_file_mtime(
+            default_pfx.join("drive_c"),
+            filetime::FileTime::from_unix_time(2_000_000, 0),
+        )
+        .unwrap();
+
+        let xdg_os = xdg.path().as_os_str();
+        let bottles = proton_bottles_xdg(home.path(), Some(xdg_os));
+
+        assert_eq!(bottles.len(), 1, "bottles: {bottles:?}");
+        assert_eq!(bottles[0].name, "Skyrim Special Edition");
+        assert_eq!(bottles[0].path, xdg_pfx);
     }
 }
