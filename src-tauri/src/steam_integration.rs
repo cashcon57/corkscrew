@@ -35,19 +35,36 @@ pub fn is_flatpak() -> bool {
     std::env::var("FLATPAK_ID").is_ok() || std::path::Path::new("/.flatpak-info").exists()
 }
 
-/// Detect a Steam installation on this system.
+/// Compare two paths for identity: equal verbatim, or equal once both
+/// successfully canonicalize (resolving symlinks and `.`/`..` segments).
 #[cfg(target_os = "linux")]
-pub fn detect_steam_installation() -> Option<SteamInfo> {
-    let raw_home = dirs::home_dir()?;
-    // Normalize for Fedora Atomic / Bazzite (/var/home -> /home)
-    let home = crate::bottles::normalize_container_path(&raw_home);
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
+}
 
-    // Log container environment once during detection
-    if let Some(ref env) = crate::bottles::detect_container_environment() {
-        log::info!("Steam detection running in container environment: {:?}", env);
+/// Build the ordered list of Steam root candidates to probe. A custom
+/// `$XDG_DATA_HOME` root (if any) is probed FIRST — Steam itself uses
+/// `$XDG_DATA_HOME/Steam` when the variable is set, so an active custom root
+/// must win over a stale default install. The standard, Flatpak and Snap
+/// locations under `home` and `raw_home` follow. Any default candidate that
+/// names the same directory as the XDG root (verbatim or via
+/// canonicalization) is dropped to avoid duplicate/stale entries.
+#[cfg(target_os = "linux")]
+fn steam_root_candidates(
+    home: &Path,
+    raw_home: &Path,
+    xdg_data_home: Option<&std::ffi::OsStr>,
+) -> Vec<PathBuf> {
+    let xdg_root = crate::proton::xdg_steam_root(xdg_data_home)
+        .map(|p| crate::bottles::normalize_container_path(&p));
+
+    let mut candidates = Vec::new();
+    if let Some(ref xdg_root) = xdg_root {
+        candidates.push(xdg_root.clone());
     }
 
-    let mut candidates = vec![
+    let mut defaults = vec![
         home.join(".steam/steam"),
         home.join(".local/share/Steam"),
         home.join(".var/app/com.valvesoftware.Steam/.steam/steam"), // Flatpak
@@ -55,13 +72,29 @@ pub fn detect_steam_installation() -> Option<SteamInfo> {
     ];
     // Also check /var/home variant if the normalized home differs from the raw home
     if home != raw_home {
-        candidates.push(raw_home.join(".steam/steam"));
-        candidates.push(raw_home.join(".local/share/Steam"));
-        candidates.push(raw_home.join(".var/app/com.valvesoftware.Steam/.steam/steam"));
-        candidates.push(raw_home.join("snap/steam/current/.steam/steam"));
+        defaults.push(raw_home.join(".steam/steam"));
+        defaults.push(raw_home.join(".local/share/Steam"));
+        defaults.push(raw_home.join(".var/app/com.valvesoftware.Steam/.steam/steam"));
+        defaults.push(raw_home.join("snap/steam/current/.steam/steam"));
     }
 
-    for candidate in &candidates {
+    for default in defaults {
+        let is_duplicate = xdg_root
+            .as_ref()
+            .is_some_and(|xdg_root| same_dir(&default, xdg_root));
+        if !is_duplicate {
+            candidates.push(default);
+        }
+    }
+
+    candidates
+}
+
+/// Probe each candidate in order and return the first that looks like a real
+/// Steam install (has `steam.sh` or `ubuntu12_32`).
+#[cfg(target_os = "linux")]
+fn find_steam_installation(candidates: &[PathBuf]) -> Option<SteamInfo> {
+    for candidate in candidates {
         if candidate.join("steam.sh").exists() || candidate.join("ubuntu12_32").exists() {
             let userdata = candidate.join("userdata");
             let mut userdata_dirs = Vec::new();
@@ -92,6 +125,23 @@ pub fn detect_steam_installation() -> Option<SteamInfo> {
     }
 
     None
+}
+
+/// Detect a Steam installation on this system.
+#[cfg(target_os = "linux")]
+pub fn detect_steam_installation() -> Option<SteamInfo> {
+    let raw_home = dirs::home_dir()?;
+    // Normalize for Fedora Atomic / Bazzite (/var/home -> /home)
+    let home = crate::bottles::normalize_container_path(&raw_home);
+
+    // Log container environment once during detection
+    if let Some(ref env) = crate::bottles::detect_container_environment() {
+        log::info!("Steam detection running in container environment: {:?}", env);
+    }
+
+    let xdg_data_home = crate::proton::xdg_data_home_env();
+    let candidates = steam_root_candidates(&home, &raw_home, xdg_data_home.as_deref());
+    find_steam_installation(&candidates)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1190,6 +1240,114 @@ pub fn unpatch_launch_options(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    fn create_fake_steam_root(root: &Path) {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join("steam.sh"), "#!/bin/sh\n").unwrap();
+        std::fs::create_dir_all(root.join("userdata/12345/config")).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn custom_xdg_data_home_discovers_steam_installation() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let xdg_steam = xdg.path().join("Steam");
+        create_fake_steam_root(&xdg_steam);
+
+        let xdg_os = xdg.path().as_os_str();
+        let candidates = steam_root_candidates(home.path(), home.path(), Some(xdg_os));
+        let info = find_steam_installation(&candidates).expect("Steam install detected");
+
+        assert_eq!(info.steam_root, xdg_steam);
+        assert_eq!(info.userdata_dirs.len(), 1);
+        assert_eq!(info.userdata_dirs[0], xdg_steam.join("userdata/12345"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn missing_xdg_data_home_finds_nothing_without_default_install() {
+        let home = tempfile::tempdir().unwrap();
+        let candidates = steam_root_candidates(home.path(), home.path(), None);
+        assert!(find_steam_installation(&candidates).is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn relative_xdg_data_home_is_ignored_in_candidates() {
+        let home = tempfile::tempdir().unwrap();
+        let default_candidates = steam_root_candidates(home.path(), home.path(), None);
+
+        for invalid in ["relative/data", ""] {
+            let xdg = std::ffi::OsStr::new(invalid);
+            let candidates = steam_root_candidates(home.path(), home.path(), Some(xdg));
+            assert_eq!(candidates, default_candidates, "value: {invalid:?}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn custom_xdg_root_wins_over_stale_default_root() {
+        let home = tempfile::tempdir().unwrap();
+        create_fake_steam_root(&home.path().join(".steam/steam"));
+
+        let xdg = tempfile::tempdir().unwrap();
+        let xdg_steam = xdg.path().join("Steam");
+        create_fake_steam_root(&xdg_steam);
+
+        let xdg_os = xdg.path().as_os_str();
+        let candidates = steam_root_candidates(home.path(), home.path(), Some(xdg_os));
+        let info = find_steam_installation(&candidates).expect("Steam install detected");
+
+        assert_eq!(info.steam_root, xdg_steam);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn xdg_data_home_equal_to_default_does_not_duplicate_candidate() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = home.path().join(".local/share");
+
+        let candidates = steam_root_candidates(home.path(), home.path(), Some(xdg.as_os_str()));
+        let default_root = home.path().join(".local/share/Steam");
+        assert_eq!(
+            candidates.iter().filter(|c| **c == default_root).count(),
+            1
+        );
+        assert_eq!(candidates[0], default_root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn xdg_root_resolving_via_symlink_to_default_is_not_duplicated() {
+        let home = tempfile::tempdir().unwrap();
+        let default_steam = home.path().join(".local/share/Steam");
+        create_fake_steam_root(&default_steam);
+
+        // $XDG_DATA_HOME/Steam is a symlink that resolves to the same
+        // directory as the default `~/.local/share/Steam`.
+        let xdg = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&default_steam, xdg.path().join("Steam")).unwrap();
+
+        let xdg_os = xdg.path().as_os_str();
+        let candidates = steam_root_candidates(home.path(), home.path(), Some(xdg_os));
+
+        let expected = default_steam.canonicalize().unwrap();
+        let matching: Vec<&PathBuf> = candidates
+            .iter()
+            .filter(|c| c.canonicalize().map(|p| p == expected).unwrap_or(false))
+            .collect();
+        assert_eq!(matching.len(), 1, "candidates: {candidates:?}");
+        assert!(
+            candidates[0]
+                .canonicalize()
+                .map(|p| p == expected)
+                .unwrap_or(false),
+            "expected the XDG-resolved root to be first; candidates: {candidates:?}"
+        );
+    }
 
     #[test]
     fn test_corkscrew_entry_creation() {
