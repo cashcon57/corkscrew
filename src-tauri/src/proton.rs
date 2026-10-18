@@ -12,6 +12,7 @@
 use log::{debug, info};
 use once_cell::sync::Lazy;
 use serde::Serialize;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -507,13 +508,48 @@ fn variant_priority(v: &ProtonVariant) -> u32 {
     }
 }
 
+/// Steam roots relative to `$HOME`, covering native, Flatpak and Snap installs.
+const HOME_STEAM_ROOTS: [&str; 5] = [
+    ".local/share/Steam",
+    ".steam/root",
+    ".var/app/com.valvesoftware.Steam/data/Steam",
+    ".var/app/com.valvesoftware.Steam/.local/share/Steam",
+    "snap/steam/common/.local/share/Steam",
+];
+
+/// `$XDG_DATA_HOME` as seen by Linux Steam; other platforms never honor it.
+fn xdg_data_home_env() -> Option<OsString> {
+    if cfg!(target_os = "linux") {
+        std::env::var_os("XDG_DATA_HOME")
+    } else {
+        None
+    }
+}
+
+/// Steam root under a custom `$XDG_DATA_HOME`. Per the XDG Base Directory
+/// spec, empty or relative values are invalid and must be ignored, leaving
+/// the `~/.local/share/Steam` default in effect.
+fn xdg_steam_root(xdg_data_home: Option<&OsStr>) -> Option<PathBuf> {
+    let base = Path::new(xdg_data_home?);
+    base.is_absolute().then(|| base.join("Steam"))
+}
+
+/// All candidate Steam roots. Callers canonicalize/dedup, so a custom
+/// `$XDG_DATA_HOME` equal to the default collapses onto `~/.local/share/Steam`.
+fn steam_roots(home: &Path, xdg_data_home: Option<&OsStr>) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = HOME_STEAM_ROOTS.iter().map(|r| home.join(r)).collect();
+    roots.extend(xdg_steam_root(xdg_data_home));
+    roots
+}
+
 fn find_steam_common_dirs() -> Vec<PathBuf> {
+    let xdg_data_home = xdg_data_home_env();
     dirs::home_dir()
-        .map(|home| find_steam_common_dirs_in_home(&home))
+        .map(|home| find_steam_common_dirs_in_home(&home, xdg_data_home.as_deref()))
         .unwrap_or_default()
 }
 
-fn find_steam_common_dirs_in_home(home: &Path) -> Vec<PathBuf> {
+fn find_steam_common_dirs_in_home(home: &Path, xdg_data_home: Option<&OsStr>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut add_common = |common: PathBuf| {
@@ -525,18 +561,12 @@ fn find_steam_common_dirs_in_home(home: &Path) -> Vec<PathBuf> {
         }
     };
 
-    for root in [
-        ".local/share/Steam",
-        ".steam/root",
-        ".var/app/com.valvesoftware.Steam/data/Steam",
-        ".var/app/com.valvesoftware.Steam/.local/share/Steam",
-        "snap/steam/common/.local/share/Steam",
-    ] {
-        add_common(home.join(root).join("steamapps/common"));
+    for root in steam_roots(home, xdg_data_home) {
+        add_common(root.join("steamapps/common"));
     }
 
     // Native and Flatpak installations can have independent secondary libraries.
-    for libraryfolders_path in find_library_folders_paths(home) {
+    for libraryfolders_path in find_library_folders_paths(home, xdg_data_home) {
         if let Ok(content) = std::fs::read_to_string(&libraryfolders_path) {
             for line in content.lines() {
                 if let Some(path_str) = extract_library_path(line) {
@@ -550,41 +580,10 @@ fn find_steam_common_dirs_in_home(home: &Path) -> Vec<PathBuf> {
 }
 
 fn find_compat_tools_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-
-    if let Some(home) = dirs::home_dir() {
-        // ~/.steam/root/compatibilitytools.d (often a symlink, but cover it)
-        let steam_root = home.join(".steam/root/compatibilitytools.d");
-        if steam_root.is_dir() {
-            dirs.push(steam_root);
-        }
-
-        // ~/.steam/steam/compatibilitytools.d (alternate Steam layout)
-        let steam_steam = home.join(".steam/steam/compatibilitytools.d");
-        if steam_steam.is_dir() && !dirs.iter().any(|d| same_dir(d, &steam_steam)) {
-            dirs.push(steam_steam);
-        }
-
-        // XDG / standard local install: ~/.local/share/Steam/compatibilitytools.d
-        let xdg = home.join(".local/share/Steam/compatibilitytools.d");
-        if xdg.is_dir() && !dirs.iter().any(|d| same_dir(d, &xdg)) {
-            dirs.push(xdg);
-        }
-
-        // Flatpak Steam: ~/.var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d
-        let flatpak_data = home
-            .join(".var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d");
-        if flatpak_data.is_dir() && !dirs.iter().any(|d| same_dir(d, &flatpak_data)) {
-            dirs.push(flatpak_data);
-        }
-
-        // Flatpak Steam (legacy layout): .../.local/share/Steam/compatibilitytools.d
-        let flatpak_legacy = home
-            .join(".var/app/com.valvesoftware.Steam/.local/share/Steam/compatibilitytools.d");
-        if flatpak_legacy.is_dir() && !dirs.iter().any(|d| same_dir(d, &flatpak_legacy)) {
-            dirs.push(flatpak_legacy);
-        }
-    }
+    let xdg_data_home = xdg_data_home_env();
+    let mut dirs = dirs::home_dir()
+        .map(|home| find_user_compat_tools_dirs(&home, xdg_data_home.as_deref()))
+        .unwrap_or_default();
 
     // System-installed compatibility tools (e.g., Proton-CachyOS via pacman/AUR)
     let system = PathBuf::from("/usr/share/steam/compatibilitytools.d");
@@ -600,17 +599,57 @@ fn find_compat_tools_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-fn find_library_folders_paths(home: &Path) -> Vec<PathBuf> {
+fn find_user_compat_tools_dirs(home: &Path, xdg_data_home: Option<&OsStr>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+
+    // ~/.steam/root/compatibilitytools.d (often a symlink, but cover it)
+    let steam_root = home.join(".steam/root/compatibilitytools.d");
+    if steam_root.is_dir() {
+        dirs.push(steam_root);
+    }
+
+    // ~/.steam/steam/compatibilitytools.d (alternate Steam layout)
+    let steam_steam = home.join(".steam/steam/compatibilitytools.d");
+    if steam_steam.is_dir() && !dirs.iter().any(|d| same_dir(d, &steam_steam)) {
+        dirs.push(steam_steam);
+    }
+
+    // XDG / standard local install: ~/.local/share/Steam/compatibilitytools.d
+    let xdg = home.join(".local/share/Steam/compatibilitytools.d");
+    if xdg.is_dir() && !dirs.iter().any(|d| same_dir(d, &xdg)) {
+        dirs.push(xdg);
+    }
+
+    // Flatpak Steam: ~/.var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d
+    let flatpak_data = home
+        .join(".var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d");
+    if flatpak_data.is_dir() && !dirs.iter().any(|d| same_dir(d, &flatpak_data)) {
+        dirs.push(flatpak_data);
+    }
+
+    // Flatpak Steam (legacy layout): .../.local/share/Steam/compatibilitytools.d
+    let flatpak_legacy = home
+        .join(".var/app/com.valvesoftware.Steam/.local/share/Steam/compatibilitytools.d");
+    if flatpak_legacy.is_dir() && !dirs.iter().any(|d| same_dir(d, &flatpak_legacy)) {
+        dirs.push(flatpak_legacy);
+    }
+
+    // Custom $XDG_DATA_HOME: $XDG_DATA_HOME/Steam/compatibilitytools.d
+    if let Some(root) = xdg_steam_root(xdg_data_home) {
+        let custom = root.join("compatibilitytools.d");
+        if custom.is_dir() && !dirs.iter().any(|d| same_dir(d, &custom)) {
+            dirs.push(custom);
+        }
+    }
+
+    dirs
+}
+
+fn find_library_folders_paths(home: &Path, xdg_data_home: Option<&OsStr>) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for root in [
-        ".local/share/Steam",
-        ".steam/root",
-        ".var/app/com.valvesoftware.Steam/data/Steam",
-        ".var/app/com.valvesoftware.Steam/.local/share/Steam",
-        "snap/steam/common/.local/share/Steam",
-    ] {
-        let candidate = home.join(root).join("steamapps/libraryfolders.vdf");
+    for root in steam_roots(home, xdg_data_home) {
+        let candidate = root.join("steamapps/libraryfolders.vdf");
         if let Ok(canonical) = candidate.canonicalize() {
             if canonical.is_file() && seen.insert(canonical) {
                 paths.push(candidate);
@@ -807,8 +846,12 @@ mod tests {
     }
 
     fn fixture_official_versions(home: &Path) -> Vec<ProtonVersion> {
+        fixture_official_versions_xdg(home, None)
+    }
+
+    fn fixture_official_versions_xdg(home: &Path, xdg: Option<&OsStr>) -> Vec<ProtonVersion> {
         let mut versions = Vec::new();
-        for common in find_steam_common_dirs_in_home(home) {
+        for common in find_steam_common_dirs_in_home(home, xdg) {
             scan_proton_dir(&common, &mut versions);
         }
         versions
@@ -846,7 +889,7 @@ mod tests {
         fixture_libraries(&native, &[&native_secondary]);
         fixture_libraries(&flatpak, &[&flatpak_secondary]);
 
-        assert_eq!(find_library_folders_paths(home).len(), 2);
+        assert_eq!(find_library_folders_paths(home, None).len(), 2);
         let versions = fixture_official_versions(home);
         assert_eq!(versions.len(), 2);
         assert!(versions.iter().any(|v| v.path == native_proton));
@@ -908,8 +951,8 @@ mod tests {
         fixture_libraries(&native, &[&native, &secondary, &alias]);
         fixture_libraries(&flatpak, &[&flatpak, &alias, &secondary]);
 
-        assert_eq!(find_library_folders_paths(home).len(), 2);
-        assert_eq!(find_steam_common_dirs_in_home(home).len(), 3);
+        assert_eq!(find_library_folders_paths(home, None).len(), 2);
+        assert_eq!(find_steam_common_dirs_in_home(home, None).len(), 3);
         let versions = fixture_official_versions(home);
         assert_eq!(versions.len(), 3);
         let unique: std::collections::HashSet<_> = versions
@@ -920,9 +963,91 @@ mod tests {
     }
 
     #[test]
+    fn test_custom_xdg_data_home_discovers_official_libraries_and_compat_tools() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let xdg = temp.path().join("custom data");
+        let steam = xdg.join("Steam");
+        let secondary = temp.path().join("xdg-library");
+        let primary_proton = fixture_proton(&steam, "Proton 10.0");
+        let secondary_proton = fixture_proton(&secondary, "Proton 9.0");
+        fixture_libraries(&steam, &[&steam, &secondary]);
+        let ge = steam.join("compatibilitytools.d/GE-Proton10-27");
+        std::fs::create_dir_all(ge.join("files/bin")).unwrap();
+        std::fs::write(ge.join("files/bin/wine"), b"fixture").unwrap();
+
+        // Default discovery under $HOME alone misses the custom data dir.
+        assert!(fixture_official_versions(&home).is_empty());
+        assert!(find_user_compat_tools_dirs(&home, None).is_empty());
+
+        let xdg = Some(xdg.as_os_str());
+        assert_eq!(find_library_folders_paths(&home, xdg).len(), 1);
+        let versions = fixture_official_versions_xdg(&home, xdg);
+        assert_eq!(versions.len(), 2);
+        assert!(versions.iter().any(|v| v.path == primary_proton));
+        assert!(versions.iter().any(|v| v.path == secondary_proton));
+
+        let compat = find_user_compat_tools_dirs(&home, xdg);
+        assert_eq!(compat, vec![steam.join("compatibilitytools.d")]);
+        let mut tools = Vec::new();
+        scan_proton_dir(&compat[0], &mut tools);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].path, ge);
+        assert_eq!(tools[0].variant, ProtonVariant::GE);
+    }
+
+    #[test]
+    fn test_invalid_xdg_data_home_falls_back_to_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let native = home.join(".local/share/Steam");
+        let expected = fixture_proton(&native, "Proton 10.0");
+        std::fs::create_dir_all(native.join("compatibilitytools.d")).unwrap();
+        // A relative value must not resolve against the process cwd.
+        let relative = std::env::current_dir().unwrap().join("relative-data/Steam");
+        assert!(!relative.exists());
+
+        for invalid in ["", "relative-data", "./relative-data"] {
+            let xdg = Some(OsStr::new(invalid));
+            assert_eq!(xdg_steam_root(xdg), None, "value: {invalid:?}");
+            assert_eq!(steam_roots(home, xdg), steam_roots(home, None));
+            let versions = fixture_official_versions_xdg(home, xdg);
+            assert_eq!(versions.len(), 1, "value: {invalid:?}");
+            assert_eq!(versions[0].path, expected);
+            assert_eq!(
+                find_user_compat_tools_dirs(home, xdg),
+                vec![native.join("compatibilitytools.d")]
+            );
+        }
+    }
+
+    #[test]
+    fn test_default_xdg_data_home_deduplicates_with_native_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let data = home.join(".local/share");
+        let native = data.join("Steam");
+        let secondary = home.join("secondary");
+        fixture_proton(&native, "Proton 10.0");
+        fixture_proton(&secondary, "Proton 9.0");
+        fixture_libraries(&native, &[&native, &secondary]);
+        std::fs::create_dir_all(native.join("compatibilitytools.d")).unwrap();
+
+        // Trailing slash spelling must still collapse onto the default root.
+        let spelled = format!("{}/", data.display());
+        for xdg in [data.as_os_str(), OsStr::new(&spelled)] {
+            let xdg = Some(xdg);
+            assert_eq!(find_library_folders_paths(home, xdg).len(), 1);
+            assert_eq!(find_steam_common_dirs_in_home(home, xdg).len(), 2);
+            assert_eq!(fixture_official_versions_xdg(home, xdg).len(), 2);
+            assert_eq!(find_user_compat_tools_dirs(home, xdg).len(), 1);
+        }
+    }
+
+    #[test]
     fn test_official_proton_empty_home() {
         let temp = tempfile::tempdir().unwrap();
-        assert!(find_library_folders_paths(temp.path()).is_empty());
+        assert!(find_library_folders_paths(temp.path(), None).is_empty());
         assert!(fixture_official_versions(temp.path()).is_empty());
     }
 
@@ -1379,7 +1504,7 @@ mod tests {
         std::fs::create_dir_all(snap.join("steamapps/common")).unwrap();
         write_library_folders(&snap, &[&snap, &secondary]);
 
-        let dirs = find_steam_common_dirs_in_home(&home);
+        let dirs = find_steam_common_dirs_in_home(&home, None);
         assert_eq!(dirs.len(), 2);
         let mut versions = Vec::new();
         for dir in dirs {
@@ -1400,8 +1525,8 @@ mod tests {
         write_library_folders(&home.join(NATIVE_STEAM), &[&native_library]);
         write_library_folders(&home.join(SNAP_STEAM), &[&snap_library]);
 
-        assert_eq!(find_library_folders_paths(&home).len(), 2);
-        let dirs = find_steam_common_dirs_in_home(&home);
+        assert_eq!(find_library_folders_paths(&home, None).len(), 2);
+        let dirs = find_steam_common_dirs_in_home(&home, None);
         assert_eq!(dirs.len(), 2);
         let mut versions = Vec::new();
         for dir in dirs {
@@ -1432,8 +1557,8 @@ mod tests {
         symlink(&native, home.join(".steam/root")).unwrap();
 
         // The native metadata alias is skipped, but Snap's distinct VDF is read.
-        assert_eq!(find_library_folders_paths(&home).len(), 2);
-        let dirs = find_steam_common_dirs_in_home(&home);
+        assert_eq!(find_library_folders_paths(&home, None).len(), 2);
+        let dirs = find_steam_common_dirs_in_home(&home, None);
         assert_eq!(dirs.len(), 2);
         assert!(same_dir(&dirs[0], &native.join("steamapps/common")));
         assert!(same_dir(&dirs[1], &secondary.join("steamapps/common")));
