@@ -102,17 +102,11 @@ fn detect_proton_versions_uncached() -> Vec<ProtonVersion> {
         scan_proton_dir(&compat_dir, &mut versions);
     }
 
-    // Deduplicate by path
-    versions.sort_by(|a, b| a.path.cmp(&b.path));
-    versions.dedup_by(|a, b| a.path == b.path);
-
-    // Sort by version (newest first), then by variant preference
-    versions.sort_by(|a, b| {
-        b.major
-            .cmp(&a.major)
-            .then(b.minor.cmp(&a.minor))
-            .then(variant_priority(&a.variant).cmp(&variant_priority(&b.variant)))
-    });
+    // On ties, prefer the active custom `$XDG_DATA_HOME` Steam root over the
+    // default one — otherwise a stale copy of the same version/variant in
+    // `~/.local/share/Steam` could win on path order alone.
+    let preferred_root = xdg_steam_root(xdg_data_home_env().as_deref());
+    sort_proton_versions(&mut versions, preferred_root.as_deref());
 
     info!("Detected {} Proton versions", versions.len());
     for v in &versions {
@@ -122,12 +116,43 @@ fn detect_proton_versions_uncached() -> Vec<ProtonVersion> {
     versions
 }
 
+/// Deduplicate by path, then sort by version (newest first), then by variant
+/// preference. Ties (same major/minor/variant — e.g. the same Proton install
+/// present in both the default Steam root and an active custom
+/// `$XDG_DATA_HOME` Steam root) are broken in favor of `preferred_root`, then
+/// by path for determinism.
+fn sort_proton_versions(versions: &mut Vec<ProtonVersion>, preferred_root: Option<&Path>) {
+    versions.sort_by(|a, b| a.path.cmp(&b.path));
+    versions.dedup_by(|a, b| a.path == b.path);
+
+    versions.sort_by(|a, b| {
+        b.major
+            .cmp(&a.major)
+            .then(b.minor.cmp(&a.minor))
+            .then(variant_priority(&a.variant).cmp(&variant_priority(&b.variant)))
+            .then_with(|| {
+                let a_preferred = preferred_root.is_some_and(|root| a.path.starts_with(root));
+                let b_preferred = preferred_root.is_some_and(|root| b.path.starts_with(root));
+                // Preferred (true) sorts before non-preferred (false).
+                b_preferred.cmp(&a_preferred)
+            })
+            .then_with(|| a.path.cmp(&b.path))
+    });
+}
+
 /// Get the recommended Proton version (newest, preferring GE > Official > others).
 pub fn get_recommended_proton() -> Option<ProtonVersion> {
-    let versions = detect_proton_versions();
+    recommended_from(&detect_proton_versions())
+}
+
+/// Pick the recommended version from an already-sorted list: the first entry
+/// that meets `RECOMMENDED_PROTON_MAJOR`, since the list is sorted newest
+/// (and most-preferred on ties) first.
+fn recommended_from(versions: &[ProtonVersion]) -> Option<ProtonVersion> {
     versions
-        .into_iter()
+        .iter()
         .find(|v| v.major >= RECOMMENDED_PROTON_MAJOR)
+        .cloned()
 }
 
 /// Check if a Proton version meets minimum requirements.
@@ -1001,6 +1026,39 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].path, ge);
         assert_eq!(tools[0].variant, ProtonVariant::GE);
+    }
+
+    #[test]
+    fn test_xdg_steam_root_wins_tie_break_over_stale_default_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        // "home" sorts lexically before "xdg-data", so without the tie-break
+        // the dedup/path-order fallback would pick the stale default copy.
+        let home = temp.path().join("home");
+        let xdg_data = temp.path().join("xdg-data");
+        let default_steam = home.join(".local/share/Steam");
+        let xdg_steam = xdg_data.join("Steam");
+
+        let default_proton = fixture_proton(&default_steam, "GE-Proton10-27");
+        let xdg_proton = fixture_proton(&xdg_steam, "GE-Proton10-27");
+        assert!(
+            default_proton < xdg_proton,
+            "fixture must sort the default copy first to prove the tie-break matters"
+        );
+
+        let xdg = Some(xdg_data.as_os_str());
+        let mut versions = Vec::new();
+        for common in find_steam_common_dirs_in_home(&home, xdg) {
+            scan_proton_dir(&common, &mut versions);
+        }
+        assert_eq!(versions.len(), 2);
+
+        let preferred_root = xdg_steam_root(xdg);
+        sort_proton_versions(&mut versions, preferred_root.as_deref());
+        assert_eq!(versions[0].path, xdg_proton, "active XDG copy should win the tie");
+        assert_eq!(versions[1].path, default_proton);
+
+        let recommended = recommended_from(&versions).unwrap();
+        assert_eq!(recommended.path, xdg_proton);
     }
 
     #[test]

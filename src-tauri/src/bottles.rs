@@ -474,11 +474,21 @@ fn platform_search_locations_with_xdg(
 /// Compatdata root(s) that should win name-collision deduplication
 /// (`deduplicate_bottles_by_name_preferring`) regardless of mtime: the
 /// directory that the active `$XDG_DATA_HOME` Steam install's compatdata
-/// resolves to among the locations actually scanned. If that directory
-/// collapses onto one of the default locations (same directory, verbatim or
-/// via canonicalization — see `same_dir`), the existing location's path is
-/// returned instead of a freshly-built one, so later `starts_with` checks
-/// line up with the paths bottles were actually collected from.
+/// resolves to among the locations actually scanned, plus the compatdata
+/// dirs of any secondary Steam libraries listed in *that same XDG root's*
+/// own `steamapps/libraryfolders.vdf` / `config/libraryfolders.vdf` (reusing
+/// `steam_library_root_from_vdf_line`). A library listed only by a default
+/// root's vdf (`~/.local/share/Steam`, `~/.steam/steam`) is never added here
+/// — only the custom root's own library list counts.
+///
+/// Each candidate is mapped onto the matching scanned `SearchLocation` path
+/// (Proton source, `same_dir`) so later `starts_with` checks line up with
+/// the paths bottles were actually collected from; candidates with no
+/// matching scanned location, or whose resolved path isn't a directory, are
+/// dropped. A candidate whose compatdata is the same directory as a default
+/// root's compatdata is also dropped unless it *is* the XDG primary itself —
+/// otherwise a vdf alias could let the stale default copy be preferred
+/// after all. The result is deduplicated by directory identity.
 ///
 /// Empty when `$XDG_DATA_HOME` is unset or invalid.
 #[cfg(target_os = "linux")]
@@ -492,13 +502,54 @@ fn preferred_bottle_roots(home: &Path, xdg_data_home: Option<&OsStr>) -> Vec<Pat
     let compatdata = xdg_root.join("steamapps").join("compatdata");
 
     let locations = platform_search_locations_with_xdg(&home, xdg_data_home);
-    let resolved = locations
-        .iter()
-        .find(|l| l.source == "Proton" && same_dir(&l.path, &compatdata))
-        .map(|l| l.path.clone())
-        .unwrap_or(compatdata);
+    let resolve = |candidate: &Path| {
+        locations
+            .iter()
+            .find(|l| l.source == "Proton" && same_dir(&l.path, candidate))
+            .map(|l| l.path.clone())
+    };
 
-    vec![resolved]
+    let primary = resolve(&compatdata).unwrap_or(compatdata);
+    let mut roots = vec![primary.clone()];
+
+    // Default roots' compatdata dirs — a secondary library that merely
+    // aliases one of these (e.g. also happens to be listed by a default
+    // root's own vdf) must not smuggle the stale default copy into the
+    // preferred set.
+    let default_compatdata: Vec<PathBuf> = [
+        home.join(".local/share/Steam"),
+        home.join(".steam/steam"),
+    ]
+    .iter()
+    .map(|root| root.join("steamapps/compatdata"))
+    .collect();
+
+    for vdf_name in &["steamapps/libraryfolders.vdf", "config/libraryfolders.vdf"] {
+        let Ok(content) = fs::read_to_string(xdg_root.join(vdf_name)) else {
+            continue;
+        };
+        for line in content.lines() {
+            let Some(library_root) = steam_library_root_from_vdf_line(line) else {
+                continue;
+            };
+            let candidate = library_root.join("steamapps").join("compatdata");
+            let Some(resolved) = resolve(&candidate) else {
+                continue;
+            };
+            if !resolved.is_dir() {
+                continue;
+            }
+            let aliases_default = default_compatdata.iter().any(|d| same_dir(d, &resolved));
+            if aliases_default && !same_dir(&resolved, &primary) {
+                continue;
+            }
+            if !roots.iter().any(|r| same_dir(r, &resolved)) {
+                roots.push(resolved);
+            }
+        }
+    }
+
+    roots
 }
 
 /// Extract a Steam library root from one `libraryfolders.vdf` line.
@@ -2173,5 +2224,109 @@ mod tests {
         assert_eq!(bottles.len(), 1, "bottles: {bottles:?}");
         assert_eq!(bottles[0].name, "Skyrim Special Edition");
         assert_eq!(bottles[0].path, xdg_pfx);
+    }
+
+    /// Regression: a same-name Proton prefix in a *secondary* Steam library
+    /// must also win over a stale default-root duplicate, as long as that
+    /// secondary library is listed in the active custom `$XDG_DATA_HOME`
+    /// root's own libraryfolders.vdf — not just the XDG root's primary
+    /// compatdata.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn xdg_secondary_library_proton_prefix_wins_over_newer_stale_default_prefix() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let secondary_library = tempfile::tempdir().unwrap();
+
+        // Stale default-root copy, given a newer mtime (the bug this guards
+        // against: a plain mtime-based dedupe would pick this one).
+        let default_library = home.path().join(".local/share/Steam");
+        let default_pfx =
+            create_fake_proton_prefix(&default_library, "489830", "Skyrim Special Edition");
+
+        // Active copy lives in a secondary library that only the custom XDG
+        // root's own libraryfolders.vdf lists.
+        let xdg_pfx =
+            create_fake_proton_prefix(secondary_library.path(), "489830", "Skyrim Special Edition");
+        let xdg_steam = xdg.path().join("Steam");
+        fs::create_dir_all(xdg_steam.join("steamapps")).unwrap();
+        fs::write(
+            xdg_steam.join("steamapps/libraryfolders.vdf"),
+            format!(
+                "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{secondary}\"\n\t}}\n}}\n",
+                secondary = secondary_library.path().display(),
+            ),
+        )
+        .unwrap();
+
+        filetime::set_file_mtime(
+            xdg_pfx.join("drive_c"),
+            filetime::FileTime::from_unix_time(1_000_000, 0),
+        )
+        .unwrap();
+        filetime::set_file_mtime(
+            default_pfx.join("drive_c"),
+            filetime::FileTime::from_unix_time(2_000_000, 0),
+        )
+        .unwrap();
+
+        let xdg_os = xdg_steam_env(&xdg);
+        let bottles = proton_bottles_xdg(home.path(), Some(&xdg_os));
+
+        assert_eq!(bottles.len(), 1, "bottles: {bottles:?}");
+        assert_eq!(bottles[0].name, "Skyrim Special Edition");
+        assert_eq!(
+            bottles[0].path, xdg_pfx,
+            "secondary-library copy listed by the XDG root's own vdf should win"
+        );
+    }
+
+    /// Regression: a secondary library listed only by a *default* root's own
+    /// libraryfolders.vdf must NOT be treated as preferred, even while an
+    /// unrelated custom `$XDG_DATA_HOME` is active — mtime still decides,
+    /// exactly as it did before secondary libraries were considered at all.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn default_root_secondary_library_proton_prefix_is_not_preferred() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let secondary_library = tempfile::tempdir().unwrap();
+
+        // Secondary library is listed only by the DEFAULT root's own vdf.
+        write_libraryfolders(
+            home.path(),
+            &format!(
+                "\"libraryfolders\"\n{{\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{secondary}\"\n\t}}\n}}\n",
+                secondary = secondary_library.path().display(),
+            ),
+        );
+
+        let default_library = home.path().join(".local/share/Steam");
+        let default_pfx =
+            create_fake_proton_prefix(&default_library, "489830", "Skyrim Special Edition");
+        let secondary_pfx =
+            create_fake_proton_prefix(secondary_library.path(), "489830", "Skyrim Special Edition");
+
+        // Secondary (default-vdf) copy is older; default primary copy is
+        // newer, and should win since neither is preferred here.
+        filetime::set_file_mtime(
+            secondary_pfx.join("drive_c"),
+            filetime::FileTime::from_unix_time(1_000_000, 0),
+        )
+        .unwrap();
+        filetime::set_file_mtime(
+            default_pfx.join("drive_c"),
+            filetime::FileTime::from_unix_time(2_000_000, 0),
+        )
+        .unwrap();
+
+        let xdg_os = xdg_steam_env(&xdg);
+        let bottles = proton_bottles_xdg(home.path(), Some(&xdg_os));
+
+        assert_eq!(bottles.len(), 1, "bottles: {bottles:?}");
+        assert_eq!(
+            bottles[0].path, default_pfx,
+            "a secondary library listed only by the default root's vdf must not be preferred; mtime decides"
+        );
     }
 }
