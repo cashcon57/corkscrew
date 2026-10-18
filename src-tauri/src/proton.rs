@@ -518,7 +518,7 @@ const HOME_STEAM_ROOTS: [&str; 5] = [
 ];
 
 /// `$XDG_DATA_HOME` as seen by Linux Steam; other platforms never honor it.
-fn xdg_data_home_env() -> Option<OsString> {
+pub(crate) fn xdg_data_home_env() -> Option<OsString> {
     if cfg!(target_os = "linux") {
         std::env::var_os("XDG_DATA_HOME")
     } else {
@@ -528,10 +528,21 @@ fn xdg_data_home_env() -> Option<OsString> {
 
 /// Steam root under a custom `$XDG_DATA_HOME`. Per the XDG Base Directory
 /// spec, empty or relative values are invalid and must be ignored, leaving
-/// the `~/.local/share/Steam` default in effect.
-fn xdg_steam_root(xdg_data_home: Option<&OsStr>) -> Option<PathBuf> {
+/// the `~/.local/share/Steam` default in effect. A value containing a `..`
+/// component is also rejected, so a malicious or malformed env var can't
+/// escape outside the intended data directory.
+pub(crate) fn xdg_steam_root(xdg_data_home: Option<&OsStr>) -> Option<PathBuf> {
     let base = Path::new(xdg_data_home?);
-    base.is_absolute().then(|| base.join("Steam"))
+    if !base.is_absolute() {
+        return None;
+    }
+    if base
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    Some(base.join("Steam"))
 }
 
 /// All candidate Steam roots. Callers canonicalize/dedup, so a custom
@@ -994,6 +1005,20 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].path, ge);
         assert_eq!(tools[0].variant, ProtonVariant::GE);
+    }
+
+    #[test]
+    fn test_xdg_steam_root_rejects_parent_dir_traversal() {
+        for traversal in ["/home/user/../other", "/home/user/data/../../etc"] {
+            let xdg = Some(OsStr::new(traversal));
+            assert_eq!(xdg_steam_root(xdg), None, "value: {traversal:?}");
+        }
+        // A sibling-looking path without an actual `..` component is fine.
+        let ok = Some(OsStr::new("/home/user/data..stuff"));
+        assert_eq!(
+            xdg_steam_root(ok),
+            Some(PathBuf::from("/home/user/data..stuff/Steam"))
+        );
     }
 
     #[test]

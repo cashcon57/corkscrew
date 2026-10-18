@@ -1,6 +1,8 @@
 //! Wine bottle detection for CrossOver, Whisky, Moonshine, Mythic, Heroic,
 //! and native Wine/Proton managers on macOS and Linux.
 
+#[cfg(target_os = "linux")]
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -229,6 +231,19 @@ pub fn normalize_container_path(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// Compare two paths for identity: equal verbatim, or equal once both
+/// successfully canonicalize (resolving symlinks and `.`/`..` segments).
+#[cfg(target_os = "linux")]
+fn same_dir(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Platform-specific search path definitions
 // ---------------------------------------------------------------------------
@@ -307,9 +322,21 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
 /// Build the list of directories to scan on Linux.
 #[cfg(target_os = "linux")]
 fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
+    platform_search_locations_with_xdg(home, crate::proton::xdg_data_home_env().as_deref())
+}
+
+/// Build the list of directories to scan on Linux, honoring a custom
+/// `$XDG_DATA_HOME` in addition to the standard/Flatpak/Snap locations.
+#[cfg(target_os = "linux")]
+fn platform_search_locations_with_xdg(
+    home: &Path,
+    xdg_data_home: Option<&OsStr>,
+) -> Vec<SearchLocation> {
     // Normalize for Fedora Atomic / Bazzite (/var/home -> /home)
     let home = normalize_container_path(home);
     let home = home.as_path();
+    let xdg_steam =
+        crate::proton::xdg_steam_root(xdg_data_home).map(|p| normalize_container_path(&p));
     let mut locations = vec![
         // Native Wine default prefix
         SearchLocation {
@@ -397,11 +424,23 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
         },
     ];
 
+    // Custom $XDG_DATA_HOME Steam install, unless it's the same directory as
+    // one of the hard-coded locations above (e.g. XDG_DATA_HOME=~/.local/share
+    // collapsing onto the default).
+    if let Some(ref xdg_root) = xdg_steam {
+        let compatdata = xdg_root.join("steamapps").join("compatdata");
+        let already_present = locations.iter().any(|l| same_dir(&l.path, &compatdata));
+        if !already_present {
+            locations.push(SearchLocation {
+                source: "Proton",
+                path: compatdata,
+            });
+        }
+    }
+
     // Also scan secondary Steam library folders (e.g. SD card on Steam Deck)
-    let steam_dirs = [
-        home.join(".local/share/Steam"),
-        home.join(".steam/steam"),
-    ];
+    let mut steam_dirs = vec![home.join(".local/share/Steam"), home.join(".steam/steam")];
+    steam_dirs.extend(xdg_steam);
     for steam_dir in &steam_dirs {
         for vdf_name in &["steamapps/libraryfolders.vdf", "config/libraryfolders.vdf"] {
             let vdf_path = steam_dir.join(vdf_name);
@@ -409,8 +448,11 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
                 for line in content.lines() {
                     if let Some(root) = steam_library_root_from_vdf_line(line) {
                         let lib_path = root.join("steamapps").join("compatdata");
-                        // Avoid duplicates
-                        if !locations.iter().any(|l| l.path == lib_path) && lib_path.is_dir() {
+                        // Avoid duplicates (e.g. the custom XDG root listed as
+                        // entry "0" inside its own libraryfolders.vdf).
+                        if !locations.iter().any(|l| same_dir(&l.path, &lib_path))
+                            && lib_path.is_dir()
+                        {
                             log::info!(
                                 "Found additional Steam library: {}",
                                 lib_path.display()
@@ -1123,8 +1165,13 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn collect_fixture_bottles(home: &Path) -> Vec<Bottle> {
+        collect_fixture_bottles_xdg(home, None)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn collect_fixture_bottles_xdg(home: &Path, xdg: Option<&OsStr>) -> Vec<Bottle> {
         let mut bottles = Vec::new();
-        for location in platform_search_locations(home) {
+        for location in platform_search_locations_with_xdg(home, xdg) {
             collect_bottles_from(&location, &mut bottles);
         }
         deduplicate_bottles_by_name(bottles)
@@ -1276,6 +1323,98 @@ mod tests {
             .collect();
         assert_eq!(locations.len(), 1);
         assert_eq!(proton_bottles(home.path()).len(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn custom_xdg_data_home_discovers_proton_prefixes() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let xdg_steam = xdg.path().join("Steam");
+        let primary_pfx = create_fake_proton_prefix(&xdg_steam, "489830", "Skyrim Special Edition");
+
+        let secondary_library = tempfile::tempdir().unwrap();
+        let secondary_pfx =
+            create_fake_proton_prefix(secondary_library.path(), "377160", "Fallout 4");
+
+        fs::create_dir_all(xdg_steam.join("steamapps")).unwrap();
+        fs::write(
+            xdg_steam.join("steamapps/libraryfolders.vdf"),
+            format!(
+                "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{primary}\"\n\t}}\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{secondary}\"\n\t}}\n}}\n",
+                primary = xdg_steam.display(),
+                secondary = secondary_library.path().display(),
+            ),
+        )
+        .unwrap();
+
+        // Without XDG_DATA_HOME, the custom root is never considered.
+        assert!(proton_bottles(home.path()).is_empty());
+
+        let xdg_os = xdg_steam_env(&xdg);
+        let mut bottles = proton_bottles_xdg(home.path(), Some(&xdg_os));
+        bottles.sort_by(|a, b| a.name.cmp(&b.name));
+
+        assert_eq!(bottles.len(), 2, "bottles: {bottles:?}");
+        assert_eq!(bottles[0].name, "Fallout 4");
+        assert_eq!(bottles[0].path, secondary_pfx);
+        assert_eq!(bottles[1].name, "Skyrim Special Edition");
+        assert_eq!(bottles[1].path, primary_pfx);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn xdg_steam_env(xdg: &tempfile::TempDir) -> std::ffi::OsString {
+        xdg.path().as_os_str().to_owned()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn proton_bottles_xdg(home: &Path, xdg: Option<&OsStr>) -> Vec<Bottle> {
+        collect_fixture_bottles_xdg(home, xdg)
+            .into_iter()
+            .filter(|b| b.source == "Proton")
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn custom_xdg_data_home_equal_to_default_is_not_duplicated() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = home.path().join(".local/share");
+        let steam = xdg.join("Steam");
+        let pfx = create_fake_proton_prefix(&steam, "489830", "Skyrim Special Edition");
+
+        let xdg_os = xdg.as_os_str();
+        let bottles = proton_bottles_xdg(home.path(), Some(xdg_os));
+        assert_eq!(bottles.len(), 1, "bottles: {bottles:?}");
+        assert_eq!(bottles[0].path, pfx);
+
+        let compatdata = steam.join("steamapps/compatdata");
+        let matching = platform_search_locations_with_xdg(home.path(), Some(xdg_os))
+            .into_iter()
+            .filter(|l| l.path == compatdata)
+            .count();
+        assert_eq!(matching, 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn relative_or_empty_xdg_data_home_is_ignored_in_bottle_search() {
+        let home = tempfile::tempdir().unwrap();
+        create_fake_bottle(&home.path().join(".local/share/bottles/bottles"), "Game");
+
+        let default_paths: Vec<PathBuf> = platform_search_locations_with_xdg(home.path(), None)
+            .into_iter()
+            .map(|l| l.path)
+            .collect();
+
+        for invalid in ["relative/data", ""] {
+            let xdg = OsStr::new(invalid);
+            let paths: Vec<PathBuf> = platform_search_locations_with_xdg(home.path(), Some(xdg))
+                .into_iter()
+                .map(|l| l.path)
+                .collect();
+            assert_eq!(paths, default_paths, "value: {invalid:?}");
+        }
     }
 
     #[cfg(target_os = "linux")]
