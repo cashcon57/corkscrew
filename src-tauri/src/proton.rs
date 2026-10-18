@@ -528,18 +528,14 @@ pub(crate) fn xdg_data_home_env() -> Option<OsString> {
 
 /// Steam root under a custom `$XDG_DATA_HOME`. Per the XDG Base Directory
 /// spec, empty or relative values are invalid and must be ignored, leaving
-/// the `~/.local/share/Steam` default in effect. A value containing a `..`
-/// component is also rejected, so a malicious or malformed env var can't
-/// escape outside the intended data directory.
+/// the `~/.local/share/Steam` default in effect. A `..` component is not
+/// rejected on its own — a path like `/home/user/data/../xdg` is a valid
+/// absolute path (it may legitimately resolve through a symlink), and
+/// lexically normalizing it here would be wrong. Callers canonicalize and
+/// dedupe the resulting candidates instead.
 pub(crate) fn xdg_steam_root(xdg_data_home: Option<&OsStr>) -> Option<PathBuf> {
     let base = Path::new(xdg_data_home?);
     if !base.is_absolute() {
-        return None;
-    }
-    if base
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
         return None;
     }
     Some(base.join("Steam"))
@@ -1008,16 +1004,42 @@ mod tests {
     }
 
     #[test]
-    fn test_xdg_steam_root_rejects_parent_dir_traversal() {
-        for traversal in ["/home/user/../other", "/home/user/data/../../etc"] {
-            let xdg = Some(OsStr::new(traversal));
-            assert_eq!(xdg_steam_root(xdg), None, "value: {traversal:?}");
-        }
-        // A sibling-looking path without an actual `..` component is fine.
+    fn test_xdg_steam_root_accepts_absolute_path_with_parent_dir() {
+        // The XDG spec only requires an absolute path; a `..` component may
+        // legitimately resolve through a symlink, so it must not be rejected.
+        let xdg = Some(OsStr::new("/home/user/data/../xdg"));
+        assert_eq!(
+            xdg_steam_root(xdg),
+            Some(PathBuf::from("/home/user/data/../xdg/Steam"))
+        );
+        // A sibling-looking path without an actual `..` component is fine too.
         let ok = Some(OsStr::new("/home/user/data..stuff"));
         assert_eq!(
             xdg_steam_root(ok),
             Some(PathBuf::from("/home/user/data..stuff/Steam"))
+        );
+    }
+
+    #[test]
+    fn test_xdg_steam_root_with_parent_dir_resolves_via_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let real_steam = temp.path().join("real/Steam");
+        std::fs::create_dir_all(real_steam.join("steamapps/common")).unwrap();
+        std::fs::create_dir_all(temp.path().join("other")).unwrap();
+
+        // XDG_DATA_HOME = <tmp>/other/../real — lexically outside `other`,
+        // but a valid absolute path that resolves to `<tmp>/real`.
+        let xdg_data_home = temp.path().join("other/../real");
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let dirs =
+            find_steam_common_dirs_in_home(&home, Some(xdg_data_home.as_os_str()));
+        let expected = real_steam.join("steamapps/common").canonicalize().unwrap();
+        assert!(
+            dirs.iter()
+                .any(|d| d.canonicalize().map(|c| c == expected).unwrap_or(false)),
+            "expected {expected:?} among {dirs:?}"
         );
     }
 
