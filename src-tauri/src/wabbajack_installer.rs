@@ -591,14 +591,18 @@ fn resolve_directive_bottle(
     })
 }
 
-/// Pre-flight failures (including an ambiguous bottle name) return before
-/// `install_wabbajack_modlist` creates its own row, so the row the Tauri
-/// command created up front would otherwise stay "pending".
-fn mark_preflight_failure(db: &ModDatabase, install_id: i64, err: &WjInstallError) {
-    if let WjInstallError::PreFlight(reason) = err {
-        if let Err(db_err) = db.update_wj_install_status(install_id, "failed", Some(reason)) {
-            log::error!("Failed to mark wabbajack install {} failed: {}", install_id, db_err);
-        }
+/// Give the row the Tauri command created (and returned to the UI) a terminal
+/// status matching the worker's error. Pre-flight failures return before
+/// `install_wabbajack_modlist` creates its own row, leaving this one
+/// "pending"; later failures happen after `create_wj_install` superseded it
+/// to "cancelled". Either way the UI polling this ID must see the real outcome.
+fn mark_command_row_terminal(db: &ModDatabase, install_id: i64, err: &WjInstallError) {
+    let update = match err {
+        WjInstallError::Cancelled => db.update_wj_install_status(install_id, "cancelled", None),
+        other => db.update_wj_install_status(install_id, "failed", Some(&other.to_string())),
+    };
+    if let Err(db_err) = update {
+        log::error!("Failed to finalize wabbajack install {}: {}", install_id, db_err);
     }
 }
 
@@ -2116,11 +2120,12 @@ pub(crate) async fn install_wabbajack_modlist_cmd(
             }
             Err(WjInstallError::Cancelled) => {
                 log::info!("Wabbajack install {} was cancelled", install_id);
+                mark_command_row_terminal(&db, install_id, &WjInstallError::Cancelled);
                 emit_progress(&app_clone, &WjInstallProgressEvent::InstallCancelled);
             }
             Err(e) => {
                 log::error!("Wabbajack install {} failed: {}", install_id, e);
-                mark_preflight_failure(&db, install_id, &e);
+                mark_command_row_terminal(&db, install_id, &e);
                 emit_progress(
                     &app_clone,
                     &WjInstallProgressEvent::InstallFailed {
@@ -2323,21 +2328,72 @@ mod tests {
         let (db, id, _tmp) = test_db_with_install("pending");
         let err = WjInstallError::PreFlight(ambiguous_lookup_error().to_string());
 
-        mark_preflight_failure(&db, id, &err);
+        mark_command_row_terminal(&db, id, &err);
 
         let (status, .., message) = db.get_wj_install_status(id).unwrap().unwrap();
         assert_eq!(status, "failed");
         assert!(message.unwrap().contains("/b/pfx"));
     }
 
+    /// Command row A, superseded to "cancelled" when the worker creates its
+    /// own row B for the same modlist, then a directive-phase ambiguity.
+    fn command_and_worker_rows() -> (ModDatabase, i64, i64, tempfile::TempDir) {
+        let (db, command_id, tmp) = test_db_with_install("pending");
+        let worker_id = db.create_wj_install("List", "1.0", 1, "/install", 3, 5).unwrap();
+        db.update_wj_install_status(worker_id, "processing", None).unwrap();
+        let (status, ..) = db.get_wj_install_status(command_id).unwrap().unwrap();
+        assert_eq!(status, "cancelled", "worker row should supersede command row");
+        (db, command_id, worker_id, tmp)
+    }
+
     #[test]
-    fn non_preflight_failure_leaves_command_row_untouched() {
+    fn post_preflight_failure_marks_superseded_command_row_failed() {
+        let (db, command_id, worker_id, _tmp) = command_and_worker_rows();
+        let err =
+            resolve_directive_bottle(&db, worker_id, Err(ambiguous_lookup_error())).unwrap_err();
+
+        mark_command_row_terminal(&db, command_id, &err);
+
+        let (status, .., message) = db.get_wj_install_status(command_id).unwrap().unwrap();
+        assert_eq!(status, "failed");
+        assert!(message.unwrap().contains("/a/pfx"));
+        let (status, ..) = db.get_wj_install_status(worker_id).unwrap().unwrap();
+        assert_eq!(status, "failed");
+    }
+
+    #[test]
+    fn other_failures_mark_command_row_failed() {
         let (db, id, _tmp) = test_db_with_install("pending");
 
-        mark_preflight_failure(&db, id, &WjInstallError::Download("x".to_string()));
+        mark_command_row_terminal(&db, id, &WjInstallError::Download("x".to_string()));
 
-        let (status, ..) = db.get_wj_install_status(id).unwrap().unwrap();
-        assert_eq!(status, "pending");
+        let (status, .., message) = db.get_wj_install_status(id).unwrap().unwrap();
+        assert_eq!(status, "failed");
+        assert!(message.unwrap().contains('x'));
+    }
+
+    #[test]
+    fn cancellation_marks_command_row_cancelled() {
+        for initial in ["pending", "failed"] {
+            let (db, id, _tmp) = test_db_with_install(initial);
+            db.update_wj_install_status(id, initial, Some("stale")).unwrap();
+
+            mark_command_row_terminal(&db, id, &WjInstallError::Cancelled);
+
+            let (status, .., message) = db.get_wj_install_status(id).unwrap().unwrap();
+            assert_eq!(status, "cancelled", "from {initial}");
+            assert!(message.is_none(), "from {initial}");
+        }
+    }
+
+    #[test]
+    fn command_row_finalize_leaves_worker_row_untouched() {
+        let (db, command_id, worker_id, _tmp) = command_and_worker_rows();
+
+        mark_command_row_terminal(&db, command_id, &WjInstallError::Cancelled);
+
+        let (status, ..) = db.get_wj_install_status(worker_id).unwrap().unwrap();
+        assert_eq!(status, "processing");
     }
 
     #[test]
