@@ -446,9 +446,16 @@ pub async fn preflight_check(
         }
     }
 
-    // 7. Detect game version and check against modlist requirements
+    // 7. Resolve the target bottle, then detect the game version and check it
+    //    against modlist requirements. An ambiguous bottle name must fail
+    //    here, before any download/extraction side effects: the directive
+    //    phase would otherwise abort only after all archives were fetched.
+    let bottle = resolve_optional_bottle(crate::bottles::find_bottle_by_name(bottle_name))
+        .map_err(|e| WjInstallError::PreFlight(e.to_string()))?;
     let required_game_version = modlist.required_game_version();
-    let detected_game_version = detect_installed_game_version(game_id, bottle_name);
+    let detected_game_version = bottle
+        .as_ref()
+        .and_then(|b| detect_installed_game_version(game_id, b));
 
     // 8. Collect issues
     let mut issues = Vec::new();
@@ -554,16 +561,26 @@ pub async fn preflight_check(
     Ok(report)
 }
 
+/// Treat a missing bottle as "unknown" (`Ok(None)`) — the install can still
+/// fall back to `install_dir` — but keep an ambiguous name as an error, since
+/// any choice between same-name prefixes would be a guess.
+fn resolve_optional_bottle(
+    lookup: Result<crate::bottles::Bottle, crate::bottles::BottleLookupError>,
+) -> Result<Option<crate::bottles::Bottle>, crate::bottles::BottleLookupError> {
+    match lookup {
+        Ok(bottle) => Ok(Some(bottle)),
+        Err(crate::bottles::BottleLookupError::NotFound(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// Detect the installed game version by resolving the game path from bottle + game_id.
 /// Returns a version string like "1.6.1170" or "1.5.97", or None if detection fails.
-fn detect_installed_game_version(game_id: &str, bottle_name: &str) -> Option<String> {
+fn detect_installed_game_version(game_id: &str, bottle: &crate::bottles::Bottle) -> Option<String> {
     // Currently only Skyrim SE has detailed version detection
     if !game_id.eq_ignore_ascii_case("skyrimse") {
         return None;
     }
-
-    let bottles = crate::bottles::detect_bottles();
-    let bottle = crate::bottles::find_unique_bottle_by_name(&bottles, bottle_name).ok()?;
 
     let game_path = crate::games::with_plugin(game_id, |plugin| {
         plugin.detect_wine(bottle).map(|g| g.game_path)
@@ -1690,15 +1707,14 @@ pub async fn install_wabbajack_modlist(
 
     // Determine game data directory for directive path substitution
     let game_dir = {
-        let bottles = crate::bottles::detect_bottles();
         // An ambiguous name must abort: GameFileSource directives would read
         // from whichever same-name prefix happened to be listed first.
-        let bottle = match crate::bottles::find_unique_bottle_by_name(&bottles, bottle_name) {
-            Ok(b) => Some(b),
-            Err(crate::bottles::BottleLookupError::NotFound(_)) => None,
-            Err(e) => return Err(WjInstallError::Directive(e.to_string())),
-        };
+        // Preflight already refused this; re-check in case a prefix appeared
+        // during the download phase.
+        let bottle = resolve_optional_bottle(crate::bottles::find_bottle_by_name(bottle_name))
+            .map_err(|e| WjInstallError::Directive(e.to_string()))?;
         bottle
+            .as_ref()
             .and_then(|b| {
                 crate::games::with_plugin(game_id, |plugin| plugin.detect_wine(b).map(|g| g.data_dir))
                     .flatten()
@@ -2212,6 +2228,29 @@ pub(crate) async fn get_wabbajack_install_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_optional_bottle_keeps_not_found_as_unknown() {
+        let lookup = Err(crate::bottles::BottleLookupError::NotFound("Gone".to_string()));
+
+        assert!(matches!(resolve_optional_bottle(lookup), Ok(None)));
+    }
+
+    #[test]
+    fn resolve_optional_bottle_rejects_ambiguous_name() {
+        let ambiguous = crate::bottles::BottleLookupError::Ambiguous {
+            name: "Skyrim Special Edition".to_string(),
+            paths: vec![PathBuf::from("/a/pfx"), PathBuf::from("/b/pfx")],
+        };
+
+        let err = resolve_optional_bottle(Err(ambiguous.clone())).unwrap_err();
+        assert_eq!(err, ambiguous);
+        // Preflight surfaces this as a hard PreFlight failure, before any
+        // download or extraction runs.
+        let msg = WjInstallError::PreFlight(err.to_string()).to_string();
+        assert!(msg.starts_with("Pre-flight check failed:"), "{msg}");
+        assert!(msg.contains("/a/pfx") && msg.contains("/b/pfx"), "{msg}");
+    }
 
     #[test]
     fn test_get_available_disk_space() {

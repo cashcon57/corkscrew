@@ -319,12 +319,6 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
     ]
 }
 
-/// Build the list of directories to scan on Linux.
-#[cfg(target_os = "linux")]
-fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
-    platform_search_locations_with_xdg(home, crate::proton::xdg_data_home_env().as_deref())
-}
-
 /// Build the list of directories to scan on Linux, honoring a custom
 /// `$XDG_DATA_HOME` in addition to the standard/Flatpak/Snap locations.
 #[cfg(target_os = "linux")]
@@ -1166,23 +1160,9 @@ fn build_heroic_prefix_map(
 /// Heroic bottles are enriched with game metadata (title, platform) from
 /// Heroic's config files when available.
 pub fn detect_bottles() -> Vec<Bottle> {
-    let Some(home) = dirs::home_dir() else {
-        log::warn!("Could not determine home directory; no bottles detected.");
+    let Some(scan) = scan_bottles() else {
         return Vec::new();
     };
-
-    // Log container environment on Linux
-    #[cfg(target_os = "linux")]
-    if let Some(ref env) = detect_container_environment() {
-        log::info!("Container environment detected: {:?}", env);
-    }
-
-    let locations = platform_search_locations(&home);
-    let mut bottles = Vec::new();
-
-    for location in &locations {
-        collect_bottles_from(location, &mut bottles);
-    }
 
     // Deduplicate: if the same bottle name appears more than once (e.g. both
     // sandboxed and unsandboxed CrossOver paths), keep the one whose
@@ -1191,32 +1171,85 @@ pub fn detect_bottles() -> Vec<Bottle> {
     // user has. On Linux, same-name Proton prefixes under the active custom
     // `$XDG_DATA_HOME` compatdata root always win over default-root
     // duplicates, regardless of mtime — see `preferred_bottle_roots`.
-    #[cfg(target_os = "linux")]
-    let preferred_roots = preferred_bottle_roots(&home, crate::proton::xdg_data_home_env().as_deref());
-    #[cfg(not(target_os = "linux"))]
-    let preferred_roots: Vec<PathBuf> = Vec::new();
-    bottles = deduplicate_bottles_by_name_preferring(bottles, &preferred_roots);
+    let mut bottles = deduplicate_bottles_by_name_preferring(scan.candidates, &scan.preferred_roots);
+    apply_heroic_metadata(&mut bottles);
+    bottles
+}
 
-    // Enrich Heroic bottles with game metadata
-    let heroic_games = detect_heroic_games();
-    if !heroic_games.is_empty() {
-        let prefix_map = build_heroic_prefix_map(&heroic_games);
-        for bottle in &mut bottles {
-            if bottle.source != "Heroic" {
-                continue;
-            }
-            // Match by wine prefix path (the bottle path itself)
-            if let Some(game) = prefix_map.get(&bottle.path) {
-                bottle.name = game.title.clone();
-                bottle.source = format!(
-                    "Heroic ({})",
-                    if game.platform == "gog" { "GOG" } else { "Epic" }
-                );
-            }
+/// Raw result of scanning every search location, before same-name dedup.
+struct BottleScan {
+    /// Every valid bottle found, in scan order, including same-name entries
+    /// from different roots.
+    candidates: Vec<Bottle>,
+    /// See [`preferred_bottle_roots`]; always empty off Linux.
+    preferred_roots: Vec<PathBuf>,
+}
+
+/// Scan all search locations for the current user. `None` when the home
+/// directory can't be determined.
+fn scan_bottles() -> Option<BottleScan> {
+    let Some(home) = dirs::home_dir() else {
+        log::warn!("Could not determine home directory; no bottles detected.");
+        return None;
+    };
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(ref env) = detect_container_environment() {
+            log::info!("Container environment detected: {:?}", env);
         }
+        Some(scan_bottles_with_xdg(
+            &home,
+            crate::proton::xdg_data_home_env().as_deref(),
+        ))
     }
 
-    bottles
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut candidates = Vec::new();
+        for location in &platform_search_locations(&home) {
+            collect_bottles_from(location, &mut candidates);
+        }
+        Some(BottleScan {
+            candidates,
+            preferred_roots: Vec::new(),
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn scan_bottles_with_xdg(home: &Path, xdg_data_home: Option<&OsStr>) -> BottleScan {
+    let mut candidates = Vec::new();
+    for location in &platform_search_locations_with_xdg(home, xdg_data_home) {
+        collect_bottles_from(location, &mut candidates);
+    }
+    BottleScan {
+        candidates,
+        preferred_roots: preferred_bottle_roots(home, xdg_data_home),
+    }
+}
+
+/// Rename Heroic bottles to their game title (and tag the store) using
+/// Heroic's own config files, when available.
+fn apply_heroic_metadata(bottles: &mut [Bottle]) {
+    let heroic_games = detect_heroic_games();
+    if heroic_games.is_empty() {
+        return;
+    }
+    let prefix_map = build_heroic_prefix_map(&heroic_games);
+    for bottle in bottles {
+        if bottle.source != "Heroic" {
+            continue;
+        }
+        // Match by wine prefix path (the bottle path itself)
+        if let Some(game) = prefix_map.get(&bottle.path) {
+            bottle.name = game.title.clone();
+            bottle.source = format!(
+                "Heroic ({})",
+                if game.platform == "gog" { "GOG" } else { "Epic" }
+            );
+        }
+    }
 }
 
 /// Why a name-based bottle lookup could not resolve to exactly one bottle.
@@ -1249,38 +1282,63 @@ impl std::fmt::Display for BottleLookupError {
     }
 }
 
-/// Resolve `name` (case-insensitive) to exactly one bottle in `bottles`.
+/// Resolve `name` (case-insensitive) to exactly one bottle among the raw scan
+/// `candidates`.
+///
+/// `candidates` must be the *undeduplicated* scan output: the display dedup
+/// in [`detect_bottles`] collapses same-name prefixes on an mtime /
+/// first-wins guess, which would hide exactly the collisions this check
+/// exists to catch.
 ///
 /// Entries whose paths canonicalize to the same directory count as one bottle
-/// (first occurrence wins); any other same-name match is reported as
-/// [`BottleLookupError::Ambiguous`] instead of silently picking the first.
-pub fn find_unique_bottle_by_name<'a>(
-    bottles: &'a [Bottle],
+/// (first occurrence wins). Among several distinct same-name matches, the one
+/// deterministic rule from dedup still applies: if all of them are Proton
+/// prefixes and exactly one lives under a `preferred_roots` entry (the active
+/// custom `$XDG_DATA_HOME` Steam install), that one wins. Anything else is
+/// [`BottleLookupError::Ambiguous`] instead of a guess.
+fn find_unique_bottle_by_name<'a>(
+    candidates: &'a [Bottle],
     name: &str,
+    preferred_roots: &[PathBuf],
 ) -> Result<&'a Bottle, BottleLookupError> {
     let name_lower = name.to_lowercase();
     let mut matched: Vec<(&Bottle, PathBuf)> = Vec::new();
-    for bottle in bottles.iter().filter(|b| b.name.to_lowercase() == name_lower) {
+    for bottle in candidates.iter().filter(|b| b.name.to_lowercase() == name_lower) {
         let canonical = fs::canonicalize(&bottle.path).unwrap_or_else(|_| bottle.path.clone());
         if !matched.iter().any(|(_, seen)| *seen == canonical) {
             matched.push((bottle, canonical));
         }
     }
     match matched.len() {
-        0 => Err(BottleLookupError::NotFound(name.to_string())),
-        1 => Ok(matched[0].0),
-        _ => Err(BottleLookupError::Ambiguous {
-            name: name.to_string(),
-            paths: matched.iter().map(|(b, _)| b.path.clone()).collect(),
-        }),
+        0 => return Err(BottleLookupError::NotFound(name.to_string())),
+        1 => return Ok(matched[0].0),
+        _ => {}
     }
+
+    if matched.iter().all(|(b, _)| b.source == "Proton") {
+        let mut preferred = matched
+            .iter()
+            .filter(|(b, _)| preferred_roots.iter().any(|root| b.path.starts_with(root)));
+        if let (Some((winner, _)), None) = (preferred.next(), preferred.next()) {
+            return Ok(winner);
+        }
+    }
+
+    Err(BottleLookupError::Ambiguous {
+        name: name.to_string(),
+        paths: matched.iter().map(|(b, _)| b.path.clone()).collect(),
+    })
 }
 
 /// Find a specific bottle by name (case-insensitive), refusing ambiguous
 /// names — see [`find_unique_bottle_by_name`].
 pub fn find_bottle_by_name(name: &str) -> Result<Bottle, BottleLookupError> {
-    let bottles = detect_bottles();
-    let result = find_unique_bottle_by_name(&bottles, name).cloned();
+    let Some(mut scan) = scan_bottles() else {
+        return Err(BottleLookupError::NotFound(name.to_string()));
+    };
+    // Heroic prefixes are matched by their (renamed) game title, as listed.
+    apply_heroic_metadata(&mut scan.candidates);
+    let result = find_unique_bottle_by_name(&scan.candidates, name, &scan.preferred_roots).cloned();
     if let Err(err @ BottleLookupError::Ambiguous { .. }) = &result {
         log::warn!("{err}");
     }
@@ -1350,12 +1408,8 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn collect_fixture_bottles_xdg(home: &Path, xdg: Option<&OsStr>) -> Vec<Bottle> {
-        let mut bottles = Vec::new();
-        for location in platform_search_locations_with_xdg(home, xdg) {
-            collect_bottles_from(&location, &mut bottles);
-        }
-        let preferred_roots = preferred_bottle_roots(home, xdg);
-        deduplicate_bottles_by_name_preferring(bottles, &preferred_roots)
+        let scan = scan_bottles_with_xdg(home, xdg);
+        deduplicate_bottles_by_name_preferring(scan.candidates, &scan.preferred_roots)
     }
 
     #[cfg(target_os = "linux")]
@@ -1498,7 +1552,7 @@ mod tests {
         )
         .unwrap();
 
-        let locations: Vec<_> = platform_search_locations(home.path())
+        let locations: Vec<_> = platform_search_locations_with_xdg(home.path(), None)
             .into_iter()
             .filter(|l| l.path.starts_with(library.path()))
             .collect();
@@ -2408,14 +2462,14 @@ mod tests {
             lookup_bottle("Skyrim Special Edition", &skyrim, "Proton"),
         ];
 
-        let found = find_unique_bottle_by_name(&bottles, "skyrim special EDITION").unwrap();
+        let found = find_unique_bottle_by_name(&bottles, "skyrim special EDITION", &[]).unwrap();
 
         assert_eq!(found.path, skyrim);
     }
 
     #[test]
     fn find_unique_bottle_by_name_reports_not_found() {
-        let err = find_unique_bottle_by_name(&[], "Nope").unwrap_err();
+        let err = find_unique_bottle_by_name(&[], "Nope", &[]).unwrap_err();
 
         assert_eq!(err, BottleLookupError::NotFound("Nope".to_string()));
         assert_eq!(err.to_string(), "Bottle 'Nope' not found");
@@ -2433,7 +2487,7 @@ mod tests {
             lookup_bottle("skyrim special edition", &flatpak, "Proton"),
         ];
 
-        let err = find_unique_bottle_by_name(&bottles, "Skyrim Special Edition").unwrap_err();
+        let err = find_unique_bottle_by_name(&bottles, "Skyrim Special Edition", &[]).unwrap_err();
 
         assert_eq!(
             err,
@@ -2461,7 +2515,7 @@ mod tests {
         ];
 
         assert!(matches!(
-            find_unique_bottle_by_name(&bottles, "Skyrim Special Edition"),
+            find_unique_bottle_by_name(&bottles, "Skyrim Special Edition", &[]),
             Err(BottleLookupError::Ambiguous { .. })
         ));
     }
@@ -2482,8 +2536,101 @@ mod tests {
             lookup_bottle("Skyrim Special Edition", &alias, "Proton"),
         ];
 
-        let found = find_unique_bottle_by_name(&bottles, "Skyrim Special Edition").unwrap();
+        let found = find_unique_bottle_by_name(&bottles, "Skyrim Special Edition", &[]).unwrap();
 
         assert_eq!(found.path, pfx, "first occurrence wins among aliases");
+    }
+
+    #[test]
+    fn find_unique_bottle_by_name_preferred_root_does_not_override_non_proton() {
+        let roots = tempfile::tempdir().unwrap();
+        let preferred_root = roots.path().join("xdg/Steam/steamapps/compatdata");
+        let proton = create_fake_bottle(&preferred_root, "489830");
+        let heroic = create_fake_bottle(&roots.path().join("heroic"), "Skyrim");
+        let bottles = vec![
+            lookup_bottle("Skyrim Special Edition", &heroic, "Heroic (GOG)"),
+            lookup_bottle("Skyrim Special Edition", &proton, "Proton"),
+        ];
+
+        assert!(matches!(
+            find_unique_bottle_by_name(&bottles, "Skyrim Special Edition", &[preferred_root]),
+            Err(BottleLookupError::Ambiguous { .. })
+        ));
+    }
+
+    /// Regression: display dedup collapses native and Flatpak Steam prefixes
+    /// for the same game into one entry, so a lookup over `detect_bottles()`
+    /// output could never see the collision. The lookup scan must keep both.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bottle_lookup_scan_sees_native_and_flatpak_proton_collision() {
+        let home = tempfile::tempdir().unwrap();
+        let native = create_fake_proton_prefix(
+            &home.path().join(".local/share/Steam"),
+            "489830",
+            "Skyrim Special Edition",
+        );
+        let flatpak = create_fake_proton_prefix(
+            &home
+                .path()
+                .join(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
+            "489830",
+            "Skyrim Special Edition",
+        );
+
+        assert_eq!(
+            proton_bottles(home.path()).len(),
+            1,
+            "display listing still dedups same-name prefixes"
+        );
+
+        let scan = scan_bottles_with_xdg(home.path(), None);
+        let err = find_unique_bottle_by_name(
+            &scan.candidates,
+            "Skyrim Special Edition",
+            &scan.preferred_roots,
+        )
+        .unwrap_err();
+
+        match err {
+            BottleLookupError::Ambiguous { paths, .. } => {
+                assert_eq!(paths.len(), 2, "paths: {paths:?}");
+                assert!(paths.iter().any(|p| same_dir(p, &native)), "paths: {paths:?}");
+                assert!(paths.iter().any(|p| same_dir(p, &flatpak)), "paths: {paths:?}");
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    /// The active custom `$XDG_DATA_HOME` Steam prefix deterministically
+    /// beats a stale default-root duplicate (#155) — not an ambiguity.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bottle_lookup_scan_prefers_active_xdg_proton_prefix() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        create_fake_proton_prefix(
+            &home.path().join(".local/share/Steam"),
+            "489830",
+            "Skyrim Special Edition",
+        );
+        let xdg_pfx =
+            create_fake_proton_prefix(&xdg.path().join("Steam"), "489830", "Skyrim Special Edition");
+
+        let scan = scan_bottles_with_xdg(home.path(), Some(xdg.path().as_os_str()));
+        assert_eq!(
+            scan.candidates.iter().filter(|b| b.source == "Proton").count(),
+            2,
+            "candidates: {:?}",
+            scan.candidates
+        );
+        let found = find_unique_bottle_by_name(
+            &scan.candidates,
+            "Skyrim Special Edition",
+            &scan.preferred_roots,
+        )
+        .unwrap();
+
+        assert_eq!(found.path, xdg_pfx);
     }
 }
