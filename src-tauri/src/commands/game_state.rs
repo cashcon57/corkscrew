@@ -195,7 +195,7 @@ pub async fn heal_deployment(
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let bottle = bottles::find_bottle_by_name(&bottle_name)
-            .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+            .map_err(|e| e.to_string())?;
         let game = games::detect_games(&bottle)
             .into_iter()
             .find(|g| g.game_id == game_id)

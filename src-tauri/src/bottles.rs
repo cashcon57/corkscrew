@@ -1219,12 +1219,72 @@ pub fn detect_bottles() -> Vec<Bottle> {
     bottles
 }
 
-/// Find a specific bottle by name (case-insensitive).
-pub fn find_bottle_by_name(name: &str) -> Option<Bottle> {
+/// Why a name-based bottle lookup could not resolve to exactly one bottle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BottleLookupError {
+    NotFound(String),
+    /// Several distinct bottles share the name (case-insensitively), e.g.
+    /// native, Flatpak and Snap Steam Proton prefixes for the same game, or a
+    /// Heroic prefix renamed to a game title that a Proton prefix also uses.
+    /// Callers only carry the name, so picking one would risk deploying to
+    /// or registering against the wrong prefix.
+    Ambiguous { name: String, paths: Vec<PathBuf> },
+}
+
+impl std::fmt::Display for BottleLookupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(name) => write!(f, "Bottle '{name}' not found"),
+            Self::Ambiguous { name, paths } => {
+                let paths: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+                write!(
+                    f,
+                    "Bottle name '{name}' matches {} different prefixes ({}); refusing to guess \
+                     which one to use. Remove or rename the unused prefix so the name is unique.",
+                    paths.len(),
+                    paths.join(", ")
+                )
+            }
+        }
+    }
+}
+
+/// Resolve `name` (case-insensitive) to exactly one bottle in `bottles`.
+///
+/// Entries whose paths canonicalize to the same directory count as one bottle
+/// (first occurrence wins); any other same-name match is reported as
+/// [`BottleLookupError::Ambiguous`] instead of silently picking the first.
+pub fn find_unique_bottle_by_name<'a>(
+    bottles: &'a [Bottle],
+    name: &str,
+) -> Result<&'a Bottle, BottleLookupError> {
     let name_lower = name.to_lowercase();
-    detect_bottles()
-        .into_iter()
-        .find(|b| b.name.to_lowercase() == name_lower)
+    let mut matched: Vec<(&Bottle, PathBuf)> = Vec::new();
+    for bottle in bottles.iter().filter(|b| b.name.to_lowercase() == name_lower) {
+        let canonical = fs::canonicalize(&bottle.path).unwrap_or_else(|_| bottle.path.clone());
+        if !matched.iter().any(|(_, seen)| *seen == canonical) {
+            matched.push((bottle, canonical));
+        }
+    }
+    match matched.len() {
+        0 => Err(BottleLookupError::NotFound(name.to_string())),
+        1 => Ok(matched[0].0),
+        _ => Err(BottleLookupError::Ambiguous {
+            name: name.to_string(),
+            paths: matched.iter().map(|(b, _)| b.path.clone()).collect(),
+        }),
+    }
+}
+
+/// Find a specific bottle by name (case-insensitive), refusing ambiguous
+/// names — see [`find_unique_bottle_by_name`].
+pub fn find_bottle_by_name(name: &str) -> Result<Bottle, BottleLookupError> {
+    let bottles = detect_bottles();
+    let result = find_unique_bottle_by_name(&bottles, name).cloned();
+    if let Err(err @ BottleLookupError::Ambiguous { .. }) = &result {
+        log::warn!("{err}");
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -2328,5 +2388,102 @@ mod tests {
             bottles[0].path, default_pfx,
             "a secondary library listed only by the default root's vdf must not be preferred; mtime decides"
         );
+    }
+
+    fn lookup_bottle(name: &str, path: &Path, source: &str) -> Bottle {
+        Bottle {
+            name: name.to_string(),
+            path: path.to_path_buf(),
+            source: source.to_string(),
+        }
+    }
+
+    #[test]
+    fn find_unique_bottle_by_name_resolves_single_case_insensitive_match() {
+        let roots = tempfile::tempdir().unwrap();
+        let skyrim = create_fake_bottle(roots.path(), "Skyrim Special Edition");
+        let other = create_fake_bottle(roots.path(), "Fallout 4");
+        let bottles = vec![
+            lookup_bottle("Fallout 4", &other, "Proton"),
+            lookup_bottle("Skyrim Special Edition", &skyrim, "Proton"),
+        ];
+
+        let found = find_unique_bottle_by_name(&bottles, "skyrim special EDITION").unwrap();
+
+        assert_eq!(found.path, skyrim);
+    }
+
+    #[test]
+    fn find_unique_bottle_by_name_reports_not_found() {
+        let err = find_unique_bottle_by_name(&[], "Nope").unwrap_err();
+
+        assert_eq!(err, BottleLookupError::NotFound("Nope".to_string()));
+        assert_eq!(err.to_string(), "Bottle 'Nope' not found");
+    }
+
+    #[test]
+    fn find_unique_bottle_by_name_refuses_distinct_same_name_proton_prefixes() {
+        // Native vs Flatpak Steam installs of the same game: same appmanifest
+        // name, different prefixes. Must not silently pick the first.
+        let home = tempfile::tempdir().unwrap();
+        let native = create_fake_bottle(&home.path().join("native/compatdata"), "489830");
+        let flatpak = create_fake_bottle(&home.path().join("flatpak/compatdata"), "489830");
+        let bottles = vec![
+            lookup_bottle("Skyrim Special Edition", &native, "Proton"),
+            lookup_bottle("skyrim special edition", &flatpak, "Proton"),
+        ];
+
+        let err = find_unique_bottle_by_name(&bottles, "Skyrim Special Edition").unwrap_err();
+
+        assert_eq!(
+            err,
+            BottleLookupError::Ambiguous {
+                name: "Skyrim Special Edition".to_string(),
+                paths: vec![native.clone(), flatpak.clone()],
+            }
+        );
+        let msg = err.to_string();
+        assert!(msg.contains(&native.display().to_string()), "{msg}");
+        assert!(msg.contains(&flatpak.display().to_string()), "{msg}");
+        assert!(msg.contains("refusing to guess"), "{msg}");
+    }
+
+    #[test]
+    fn find_unique_bottle_by_name_refuses_cross_source_name_collision() {
+        // Heroic prefixes are renamed to the game title after dedup, so they
+        // can collide with a Proton prefix carrying the same appmanifest name.
+        let roots = tempfile::tempdir().unwrap();
+        let heroic = create_fake_bottle(&roots.path().join("heroic"), "Skyrim");
+        let proton = create_fake_bottle(&roots.path().join("compatdata"), "489830");
+        let bottles = vec![
+            lookup_bottle("Skyrim Special Edition", &heroic, "Heroic (GOG)"),
+            lookup_bottle("Skyrim Special Edition", &proton, "Proton"),
+        ];
+
+        assert!(matches!(
+            find_unique_bottle_by_name(&bottles, "Skyrim Special Edition"),
+            Err(BottleLookupError::Ambiguous { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_unique_bottle_by_name_treats_symlink_aliases_as_one_prefix() {
+        // SteamOS layout: ~/.steam/steam -> ~/.local/share/Steam reaches the
+        // same prefix twice; that is not an ambiguity.
+        let home = tempfile::tempdir().unwrap();
+        let real_root = home.path().join(".local/share/Steam");
+        let pfx = create_fake_bottle(&real_root.join("steamapps/compatdata"), "489830");
+        fs::create_dir_all(home.path().join(".steam")).unwrap();
+        std::os::unix::fs::symlink(&real_root, home.path().join(".steam/steam")).unwrap();
+        let alias = home.path().join(".steam/steam/steamapps/compatdata/489830");
+        let bottles = vec![
+            lookup_bottle("Skyrim Special Edition", &pfx, "Proton"),
+            lookup_bottle("Skyrim Special Edition", &alias, "Proton"),
+        ];
+
+        let found = find_unique_bottle_by_name(&bottles, "Skyrim Special Edition").unwrap();
+
+        assert_eq!(found.path, pfx, "first occurrence wins among aliases");
     }
 }

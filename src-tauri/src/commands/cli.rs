@@ -503,9 +503,9 @@ pub fn cli_list_bottles() {
 /// - per-game tool detection (ME2, SKSE, etc.)
 pub fn cli_scan_bottle(bottle_name: &str) {
     let bottle = match crate::bottles::find_bottle_by_name(bottle_name) {
-        Some(b) => b,
-        None => {
-            eprintln!("Error: Bottle '{}' not found", bottle_name);
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("Error: {e}");
             eprintln!("Run `corkscrew --list-bottles` to see available bottles.");
             std::process::exit(1);
         }
@@ -863,9 +863,9 @@ pub fn cli_add_game(
 
     // Resolve the bottle to get its path
     let bottle = match crate::bottles::find_bottle_by_name(bottle_name) {
-        Some(b) => b,
-        None => {
-            eprintln!("Error: Bottle '{}' not found", bottle_name);
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("Error: {e}");
             std::process::exit(1);
         }
     };

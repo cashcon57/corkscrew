@@ -67,7 +67,7 @@ pub async fn register_unregistered_game(
     }
 
     let bottle = crate::bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle not found: {bottle_name}"))?;
+        .map_err(|e| e.to_string())?;
 
     // Sanity: the exe must live inside the bottle's root (any drive_X is
     // allowed — Wine supports multi-drive bottles, and ME2 .bat launchers /
@@ -224,7 +224,7 @@ pub async fn update_custom_game_paths_cmd(
     }
 
     let bottle = crate::bottles::find_bottle_by_name(&bottle_name)
-        .ok_or_else(|| format!("Bottle not found: {bottle_name}"))?;
+        .map_err(|e| e.to_string())?;
     let canon_bottle = std::fs::canonicalize(&bottle.path)
         .map_err(|e| format!("canonicalize bottle failed: {e}"))?;
     let canon_exe = std::fs::canonicalize(exe_path_p)

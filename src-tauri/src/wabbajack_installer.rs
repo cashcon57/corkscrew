@@ -563,7 +563,7 @@ fn detect_installed_game_version(game_id: &str, bottle_name: &str) -> Option<Str
     }
 
     let bottles = crate::bottles::detect_bottles();
-    let bottle = bottles.iter().find(|b| b.name == bottle_name)?;
+    let bottle = crate::bottles::find_unique_bottle_by_name(&bottles, bottle_name).ok()?;
 
     let game_path = crate::games::with_plugin(game_id, |plugin| {
         plugin.detect_wine(bottle).map(|g| g.game_path)
@@ -1691,7 +1691,13 @@ pub async fn install_wabbajack_modlist(
     // Determine game data directory for directive path substitution
     let game_dir = {
         let bottles = crate::bottles::detect_bottles();
-        let bottle = bottles.iter().find(|b| b.name == bottle_name);
+        // An ambiguous name must abort: GameFileSource directives would read
+        // from whichever same-name prefix happened to be listed first.
+        let bottle = match crate::bottles::find_unique_bottle_by_name(&bottles, bottle_name) {
+            Ok(b) => Some(b),
+            Err(crate::bottles::BottleLookupError::NotFound(_)) => None,
+            Err(e) => return Err(WjInstallError::Directive(e.to_string())),
+        };
         bottle
             .and_then(|b| {
                 crate::games::with_plugin(game_id, |plugin| plugin.detect_wine(b).map(|g| g.data_dir))

@@ -770,7 +770,7 @@ pub async fn install_collection(
 
     // Resolve game and paths
     let bottle = bottles::find_bottle_by_name(bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+        .map_err(|e| e.to_string())?;
     let detected_games = games::detect_games(&bottle);
     let game = detected_games
         .iter()
@@ -2679,9 +2679,7 @@ pub async fn install_collection(
     if let Ok(profile_id) = profiles::create_profile(db, game_id, bottle_name, &profile_name) {
         // Try to find plugins file for snapshot (any game with plugin support)
         let plugins_file = {
-            let snapshot_bottle = bottles::detect_bottles()
-                .into_iter()
-                .find(|b| b.name == bottle_name);
+            let snapshot_bottle = bottles::find_bottle_by_name(bottle_name).ok();
             snapshot_bottle.and_then(|b| {
                 games::with_plugin(game_id, |plugin| {
                     plugin.get_plugins_file(Path::new(&game.game_path), &b)

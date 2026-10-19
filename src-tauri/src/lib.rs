@@ -167,7 +167,7 @@ impl Drop for DeployGuard {
 /// Resolve a bottle by name, returning a useful error if not found.
 pub(crate) fn resolve_bottle(bottle_name: &str) -> Result<Bottle, String> {
     bottles::find_bottle_by_name(bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))
+        .map_err(|e| e.to_string())
 }
 
 /// Global DB handle so module-level helpers (`resolve_game`, `detect_games`)

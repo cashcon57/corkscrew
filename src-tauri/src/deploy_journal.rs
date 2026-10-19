@@ -197,7 +197,7 @@ fn heal_deployment(
     bottle_name: &str,
 ) -> Result<(), String> {
     let bottle = crate::bottles::find_bottle_by_name(bottle_name)
-        .ok_or_else(|| format!("Bottle '{}' not found", bottle_name))?;
+        .map_err(|e| e.to_string())?;
     let game = crate::games::detect_games(&bottle)
         .into_iter()
         .find(|g| g.game_id == game_id)
