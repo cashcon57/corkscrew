@@ -1286,16 +1286,24 @@ impl std::fmt::Display for BottleLookupError {
 /// `candidates`.
 ///
 /// `candidates` must be the *undeduplicated* scan output: the display dedup
-/// in [`detect_bottles`] collapses same-name prefixes on an mtime /
-/// first-wins guess, which would hide exactly the collisions this check
+/// in [`detect_bottles`] collapses every same-name collision on mtime /
+/// first-wins, which would hide the cross-manager collisions this check
 /// exists to catch.
 ///
 /// Entries whose paths canonicalize to the same directory count as one bottle
-/// (first occurrence wins). Among several distinct same-name matches, the one
-/// deterministic rule from dedup still applies: if all of them are Proton
-/// prefixes and exactly one lives under a `preferred_roots` entry (the active
-/// custom `$XDG_DATA_HOME` Steam install), that one wins. Anything else is
-/// [`BottleLookupError::Ambiguous`] instead of a guess.
+/// (first occurrence wins). Two deterministic rules from dedup still apply:
+///
+/// - Same-name CrossOver bottles are one logical bottle found in both the
+///   sandboxed and unsandboxed bottle dirs; they collapse to the copy with the
+///   newest `bottle.toml` (or `drive_c`) mtime, first occurrence on a tie —
+///   the same copy [`detect_bottles`] lists.
+/// - If all remaining matches are Proton prefixes and exactly one lives under
+///   a `preferred_roots` entry (the active custom `$XDG_DATA_HOME` Steam
+///   install), that one wins.
+///
+/// Anything else — including a CrossOver bottle sharing its name with a
+/// Proton/Heroic/other prefix — is [`BottleLookupError::Ambiguous`] instead of
+/// a guess.
 fn find_unique_bottle_by_name<'a>(
     candidates: &'a [Bottle],
     name: &str,
@@ -1303,11 +1311,23 @@ fn find_unique_bottle_by_name<'a>(
 ) -> Result<&'a Bottle, BottleLookupError> {
     let name_lower = name.to_lowercase();
     let mut matched: Vec<(&Bottle, PathBuf)> = Vec::new();
+    // Index into `matched` of the CrossOver copy currently kept.
+    let mut crossover_idx: Option<usize> = None;
     for bottle in candidates.iter().filter(|b| b.name.to_lowercase() == name_lower) {
         let canonical = fs::canonicalize(&bottle.path).unwrap_or_else(|_| bottle.path.clone());
-        if !matched.iter().any(|(_, seen)| *seen == canonical) {
-            matched.push((bottle, canonical));
+        if matched.iter().any(|(_, seen)| *seen == canonical) {
+            continue;
         }
+        if bottle.source == "CrossOver" {
+            if let Some(idx) = crossover_idx {
+                if bottle_mtime(bottle) > bottle_mtime(matched[idx].0) {
+                    matched[idx] = (bottle, canonical);
+                }
+                continue;
+            }
+            crossover_idx = Some(matched.len());
+        }
+        matched.push((bottle, canonical));
     }
     match matched.len() {
         0 => return Err(BottleLookupError::NotFound(name.to_string())),
@@ -2516,6 +2536,109 @@ mod tests {
 
         assert!(matches!(
             find_unique_bottle_by_name(&bottles, "Skyrim Special Edition", &[]),
+            Err(BottleLookupError::Ambiguous { .. })
+        ));
+    }
+
+    /// Create a CrossOver-style bottle with a `bottle.toml` at `mtime_secs`.
+    fn crossover_copy(parent: &Path, dir: &str, mtime_secs: i64) -> PathBuf {
+        let path = create_fake_bottle(parent, dir);
+        let toml = path.join("bottle.toml");
+        fs::write(&toml, "[bottle]\nname = \"MySkyrim\"\n").unwrap();
+        filetime::set_file_mtime(&toml, filetime::FileTime::from_unix_time(mtime_secs, 0))
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn find_unique_bottle_by_name_picks_newest_crossover_copy_when_listed_second() {
+        // Sandboxed + unsandboxed copies of one CrossOver bottle are the
+        // intentional duplicate-copy case, not an ambiguity.
+        let roots = tempfile::tempdir().unwrap();
+        let old = crossover_copy(&roots.path().join("sandboxed"), "MySkyrim", 1_000_000);
+        let new = crossover_copy(&roots.path().join("unsandboxed"), "MySkyrim", 2_000_000);
+        let bottles = vec![
+            lookup_bottle("MySkyrim", &old, "CrossOver"),
+            lookup_bottle("MySkyrim", &new, "CrossOver"),
+        ];
+
+        let found = find_unique_bottle_by_name(&bottles, "myskyrim", &[]).unwrap();
+
+        assert_eq!(found.path, new, "newer bottle.toml must win");
+        assert_eq!(
+            deduplicate_bottles_by_name(bottles.clone())[0].path,
+            found.path,
+            "lookup must agree with the listed copy"
+        );
+    }
+
+    #[test]
+    fn find_unique_bottle_by_name_keeps_newest_crossover_copy_when_listed_first() {
+        let roots = tempfile::tempdir().unwrap();
+        let new = crossover_copy(&roots.path().join("sandboxed"), "MySkyrim", 2_000_000);
+        let old = crossover_copy(&roots.path().join("unsandboxed"), "MySkyrim", 1_000_000);
+        let bottles = vec![
+            lookup_bottle("MySkyrim", &new, "CrossOver"),
+            lookup_bottle("MySkyrim", &old, "CrossOver"),
+        ];
+
+        let found = find_unique_bottle_by_name(&bottles, "MySkyrim", &[]).unwrap();
+
+        assert_eq!(found.path, new, "an older later copy must not replace the newer one");
+    }
+
+    #[test]
+    fn find_unique_bottle_by_name_crossover_tie_keeps_first_copy() {
+        let roots = tempfile::tempdir().unwrap();
+        let first = crossover_copy(&roots.path().join("sandboxed"), "MySkyrim", 1_500_000);
+        let second = crossover_copy(&roots.path().join("unsandboxed"), "MySkyrim", 1_500_000);
+        let bottles = vec![
+            lookup_bottle("MySkyrim", &first, "CrossOver"),
+            lookup_bottle("MySkyrim", &second, "CrossOver"),
+        ];
+
+        let found = find_unique_bottle_by_name(&bottles, "MySkyrim", &[]).unwrap();
+
+        assert_eq!(found.path, first);
+    }
+
+    #[test]
+    fn find_unique_bottle_by_name_refuses_crossover_colliding_with_non_crossover() {
+        // CrossOver copies collapse to one, but that one still collides with a
+        // distinct Proton prefix of the same name.
+        let roots = tempfile::tempdir().unwrap();
+        let old = crossover_copy(&roots.path().join("sandboxed"), "MySkyrim", 1_000_000);
+        let new = crossover_copy(&roots.path().join("unsandboxed"), "MySkyrim", 2_000_000);
+        let proton = create_fake_bottle(&roots.path().join("compatdata"), "489830");
+        let bottles = vec![
+            lookup_bottle("MySkyrim", &old, "CrossOver"),
+            lookup_bottle("MySkyrim", &proton, "Proton"),
+            lookup_bottle("MySkyrim", &new, "CrossOver"),
+        ];
+
+        let err = find_unique_bottle_by_name(&bottles, "MySkyrim", &[]).unwrap_err();
+
+        assert_eq!(
+            err,
+            BottleLookupError::Ambiguous {
+                name: "MySkyrim".to_string(),
+                paths: vec![new, proton],
+            }
+        );
+    }
+
+    #[test]
+    fn find_unique_bottle_by_name_refuses_single_crossover_vs_heroic() {
+        let roots = tempfile::tempdir().unwrap();
+        let crossover = crossover_copy(&roots.path().join("crossover"), "Skyrim", 2_000_000);
+        let heroic = create_fake_bottle(&roots.path().join("heroic"), "Skyrim");
+        let bottles = vec![
+            lookup_bottle("Skyrim", &heroic, "Heroic (GOG)"),
+            lookup_bottle("Skyrim", &crossover, "CrossOver"),
+        ];
+
+        assert!(matches!(
+            find_unique_bottle_by_name(&bottles, "Skyrim", &[]),
             Err(BottleLookupError::Ambiguous { .. })
         ));
     }
