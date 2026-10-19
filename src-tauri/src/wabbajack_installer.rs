@@ -574,6 +574,34 @@ fn resolve_optional_bottle(
     }
 }
 
+/// Directive-phase re-check of the target bottle. On ambiguity, record the
+/// failure on the active install row before returning: the spawned task only
+/// emits `InstallFailed` and would otherwise leave the row at "processing".
+fn resolve_directive_bottle(
+    db: &ModDatabase,
+    install_id: i64,
+    lookup: Result<crate::bottles::Bottle, crate::bottles::BottleLookupError>,
+) -> Result<Option<crate::bottles::Bottle>, WjInstallError> {
+    resolve_optional_bottle(lookup).map_err(|e| {
+        let reason = e.to_string();
+        if let Err(db_err) = db.update_wj_install_status(install_id, "failed", Some(&reason)) {
+            log::error!("Failed to mark wabbajack install {} failed: {}", install_id, db_err);
+        }
+        WjInstallError::Directive(reason)
+    })
+}
+
+/// Pre-flight failures (including an ambiguous bottle name) return before
+/// `install_wabbajack_modlist` creates its own row, so the row the Tauri
+/// command created up front would otherwise stay "pending".
+fn mark_preflight_failure(db: &ModDatabase, install_id: i64, err: &WjInstallError) {
+    if let WjInstallError::PreFlight(reason) = err {
+        if let Err(db_err) = db.update_wj_install_status(install_id, "failed", Some(reason)) {
+            log::error!("Failed to mark wabbajack install {} failed: {}", install_id, db_err);
+        }
+    }
+}
+
 /// Detect the installed game version by resolving the game path from bottle + game_id.
 /// Returns a version string like "1.6.1170" or "1.5.97", or None if detection fails.
 fn detect_installed_game_version(game_id: &str, bottle: &crate::bottles::Bottle) -> Option<String> {
@@ -1711,8 +1739,8 @@ pub async fn install_wabbajack_modlist(
         // from whichever same-name prefix happened to be listed first.
         // Preflight already refused this; re-check in case a prefix appeared
         // during the download phase.
-        let bottle = resolve_optional_bottle(crate::bottles::find_bottle_by_name(bottle_name))
-            .map_err(|e| WjInstallError::Directive(e.to_string()))?;
+        let bottle =
+            resolve_directive_bottle(db, install_id, crate::bottles::find_bottle_by_name(bottle_name))?;
         bottle
             .as_ref()
             .and_then(|b| {
@@ -2092,6 +2120,7 @@ pub(crate) async fn install_wabbajack_modlist_cmd(
             }
             Err(e) => {
                 log::error!("Wabbajack install {} failed: {}", install_id, e);
+                mark_preflight_failure(&db, install_id, &e);
                 emit_progress(
                     &app_clone,
                     &WjInstallProgressEvent::InstallFailed {
@@ -2250,6 +2279,65 @@ mod tests {
         let msg = WjInstallError::PreFlight(err.to_string()).to_string();
         assert!(msg.starts_with("Pre-flight check failed:"), "{msg}");
         assert!(msg.contains("/a/pfx") && msg.contains("/b/pfx"), "{msg}");
+    }
+
+    fn ambiguous_lookup_error() -> crate::bottles::BottleLookupError {
+        crate::bottles::BottleLookupError::Ambiguous {
+            name: "Skyrim Special Edition".to_string(),
+            paths: vec![PathBuf::from("/a/pfx"), PathBuf::from("/b/pfx")],
+        }
+    }
+
+    fn test_db_with_install(status: &str) -> (ModDatabase, i64, tempfile::TempDir) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = ModDatabase::new(&tmp.path().join("corkscrew.db")).unwrap();
+        let id = db.create_wj_install("List", "1.0", 1, "/install", 3, 5).unwrap();
+        db.update_wj_install_status(id, status, None).unwrap();
+        (db, id, tmp)
+    }
+
+    #[test]
+    fn directive_phase_ambiguity_marks_install_failed() {
+        let (db, id, _tmp) = test_db_with_install("processing");
+
+        let err = resolve_directive_bottle(&db, id, Err(ambiguous_lookup_error())).unwrap_err();
+
+        assert!(matches!(err, WjInstallError::Directive(_)));
+        let (status, .., message) = db.get_wj_install_status(id).unwrap().unwrap();
+        assert_eq!(status, "failed");
+        assert!(message.unwrap().contains("/a/pfx"));
+    }
+
+    #[test]
+    fn directive_phase_missing_bottle_leaves_install_untouched() {
+        let (db, id, _tmp) = test_db_with_install("processing");
+
+        let lookup = Err(crate::bottles::BottleLookupError::NotFound("Gone".to_string()));
+        assert!(matches!(resolve_directive_bottle(&db, id, lookup), Ok(None)));
+        let (status, ..) = db.get_wj_install_status(id).unwrap().unwrap();
+        assert_eq!(status, "processing");
+    }
+
+    #[test]
+    fn preflight_failure_marks_pending_command_row_failed() {
+        let (db, id, _tmp) = test_db_with_install("pending");
+        let err = WjInstallError::PreFlight(ambiguous_lookup_error().to_string());
+
+        mark_preflight_failure(&db, id, &err);
+
+        let (status, .., message) = db.get_wj_install_status(id).unwrap().unwrap();
+        assert_eq!(status, "failed");
+        assert!(message.unwrap().contains("/b/pfx"));
+    }
+
+    #[test]
+    fn non_preflight_failure_leaves_command_row_untouched() {
+        let (db, id, _tmp) = test_db_with_install("pending");
+
+        mark_preflight_failure(&db, id, &WjInstallError::Download("x".to_string()));
+
+        let (status, ..) = db.get_wj_install_status(id).unwrap().unwrap();
+        assert_eq!(status, "pending");
     }
 
     #[test]
