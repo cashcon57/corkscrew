@@ -140,9 +140,9 @@ pub fn read_modsettings(path: &Path) -> Result<ModSettings, LsxError> {
         match reader.read_event_into(&mut buf) {
             Ok(quick_xml::events::Event::Start(ref e)) => {
                 match e.name().as_ref() {
-                    b"version" => {
+                    "version" => {
                         for attr in e.attributes().flatten() {
-                            let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("").to_string();
+                            let key = attr.key.as_ref().to_string();
                             let val_str = attr.unescape_value().unwrap_or_default().to_string();
                             let val = val_str.parse::<u32>().unwrap_or(0);
                             match key.as_str() {
@@ -154,12 +154,12 @@ pub fn read_modsettings(path: &Path) -> Result<ModSettings, LsxError> {
                             }
                         }
                     }
-                    b"region" => {
+                    "region" => {
                         if attr_id_equals(e, "ModuleSettings") {
                             in_module_settings_region = true;
                         }
                     }
-                    b"node" => {
+                    "node" => {
                         if in_module_settings_region {
                             match attr_id_value(e).as_deref() {
                                 Some("Mods") => in_mods_node = true,
@@ -175,9 +175,9 @@ pub fn read_modsettings(path: &Path) -> Result<ModSettings, LsxError> {
             }
             Ok(quick_xml::events::Event::Empty(ref e)) => {
                 match e.name().as_ref() {
-                    b"version" => {
+                    "version" => {
                         for attr in e.attributes().flatten() {
-                            let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("").to_string();
+                            let key = attr.key.as_ref().to_string();
                             let val = attr.unescape_value().unwrap_or_default().parse::<u32>().unwrap_or(0);
                             match key.as_str() {
                                 "major" => version.major = val,
@@ -188,7 +188,7 @@ pub fn read_modsettings(path: &Path) -> Result<ModSettings, LsxError> {
                             }
                         }
                     }
-                    b"node" => {
+                    "node" => {
                         if in_module_settings_region {
                             match attr_id_value(e).as_deref() {
                                 Some("Mods") => in_mods_node = true,
@@ -204,7 +204,7 @@ pub fn read_modsettings(path: &Path) -> Result<ModSettings, LsxError> {
                             }
                         }
                     }
-                    b"attribute" => {
+                    "attribute" => {
                         if let Some(entry) = current_entry.as_mut() {
                             let id = attr_value(e, "id");
                             let value = attr_value(e, "value").unwrap_or_default();
@@ -224,14 +224,14 @@ pub fn read_modsettings(path: &Path) -> Result<ModSettings, LsxError> {
             }
             Ok(quick_xml::events::Event::End(ref e)) => {
                 match e.name().as_ref() {
-                    b"node" => {
+                    "node" => {
                         if let Some(entry) = current_entry.take() {
                             if !entry.uuid.is_empty() {
                                 mods.push(entry);
                             }
                         }
                     }
-                    b"region" => {
+                    "region" => {
                         in_module_settings_region = false;
                         in_mods_node = false;
                     }
@@ -350,7 +350,7 @@ pub fn read_meta_lsx_from_bytes(bytes: &[u8]) -> Result<ModuleInfo, LsxError> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(quick_xml::events::Event::Start(ref e)) => {
-                if e.name().as_ref() == b"node" {
+                if e.name().as_ref() == "node" {
                     if let Some(id) = attr_id_value(e) {
                         if id == "ModuleInfo" {
                             in_module_info = true;
@@ -359,7 +359,7 @@ pub fn read_meta_lsx_from_bytes(bytes: &[u8]) -> Result<ModuleInfo, LsxError> {
                 }
             }
             Ok(quick_xml::events::Event::Empty(ref e)) => {
-                if e.name().as_ref() == b"attribute" && in_module_info {
+                if e.name().as_ref() == "attribute" && in_module_info {
                     let id = attr_value(e, "id");
                     let value = attr_value(e, "value").unwrap_or_default();
                     match id.as_deref() {
@@ -374,7 +374,7 @@ pub fn read_meta_lsx_from_bytes(bytes: &[u8]) -> Result<ModuleInfo, LsxError> {
                 }
             }
             Ok(quick_xml::events::Event::End(ref e)) => {
-                if e.name().as_ref() == b"node" && in_module_info {
+                if e.name().as_ref() == "node" && in_module_info {
                     // Exit ModuleInfo on its closing tag. We track the single
                     // opening node — when we see a matching end node while in_module_info
                     // is true we can stop.
@@ -420,7 +420,7 @@ fn attr_id_equals(e: &quick_xml::events::BytesStart, expected: &str) -> bool {
 
 fn attr_value(e: &quick_xml::events::BytesStart, key: &str) -> Option<String> {
     for attr in e.attributes().flatten() {
-        if attr.key.as_ref() == key.as_bytes() {
+        if attr.key.as_ref() == key {
             return Some(attr.unescape_value().ok()?.to_string());
         }
     }
