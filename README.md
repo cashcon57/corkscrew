@@ -122,11 +122,95 @@ Most of this implementation is being generalized into a reusable `UnrealEnginePl
 Ready or Not | Palworld | Kingdom Hearts III | Ace Combat 7 | Sifu | FF VII Remake | FF VII Rebirth | S.T.A.L.K.E.R. 2 | Dying Light 2 | Oblivion Remastered
 
 <!-- GAME_SUPPORT_TABLE_START -->
-### Standard Support (In Registry)
+**85 games supported** — auto-updated daily from NexusMods API
 
-These games are auto-detected and support the full generic mod workflow. **Testing is needed** to verify the mod pipeline works end-to-end for each game. If you play any of these, please test and report issues!
-
-Skyrim LE (72.9k mods) | Fallout: New Vegas (40.4k) | Oblivion (33k) | Stardew Valley (29.8k) | Cyberpunk 2077 (20.5k) | Fallout 3 (17k) | Baldur's Gate 3 (17.3k) | Morrowind (14.7k) | Starfield (12.3k) | Blade & Sorcery (8.4k) | The Witcher 3 (8.4k) | 7 Days to Die (7.1k) | Monster Hunter: World (6.3k) | The Sims 4 (4.4k) | Dragon Age: Origins (3.9k) | No Man's Sky (2.6k) | Sekiro (1.7k) | Darkest Dungeon (1.6k) | Dark Souls 3 (1.5k) | Kingdom Come: Deliverance (1.5k) | Dragon Age 2 (1.5k) | X4: Foundations (1.5k) | Dark Souls (1.4k) | Kenshi (1.4k) | Hogwarts Legacy (1.4k) | Mount & Blade: Warband (1.4k) | War Thunder (1.2k) | Dark Souls 2 (1.2k) | Mount & Blade (2k) | Halo: MCC (1.9k)
+| # | Game | NexusMods Domain | Mods | Tools | Stores |
+|---|------|-----------------|------|-------|--------|
+| 1 | Skyrim Special Edition | [skyrimspecialedition](https://www.nexusmods.com/skyrimspecialedition) | 142,309 | Yes | Steam, GOG, Epic |
+| 2 | Skyrim VR | [skyrimspecialedition](https://www.nexusmods.com/skyrimspecialedition) | 142,309 | Yes | Steam |
+| 3 | Fallout 4 | [fallout4](https://www.nexusmods.com/fallout4) | 77,467 | Yes | Steam, GOG, Epic |
+| 4 | Fallout 4 VR | [fallout4](https://www.nexusmods.com/fallout4) | 77,467 | Yes | Steam |
+| 5 | Skyrim | [skyrim](https://www.nexusmods.com/skyrim) | 73,218 | Yes | Steam |
+| 6 | Fallout: New Vegas | [newvegas](https://www.nexusmods.com/newvegas) | 42,288 | Yes | Steam, GOG, Epic |
+| 7 | Stardew Valley | [stardewvalley](https://www.nexusmods.com/stardewvalley) | 34,712 | Yes | Steam, GOG |
+| 8 | The Elder Scrolls IV: Oblivion | [oblivion](https://www.nexusmods.com/oblivion) | 33,588 | Yes | Steam, GOG |
+| 9 | Cyberpunk 2077 | [cyberpunk2077](https://www.nexusmods.com/cyberpunk2077) | 24,998 |  | Steam, GOG |
+| 10 | Baldur's Gate 3 | [baldursgate3](https://www.nexusmods.com/baldursgate3) | 19,959 | Yes | Steam, GOG |
+| 11 | Fallout 3 | [fallout3](https://www.nexusmods.com/fallout3) | 17,249 | Yes | Steam, GOG, Epic |
+| 12 | Morrowind | [morrowind](https://www.nexusmods.com/morrowind) | 16,428 | Yes | Steam, GOG |
+| 13 | Starfield | [starfield](https://www.nexusmods.com/starfield) | 13,962 |  | Steam |
+| 14 | The Witcher 3 | [witcher3](https://www.nexusmods.com/witcher3) | 10,282 | Yes | Steam, GOG, Epic |
+| 15 | 7 Days to Die | [7daystodie](https://www.nexusmods.com/7daystodie) | 9,309 |  | Steam |
+| 16 | Blade & Sorcery | [bladeandsorcery](https://www.nexusmods.com/bladeandsorcery) | 8,943 |  | Steam |
+| 17 | Monster Hunter: World | [monsterhunterworld](https://www.nexusmods.com/monsterhunterworld) | 6,577 | Yes | Steam |
+| 18 | The Sims 4 | [thesims4](https://www.nexusmods.com/thesims4) | 5,484 |  | Steam |
+| 19 | Dragon Age: Origins | [dragonage](https://www.nexusmods.com/dragonage) | 4,092 |  | Steam |
+| 20 | No Man's Sky | [nomanssky](https://www.nexusmods.com/nomanssky) | 3,022 |  | Steam |
+| 21 | Mount & Blade | [mountandblade](https://www.nexusmods.com/mountandblade) | 2,050 |  | Steam |
+| 22 | Sekiro | [sekiro](https://www.nexusmods.com/sekiro) | 1,986 |  | Steam |
+| 23 | X4: Foundations | [x4foundations](https://www.nexusmods.com/x4foundations) | 1,811 |  | Steam, GOG |
+| 24 | Darkest Dungeon | [darkestdungeon](https://www.nexusmods.com/darkestdungeon) | 1,779 |  | Steam, GOG, Epic |
+| 25 | War Thunder | [warthunder](https://www.nexusmods.com/warthunder) | 1,741 |  | Steam |
+| 26 | Kingdom Come: Deliverance | [kingdomcomedeliverance](https://www.nexusmods.com/kingdomcomedeliverance) | 1,717 |  | Steam, Epic |
+| 27 | Kenshi | [kenshi](https://www.nexusmods.com/kenshi) | 1,711 |  | Steam |
+| 28 | Dragon Age 2 | [dragonage2](https://www.nexusmods.com/dragonage2) | 1,559 |  | Steam |
+| 29 | Dark Souls | [darksouls](https://www.nexusmods.com/darksouls) | 1,521 |  | Steam |
+| 30 | Hogwarts Legacy | [hogwartslegacy](https://www.nexusmods.com/hogwartslegacy) | 1,515 |  | Steam |
+| 31 | Mount & Blade: Warband | [mbwarband](https://www.nexusmods.com/mbwarband) | 1,434 |  | Steam |
+| 32 | Dark Souls II | [darksouls2](https://www.nexusmods.com/darksouls2) | 1,398 |  | Steam |
+| 33 | Daggerfall Unity | [daggerfallunity](https://www.nexusmods.com/daggerfallunity) | 1,054 |  | - |
+| 34 | Dragon's Dogma | [dragonsdogma](https://www.nexusmods.com/dragonsdogma) | 905 |  | Steam |
+| 35 | Starbound | [starbound](https://www.nexusmods.com/starbound) | 859 |  | Steam |
+| 36 | Pathfinder: Wrath of the Righteous | [pathfinderwrathoftherighteous](https://www.nexusmods.com/pathfinderwrathoftherighteous) | 823 |  | Steam, GOG |
+| 37 | Code Vein | [codevein](https://www.nexusmods.com/codevein) | 739 |  | Steam |
+| 38 | XCOM 2 | [xcom2](https://www.nexusmods.com/xcom2) | 700 | Yes | Steam, GOG |
+| 39 | XCOM 2: War of the Chosen | [xcom2](https://www.nexusmods.com/xcom2) | 700 |  | Steam, GOG |
+| 40 | Star Wars: Knights of the Old Republic | [kotor](https://www.nexusmods.com/kotor) | 696 |  | Steam, GOG |
+| 41 | World Of Tanks | [worldoftanks](https://www.nexusmods.com/worldoftanks) | 659 |  | - |
+| 42 | RimWorld | [rimworld](https://www.nexusmods.com/rimworld) | 639 |  | Steam |
+| 43 | The Witcher 2 | [witcher2](https://www.nexusmods.com/witcher2) | 636 |  | Steam |
+| 44 | Microsoft Flight Simulator | [microsoftflightsimulator](https://www.nexusmods.com/microsoftflightsimulator) | 542 |  | Steam |
+| 45 | Neverwinter Nights 2 | [neverwinter2](https://www.nexusmods.com/neverwinter2) | 518 |  | - |
+| 46 | The Witcher | [witcher](https://www.nexusmods.com/witcher) | 512 |  | Steam |
+| 47 | BattleTech | [battletech](https://www.nexusmods.com/battletech) | 509 |  | Steam |
+| 48 | Divinity: Original Sin 2 - Definitive Edition | [divinityoriginalsin2definitiveedition](https://www.nexusmods.com/divinityoriginalsin2definitiveedition) | 470 |  | Steam |
+| 49 | State of Decay | [stateofdecay](https://www.nexusmods.com/stateofdecay) | 441 |  | Steam |
+| 50 | Star Wars: Knights of the Old Republic II - The Sith Lords | [kotor2](https://www.nexusmods.com/kotor2) | 435 |  | Steam, GOG |
+| 51 | Divinity: Original Sin 2 - Original Edition | [divinityoriginalsin2](https://www.nexusmods.com/divinityoriginalsin2) | 365 |  | Steam |
+| 52 | Pathfinder: Kingmaker | [pathfinderkingmaker](https://www.nexusmods.com/pathfinderkingmaker) | 340 |  | Steam |
+| 53 | Legend of Grimrock | [grimrock](https://www.nexusmods.com/grimrock) | 325 |  | Steam |
+| 54 | Vampire the Masquerade: Bloodlines | [vampirebloodlines](https://www.nexusmods.com/vampirebloodlines) | 319 |  | Steam, GOG |
+| 55 | X Rebirth | [xrebirth](https://www.nexusmods.com/xrebirth) | 303 |  | Steam |
+| 56 | Enderal | [enderal](https://www.nexusmods.com/enderal) | 266 | Yes | Steam |
+| 57 | Spyro Reignited Trilogy | [spyroreignitedtrilogy](https://www.nexusmods.com/spyroreignitedtrilogy) | 247 |  | Steam |
+| 58 | Grim Dawn | [grimdawn](https://www.nexusmods.com/grimdawn) | 222 |  | Steam |
+| 59 | Total War: Three Kingdoms | [totalwarthreekingdoms](https://www.nexusmods.com/totalwarthreekingdoms) | 207 | Yes | Steam, GOG, Epic |
+| 60 | A Hat in Time | [ahatintime](https://www.nexusmods.com/ahatintime) | 201 | Yes | Steam |
+| 61 | Bloodstained: Ritual of the Night | [bloodstainedritualofthenight](https://www.nexusmods.com/bloodstainedritualofthenight) | 192 |  | Steam, Epic |
+| 62 | The Elder Scrolls Online | [elderscrollsonline](https://www.nexusmods.com/elderscrollsonline) | 184 |  | Steam |
+| 63 | GreedFall | [greedfall](https://www.nexusmods.com/greedfall) | 180 |  | Steam |
+| 64 | The Sims 3 | [thesims3](https://www.nexusmods.com/thesims3) | 158 |  | Steam |
+| 65 | Elex | [elex](https://www.nexusmods.com/elex) | 148 |  | Steam |
+| 66 | Galactic Civilizations III | [galacticcivilizations3](https://www.nexusmods.com/galacticcivilizations3) | 130 |  | Steam, GOG |
+| 67 | Shadowrun Returns | [shadowrunreturns](https://www.nexusmods.com/shadowrunreturns) | 117 | Yes | Steam |
+| 68 | Conan Exiles | [conanexiles](https://www.nexusmods.com/conanexiles) | 98 |  | Steam |
+| 69 | Surviving Mars | [survivingmars](https://www.nexusmods.com/survivingmars) | 94 |  | Steam |
+| 70 | Nehrim: At Fate's Edge | [nehrim](https://www.nexusmods.com/nehrim) | 76 | Yes | Steam |
+| 71 | Team Fortress 2 | [teamfortress2](https://www.nexusmods.com/teamfortress2) | 76 | Yes | Steam |
+| 72 | Wolcen: Lords Of Mayhem | [wolcenlordsofmayhem](https://www.nexusmods.com/wolcenlordsofmayhem) | 71 |  | Steam |
+| 73 | Torchlight II | [torchlight2](https://www.nexusmods.com/torchlight2) | 53 |  | Steam, GOG |
+| 74 | Mount & Blade: With Fire and Sword | [mbwithfireandsword](https://www.nexusmods.com/mbwithfireandsword) | 48 |  | Steam |
+| 75 | Factorio | [factorio](https://www.nexusmods.com/factorio) | 24 |  | Steam |
+| 76 | Kerbal Space Program | [kerbalspaceprogram](https://www.nexusmods.com/kerbalspaceprogram) | 20 |  | Steam |
+| 77 | Oxygen Not Included | [oxygennotincluded](https://www.nexusmods.com/oxygennotincluded) | 20 |  | Steam |
+| 78 | Dawn of Man | [dawnofman](https://www.nexusmods.com/dawnofman) | 19 |  | Steam, GOG |
+| 79 | Prison Architect | [prisonarchitect](https://www.nexusmods.com/prisonarchitect) | 16 |  | Steam |
+| 80 | Untitled Goose Game | [untitledgoosegame](https://www.nexusmods.com/untitledgoosegame) | 7 |  | - |
+| 81 | Garden Paws | [gardenpaws](https://www.nexusmods.com/gardenpaws) | 3 |  | Steam |
+| 82 | Neverwinter Nights: Enhanced Edition | [neverwinter](https://www.nexusmods.com/neverwinter) | 1 |  | Steam |
+| 83 | Breaking Wheel | [breakingwheel](https://www.nexusmods.com/breakingwheel) | 1 |  | Steam |
+| 84 | Neverwinter Nights | [neverwinter](https://www.nexusmods.com/neverwinter) | 1 |  | - |
+| 85 | Halo: The Master Chief Collection | [masterchiefcollection](https://www.nexusmods.com/masterchiefcollection) | - | Yes | Steam |
 <!-- GAME_SUPPORT_TABLE_END -->
 
 ### Planned Support (Coming Soon)
