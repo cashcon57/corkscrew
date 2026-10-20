@@ -155,7 +155,9 @@ jobs:
     name: E2E WebdriverIO
     if: github.event_name == 'pull_request'
     needs: [test-rust]
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04, whose newer WebKitGTK breaks
+    # WebDriver-driven navigation (clicks succeed but pages don't change).
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     continue-on-error: true
     steps:
