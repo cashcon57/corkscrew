@@ -42,6 +42,7 @@ jobs:
         if: steps.changes.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v7
         with:
+          token: ${{ secrets.STATS_PR_TOKEN }}
           branch: bot/update-game-stats
           base: main
           delete-branch: true
