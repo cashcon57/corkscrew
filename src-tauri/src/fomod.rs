@@ -322,12 +322,11 @@ fn read_text_content(reader: &mut Reader<&[u8]>, buf: &mut Vec<u8>) -> String {
         match reader.read_event_into(buf) {
             Ok(Event::Text(e)) => {
                 // quick-xml 0.38+: text events are already unescaped
-                let t = String::from_utf8_lossy(e.as_ref());
-                text.push_str(&t);
+                text.push_str(&e);
             }
             Ok(Event::CData(e)) => {
                 // CData content does not need unescaping.
-                text.push_str(&String::from_utf8_lossy(&e));
+                text.push_str(&e);
             }
             Ok(Event::End(_)) | Ok(Event::Eof) => break,
             _ => {}
@@ -339,7 +338,7 @@ fn read_text_content(reader: &mut Reader<&[u8]>, buf: &mut Vec<u8>) -> String {
 /// Extract a named attribute value from a `BytesStart` tag.
 fn get_attr(tag: &quick_xml::events::BytesStart<'_>, name: &str) -> Option<String> {
     for attr in tag.attributes().flatten() {
-        if attr.key.as_ref() == name.as_bytes() {
+        if attr.key.as_ref() == name {
             // Use unescape_value to decode XML entities (&quot;, &amp;, etc.)
             return attr.unescape_value().ok().map(|s| s.into_owned());
         }
@@ -419,7 +418,7 @@ fn parse_file_element(tag: &quick_xml::events::BytesStart<'_>, is_folder: bool) 
 fn parse_condition_block(
     reader: &mut Reader<&[u8]>,
     buf: &mut Vec<u8>,
-    end_tag: &[u8],
+    end_tag: &str,
 ) -> Option<ConditionBlock> {
     let mut block: Option<ConditionBlock> = None;
     let mut depth = 1u32;
@@ -429,7 +428,7 @@ fn parse_condition_block(
             Ok(Event::Start(ref e)) => {
                 depth += 1;
                 let local = e.local_name();
-                if local.as_ref() == b"dependencies" {
+                if local.as_ref() == "dependencies" {
                     if block.is_none() {
                         // First <dependencies> — this IS the block
                         let op = get_attr(e, "operator").unwrap_or_else(|| "And".to_string());
@@ -455,7 +454,7 @@ fn parse_condition_block(
             Ok(Event::Empty(ref e)) => {
                 let local = e.local_name();
                 match local.as_ref() {
-                    b"flagDependency" => {
+                    "flagDependency" => {
                         if let (Some(flag), Some(value)) =
                             (get_attr(e, "flag"), get_attr(e, "value"))
                         {
@@ -464,14 +463,14 @@ fn parse_condition_block(
                             }
                         }
                     }
-                    b"gameDependency" => {
+                    "gameDependency" => {
                         if let Some(version) = get_attr(e, "version") {
                             if let Some(ref mut b) = block {
                                 b.game_dependencies.push(GameDependency { version });
                             }
                         }
                     }
-                    b"fileDependency" => {
+                    "fileDependency" => {
                         if let (Some(file), Some(state)) =
                             (get_attr(e, "file"), get_attr(e, "state"))
                         {
@@ -481,11 +480,11 @@ fn parse_condition_block(
                         }
                     }
                     // Mod manager version — always pass (any modern manager suffices)
-                    b"fommDependency" => { /* intentionally ignored — always met */ }
+                    "fommDependency" => { /* intentionally ignored — always met */ }
                     // Script extender version deps — parsed but treated as met
                     // (we don't block installs based on SE version)
-                    b"foseDependency" | b"nvseDependency" | b"skseDependency"
-                    | b"f4seDependency" => { /* permissive — always met */ }
+                    "foseDependency" | "nvseDependency" | "skseDependency"
+                    | "f4seDependency" => { /* permissive — always met */ }
                     _ => {}
                 }
             }
@@ -526,7 +525,7 @@ fn parse_nested_condition_block(
             Ok(Event::Start(ref e)) => {
                 depth += 1;
                 let local = e.local_name();
-                if local.as_ref() == b"dependencies" {
+                if local.as_ref() == "dependencies" {
                     let op = get_attr(e, "operator").unwrap_or_else(|| "And".to_string());
                     let child = parse_nested_condition_block(reader, buf, &op);
                     block.children.push(child);
@@ -536,33 +535,33 @@ fn parse_nested_condition_block(
             Ok(Event::Empty(ref e)) => {
                 let local = e.local_name();
                 match local.as_ref() {
-                    b"flagDependency" => {
+                    "flagDependency" => {
                         if let (Some(flag), Some(value)) =
                             (get_attr(e, "flag"), get_attr(e, "value"))
                         {
                             block.flags.push(FlagDependency { flag, value });
                         }
                     }
-                    b"gameDependency" => {
+                    "gameDependency" => {
                         if let Some(version) = get_attr(e, "version") {
                             block.game_dependencies.push(GameDependency { version });
                         }
                     }
-                    b"fileDependency" => {
+                    "fileDependency" => {
                         if let (Some(file), Some(state)) =
                             (get_attr(e, "file"), get_attr(e, "state"))
                         {
                             block.file_dependencies.push(FileDependency { file, state });
                         }
                     }
-                    b"fommDependency" | b"foseDependency" | b"nvseDependency"
-                    | b"skseDependency" | b"f4seDependency" => { /* always met */ }
+                    "fommDependency" | "foseDependency" | "nvseDependency"
+                    | "skseDependency" | "f4seDependency" => { /* always met */ }
                     _ => {}
                 }
             }
             Ok(Event::End(ref e)) => {
                 depth -= 1;
-                if depth == 0 || e.local_name().as_ref() == b"dependencies" {
+                if depth == 0 || e.local_name().as_ref() == "dependencies" {
                     break;
                 }
             }
@@ -591,7 +590,7 @@ fn parse_condition_flags(reader: &mut Reader<&[u8]>, buf: &mut Vec<u8>) -> HashM
             Ok(Event::Start(ref e)) => {
                 depth += 1;
                 let local = e.local_name();
-                if local.as_ref() == b"flag" {
+                if local.as_ref() == "flag" {
                     let flag_name = get_attr(e, "name").unwrap_or_default();
                     let flag_value = read_text_content(reader, buf);
                     flags.insert(flag_name, flag_value);
@@ -624,16 +623,16 @@ fn parse_files_block(reader: &mut Reader<&[u8]>, buf: &mut Vec<u8>) -> Vec<Fomod
                 depth += 1;
                 let local = e.local_name();
                 match local.as_ref() {
-                    b"file" => files.push(parse_file_element(e, false)),
-                    b"folder" => files.push(parse_file_element(e, true)),
+                    "file" => files.push(parse_file_element(e, false)),
+                    "folder" => files.push(parse_file_element(e, true)),
                     _ => {}
                 }
             }
             Ok(Event::Empty(ref e)) => {
                 let local = e.local_name();
                 match local.as_ref() {
-                    b"file" => files.push(parse_file_element(e, false)),
-                    b"folder" => files.push(parse_file_element(e, true)),
+                    "file" => files.push(parse_file_element(e, false)),
+                    "folder" => files.push(parse_file_element(e, true)),
                     _ => {}
                 }
             }
@@ -671,22 +670,22 @@ fn parse_plugin(reader: &mut Reader<&[u8]>, buf: &mut Vec<u8>, name: String) -> 
                 depth += 1;
                 let local_name = e.local_name();
                 match local_name.as_ref() {
-                    b"description" => {
+                    "description" => {
                         option.description = read_text_content(reader, buf);
                         // read_text_content consumes the End event
                         depth -= 1;
                     }
-                    b"files" => {
+                    "files" => {
                         option.files = parse_files_block(reader, buf);
                         // parse_files_block consumes the End event
                         depth -= 1;
                     }
-                    b"conditionFlags" => {
+                    "conditionFlags" => {
                         option.condition_flags = parse_condition_flags(reader, buf);
                         // parse_condition_flags consumes the End event
                         depth -= 1;
                     }
-                    b"dependencyType" => {
+                    "dependencyType" => {
                         let (default_type, patterns) = parse_dependency_type(reader, buf);
                         option.type_descriptor = default_type;
                         option.conditional_type_patterns = patterns;
@@ -699,10 +698,10 @@ fn parse_plugin(reader: &mut Reader<&[u8]>, buf: &mut Vec<u8>, name: String) -> 
             Ok(Event::Empty(ref e)) => {
                 let local_name = e.local_name();
                 match local_name.as_ref() {
-                    b"image" => {
+                    "image" => {
                         option.image = get_attr(e, "path");
                     }
-                    b"type" => {
+                    "type" => {
                         if let Some(name) = get_attr(e, "name") {
                             option.type_descriptor = name;
                         }
@@ -761,12 +760,12 @@ fn parse_dependency_type(
                 depth += 1;
                 let local = e.local_name();
                 match local.as_ref() {
-                    b"pattern" => {
+                    "pattern" => {
                         in_pattern = true;
                         current_condition = None;
                         current_type = None;
                     }
-                    b"dependencies" if in_pattern => {
+                    "dependencies" if in_pattern => {
                         let op = get_attr(e, "operator").unwrap_or_else(|| "And".to_string());
                         current_condition = Some(parse_nested_condition_block(reader, buf, &op));
                         depth -= 1; // parse_nested consumed end tag
@@ -777,12 +776,12 @@ fn parse_dependency_type(
             Ok(Event::Empty(ref e)) => {
                 let local = e.local_name();
                 match local.as_ref() {
-                    b"defaultType" => {
+                    "defaultType" => {
                         if let Some(name) = get_attr(e, "name") {
                             default_type = name;
                         }
                     }
-                    b"type" if in_pattern => {
+                    "type" if in_pattern => {
                         current_type = get_attr(e, "name");
                     }
                     _ => {}
@@ -790,7 +789,7 @@ fn parse_dependency_type(
             }
             Ok(Event::End(ref e)) => {
                 depth -= 1;
-                if e.local_name().as_ref() == b"pattern" {
+                if e.local_name().as_ref() == "pattern" {
                     if let (Some(cond), Some(opt_type)) =
                         (current_condition.take(), current_type.take())
                     {
@@ -834,7 +833,7 @@ fn parse_group(
             Ok(Event::Start(ref e)) => {
                 depth += 1;
                 let local_name = e.local_name();
-                if local_name.as_ref() == b"plugin" {
+                if local_name.as_ref() == "plugin" {
                     let plugin_name = get_attr(e, "name").unwrap_or_default();
                     let option = parse_plugin(reader, buf, plugin_name);
                     group.options.push(option);
@@ -873,7 +872,7 @@ fn parse_step(reader: &mut Reader<&[u8]>, buf: &mut Vec<u8>, name: String) -> Fo
                 depth += 1;
                 let local_name = e.local_name();
                 match local_name.as_ref() {
-                    b"group" => {
+                    "group" => {
                         let group_name = get_attr(e, "name").unwrap_or_default();
                         let group_type =
                             get_attr(e, "type").unwrap_or_else(|| "SelectAny".to_string());
@@ -882,8 +881,8 @@ fn parse_step(reader: &mut Reader<&[u8]>, buf: &mut Vec<u8>, name: String) -> Fo
                         // parse_group consumes the End event
                         depth -= 1;
                     }
-                    b"visible" => {
-                        step.visible = parse_condition_block(reader, buf, b"visible");
+                    "visible" => {
+                        step.visible = parse_condition_block(reader, buf, "visible");
                         // parse_condition_block consumes the End event
                         depth -= 1;
                     }
@@ -1472,31 +1471,31 @@ fn parse_fomod_xml(xml: &str) -> Result<FomodInstaller> {
             Ok(Event::Start(ref e)) => {
                 let local_name = e.local_name();
                 match local_name.as_ref() {
-                    b"moduleName" => {
+                    "moduleName" => {
                         installer.module_name = read_text_content(&mut reader, &mut buf);
                     }
-                    b"requiredInstallFiles" => {
+                    "requiredInstallFiles" => {
                         in_required_files = true;
                     }
-                    b"installStep" => {
+                    "installStep" => {
                         let step_name = get_attr(e, "name").unwrap_or_default();
                         let step = parse_step(&mut reader, &mut buf, step_name);
                         installer.steps.push(step);
                     }
-                    b"moduleDependencies" => {
+                    "moduleDependencies" => {
                         // Top-level prerequisites — parse directly as a condition block.
                         let op = get_attr(e, "operator").unwrap_or_else(|| "And".to_string());
                         let block = parse_nested_condition_block(&mut reader, &mut buf, &op);
                         installer.module_dependencies = Some(block);
                     }
-                    b"conditionalFileInstalls" => {
+                    "conditionalFileInstalls" => {
                         installer.conditional_file_installs =
                             parse_conditional_file_installs(&mut reader, &mut buf);
                     }
-                    b"file" if in_required_files => {
+                    "file" if in_required_files => {
                         installer.required_files.push(parse_file_element(e, false));
                     }
-                    b"folder" if in_required_files => {
+                    "folder" if in_required_files => {
                         installer.required_files.push(parse_file_element(e, true));
                     }
                     _ => {}
@@ -1505,17 +1504,17 @@ fn parse_fomod_xml(xml: &str) -> Result<FomodInstaller> {
             Ok(Event::Empty(ref e)) => {
                 let local_name = e.local_name();
                 match local_name.as_ref() {
-                    b"file" if in_required_files => {
+                    "file" if in_required_files => {
                         installer.required_files.push(parse_file_element(e, false));
                     }
-                    b"folder" if in_required_files => {
+                    "folder" if in_required_files => {
                         installer.required_files.push(parse_file_element(e, true));
                     }
                     _ => {}
                 }
             }
             Ok(Event::End(ref e)) => {
-                if e.local_name().as_ref() == b"requiredInstallFiles" {
+                if e.local_name().as_ref() == "requiredInstallFiles" {
                     in_required_files = false;
                 }
             }
@@ -1567,17 +1566,17 @@ fn parse_conditional_file_installs(
                 depth += 1;
                 let local = e.local_name();
                 match local.as_ref() {
-                    b"pattern" => {
+                    "pattern" => {
                         in_pattern = true;
                         current_condition = None;
                         current_files = Vec::new();
                     }
-                    b"dependencies" if in_pattern => {
+                    "dependencies" if in_pattern => {
                         let op = get_attr(e, "operator").unwrap_or_else(|| "And".to_string());
                         current_condition = Some(parse_nested_condition_block(reader, buf, &op));
                         depth -= 1; // parse_nested consumed end tag
                     }
-                    b"files" if in_pattern => {
+                    "files" if in_pattern => {
                         current_files = parse_files_block(reader, buf);
                         depth -= 1; // parse_files_block consumed end tag
                     }
@@ -1586,7 +1585,7 @@ fn parse_conditional_file_installs(
             }
             Ok(Event::End(ref e)) => {
                 depth -= 1;
-                if e.local_name().as_ref() == b"pattern" && in_pattern {
+                if e.local_name().as_ref() == "pattern" && in_pattern {
                     if let Some(cond) = current_condition.take() {
                         installs.push(ConditionalFileInstall {
                             condition: cond,

@@ -503,16 +503,16 @@ fn decode_rimworld_xml(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => match e.name().as_ref() {
-                b"activeMods" => in_active_mods = true,
-                b"li" if in_active_mods => {
+                "activeMods" => in_active_mods = true,
+                "li" if in_active_mods => {
                     in_li = true;
                     current.clear();
                 }
                 _ => {}
             },
             Ok(Event::End(ref e)) => match e.name().as_ref() {
-                b"activeMods" => in_active_mods = false,
-                b"li" if in_active_mods => {
+                "activeMods" => in_active_mods = false,
+                "li" if in_active_mods => {
                     if !current.is_empty() {
                         let id = current.trim().to_string();
                         out.push(LoadOrderEntry {
@@ -527,10 +527,7 @@ fn decode_rimworld_xml(
             },
             Ok(Event::Text(t)) => {
                 if in_li {
-                    let s = t
-                        .xml_content()
-                        .map_err(|e| format!("XML decode error: {}", e))?;
-                    current.push_str(&s);
+                    current.push_str(&t.xml10_content());
                 }
             }
             Ok(Event::GeneralRef(r)) => {
@@ -539,13 +536,13 @@ fn decode_rimworld_xml(
                 // predefined XML entities here; anything else (which RimWorld
                 // doesn't use) is best-effort: we drop it.
                 if in_li {
-                    let bytes: &[u8] = &r;
-                    let resolved = match bytes {
-                        b"amp" => Some('&'),
-                        b"lt" => Some('<'),
-                        b"gt" => Some('>'),
-                        b"quot" => Some('"'),
-                        b"apos" => Some('\''),
+                    let name: &str = &r;
+                    let resolved = match name {
+                        "amp" => Some('&'),
+                        "lt" => Some('<'),
+                        "gt" => Some('>'),
+                        "quot" => Some('"'),
+                        "apos" => Some('\''),
                         _ => r.resolve_char_ref().ok().flatten(),
                     };
                     if let Some(ch) = resolved {
