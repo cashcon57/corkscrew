@@ -11,7 +11,8 @@
     "seed-db": "./fixtures/create-fixture-db.sh"
   },
   "overrides": {
-    "serialize-javascript": ">=7.0.5"
+    "serialize-javascript": ">=7.0.5",
+    "basic-ftp": "^6.2.3"
   },
   "devDependencies": {
     "@wdio/cli": "^9.0.0",
