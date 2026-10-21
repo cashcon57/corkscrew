@@ -6,80 +6,66 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  checks: read
 
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
-    if: github.actor == 'dependabot[bot]'
+    timeout-minutes: 60
+    # Only Dependabot's own PRs (actor AND PR author), never human PRs.
+    if: github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]'
     steps:
       - name: Fetch Dependabot metadata
         id: metadata
-        uses: dependabot/fetch-metadata@v2
+        uses: dependabot/fetch-metadata@v3
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
 
-      # --- Security alerts: auto-approve + auto-merge regardless of semver ---
-      # These are flagged by GitHub's security advisory database.
-      # Risk is low because NOT merging a known vuln is worse than a minor break.
-      - name: Auto-approve security updates
-        if: steps.metadata.outputs.dependency-type == 'direct:production' && steps.metadata.outputs.update-type == 'version-update:semver-patch'
-        run: gh pr review --approve "$PR_URL"
+      - name: Decide eligibility
+        id: eligible
         env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
+          DEP_TYPE: ${{ steps.metadata.outputs.dependency-type }}
+        run: |
+          ok=false
+          # Patch updates: non-breaking by semver.
+          [ "$UPDATE_TYPE" = "version-update:semver-patch" ] && ok=true
+          # GitHub Actions and dev dependencies: minor + patch.
+          if [ "$UPDATE_TYPE" != "version-update:semver-major" ]; then
+            [ "$ECOSYSTEM" = "github_actions" ] && ok=true
+            [ "$DEP_TYPE" = "direct:development" ] && ok=true
+          fi
+          echo "ok=$ok" | tee -a "$GITHUB_OUTPUT"
 
-      # --- Patch updates: auto-approve + auto-merge ---
-      # Semver patches should be non-breaking by definition.
-      - name: Auto-approve patch updates
-        if: steps.metadata.outputs.update-type == 'version-update:semver-patch'
-        run: gh pr review --approve "$PR_URL"
+      # WebdriverIO isn't a required check (and is continue-on-error), so
+      # `gh pr merge --auto` would ignore it. Wait for it explicitly and only
+      # merge if it passed or was skipped (no src-tauri / e2e-wdio changes).
+      - name: Wait for E2E WebdriverIO
+        if: steps.eligible.outputs.ok == 'true'
         env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          for i in $(seq 1 100); do
+            res=$(gh api "repos/$REPO/commits/$SHA/check-runs?check_name=E2E%20WebdriverIO" \
+              --jq '[.check_runs[] | select(.status=="completed")] | first | .conclusion // ""')
+            pending=$(gh api "repos/$REPO/commits/$SHA/check-runs?check_name=E2E%20WebdriverIO" \
+              --jq '[.check_runs[] | select(.status!="completed")] | length')
+            if [ -n "$res" ] && [ "$pending" = "0" ]; then
+              echo "E2E WebdriverIO: $res"
+              case "$res" in success|skipped|neutral) exit 0 ;; *) echo "WebdriverIO did not pass; not auto-merging."; exit 1 ;; esac
+            fi
+            sleep 30
+          done
+          echo "Timed out waiting for E2E WebdriverIO; not auto-merging."; exit 1
 
-      - name: Auto-merge patch updates
-        if: steps.metadata.outputs.update-type == 'version-update:semver-patch'
-        run: gh pr merge --auto --merge "$PR_URL"
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # --- GitHub Actions: auto-merge minor + patch ---
-      # GH Actions are pinned by major version; minor/patch are safe.
-      - name: Auto-approve GitHub Actions minor/patch
-        if: |
-          steps.metadata.outputs.package-ecosystem == 'github_actions' &&
-          steps.metadata.outputs.update-type != 'version-update:semver-major'
-        run: gh pr review --approve "$PR_URL"
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Auto-merge GitHub Actions minor/patch
-        if: |
-          steps.metadata.outputs.package-ecosystem == 'github_actions' &&
-          steps.metadata.outputs.update-type != 'version-update:semver-major'
-        run: gh pr merge --auto --merge "$PR_URL"
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # --- Dev dependencies: auto-merge minor + patch ---
-      # Dev deps (test frameworks, build tools) don't ship to users.
-      - name: Auto-approve dev dependency minor/patch
-        if: |
-          steps.metadata.outputs.dependency-type == 'direct:development' &&
-          steps.metadata.outputs.update-type != 'version-update:semver-major'
-        run: gh pr review --approve "$PR_URL"
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Auto-merge dev dependency minor/patch
-        if: |
-          steps.metadata.outputs.dependency-type == 'direct:development' &&
-          steps.metadata.outputs.update-type != 'version-update:semver-major'
-        run: gh pr merge --auto --merge "$PR_URL"
+      - name: Approve and enable auto-merge
+        if: steps.eligible.outputs.ok == 'true'
+        run: |
+          gh pr review --approve "$PR_URL"
+          gh pr merge --auto --merge "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
