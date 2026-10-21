@@ -10,21 +10,63 @@ use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use std::process::Command;
 
-/// The .desktop file content for NXM and corkscrew:// handler registration.
-#[allow(dead_code)]
-const DESKTOP_FILE_CONTENT: &str = r#"[Desktop Entry]
-Type=Application
-Name=Corkscrew URL Handler
-Comment=Handle NexusMods and Corkscrew protocol links
-Exec=corkscrew --url %u
-Terminal=false
-MimeType=x-scheme-handler/nxm;x-scheme-handler/corkscrew;
-NoDisplay=true
-Categories=Game;
-"#;
-
 #[allow(dead_code)]
 const DESKTOP_FILE_NAME: &str = "corkscrew-nxm.desktop";
+
+/// Build the .desktop file content for NXM and corkscrew:// handler
+/// registration, launching `exe_path` (the AppImage path when running as
+/// one — `corkscrew` is not on `$PATH` for AppImage installs, the usual
+/// SteamOS setup).
+///
+/// The URL must be the *only* argument: `tauri-plugin-deep-link` on Linux
+/// ignores argv unless it is exactly `[bin, url]`, so any extra flag (the
+/// old `--url %u`) silently drops the link before `onOpenUrl` sees it.
+#[allow(dead_code)]
+fn desktop_file_content(exe_path: &str) -> Result<String, String> {
+    Ok(format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=Corkscrew URL Handler\n\
+         Comment=Handle NexusMods and Corkscrew protocol links\n\
+         Exec={} %u\n\
+         Terminal=false\n\
+         MimeType=x-scheme-handler/nxm;x-scheme-handler/corkscrew;\n\
+         NoDisplay=true\n\
+         Categories=Game;\n",
+        quote_exec_arg(exe_path)?
+    ))
+}
+
+/// Quote one argument for a .desktop `Exec=` key per the Desktop Entry
+/// spec: wrap in double quotes, backslash-escape `"` `` ` `` `$` `\`, then
+/// apply the string-value escaping (each `\` doubled) and escape `%` as `%%`
+/// so field codes can't be injected. Control characters can't be
+/// represented and are rejected.
+#[allow(dead_code)]
+fn quote_exec_arg(arg: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    for c in arg.chars() {
+        match c {
+            '"' | '`' | '$' => {
+                out.push_str("\\\\");
+                out.push(c);
+            }
+            '\\' => out.push_str("\\\\\\\\"),
+            '%' => out.push_str("%%"),
+            c if c.is_control() => {
+                return Err(format!(
+                    "Executable path contains a control character and can't be \
+                     written to a .desktop file: {:?}",
+                    arg
+                ));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    Ok(out)
+}
 
 /// Register Corkscrew as the NXM protocol handler on Linux.
 ///
@@ -46,11 +88,14 @@ pub fn register_nxm_handler() -> Result<(), String> {
         }
 
         let desktop_path = get_desktop_file_path()?;
+        let exe_path = crate::steam_integration::get_exe_path()
+            .map_err(|e| format!("Failed to resolve Corkscrew executable: {}", e))?;
+        let content = desktop_file_content(&exe_path)?;
 
         // Write .desktop file
         std::fs::create_dir_all(desktop_path.parent().unwrap())
             .map_err(|e| format!("Failed to create directory: {}", e))?;
-        std::fs::write(&desktop_path, DESKTOP_FILE_CONTENT)
+        std::fs::write(&desktop_path, content)
             .map_err(|e| format!("Failed to write .desktop file: {}", e))?;
 
         info!(
@@ -606,6 +651,40 @@ mod tests {
         let games = known(&[("skyrimse", "skyrimspecialedition")]);
         let r = route_nxm_game("oblivionremastered", &games, Some(""));
         assert!(matches!(r, NxmRoute::NoActiveGame { .. }));
+    }
+
+    fn exec_line(content: &str) -> &str {
+        content
+            .lines()
+            .find_map(|l| l.strip_prefix("Exec="))
+            .expect("Exec= line")
+    }
+
+    #[test]
+    fn desktop_exec_passes_url_as_only_argument() {
+        // tauri-plugin-deep-link on Linux only accepts argv == [bin, url].
+        let content = desktop_file_content("/usr/bin/corkscrew").unwrap();
+        assert_eq!(exec_line(&content), "\"/usr/bin/corkscrew\" %u");
+        assert!(!content.contains("--url"));
+        assert!(content.contains("MimeType=x-scheme-handler/nxm;x-scheme-handler/corkscrew;"));
+    }
+
+    #[test]
+    fn desktop_exec_uses_appimage_path_with_spaces() {
+        let content =
+            desktop_file_content("/home/deck/Applications/Corkscrew 0.14.AppImage").unwrap();
+        assert_eq!(
+            exec_line(&content),
+            "\"/home/deck/Applications/Corkscrew 0.14.AppImage\" %u"
+        );
+    }
+
+    #[test]
+    fn desktop_exec_escapes_reserved_characters() {
+        assert_eq!(quote_exec_arg("/a/100%/b").unwrap(), "\"/a/100%%/b\"");
+        assert_eq!(quote_exec_arg("/a/$x`y\"z").unwrap(), r#""/a/\\$x\\`y\\"z""#);
+        assert_eq!(quote_exec_arg(r"/a\b").unwrap(), r#""/a\\\\b""#);
+        assert!(quote_exec_arg("/a\nExec=evil").is_err());
     }
 
     #[cfg(target_os = "linux")]
