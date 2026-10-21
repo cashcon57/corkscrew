@@ -7,6 +7,11 @@ on:
       - 'v*'
   pull_request:
     branches: [main]
+    # `labeled` lets the `macos` label trigger the macOS jobs on a PR.
+    types: [opened, synchronize, reopened, labeled]
+  schedule:
+    # Nightly full run (incl. macOS) at 06:00 UTC (~1 AM Central).
+    - cron: '0 6 * * *'
   workflow_dispatch:
 
 # Cancel in-progress runs for the same PR/branch
@@ -21,39 +26,122 @@ env:
 
 jobs:
   # ────────────────────────────────────────────────────────
+  # Decide what actually needs to run. Required checks always
+  # report: skipped work runs as no-op steps on a cheap Ubuntu
+  # runner under the same check name, so it reports success.
+  #   PR:        code changes -> Linux jobs; `macos` label -> macOS too;
+  #              src-tauri/e2e-wdio changes -> WebdriverIO
+  #   push main: Ubuntu Rust tests only (the PR already ran full CI)
+  #   nightly / manual: everything
+  # ────────────────────────────────────────────────────────
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      linux: ${{ steps.decide.outputs.linux }}
+      rust_linux: ${{ steps.decide.outputs.rust_linux }}
+      macos: ${{ steps.decide.outputs.macos }}
+      wdio: ${{ steps.decide.outputs.wdio }}
+    steps:
+      - uses: actions/checkout@v6
+        if: github.event_name == 'pull_request'
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          predicate-quantifier: every
+          filters: |
+            code:
+              - '**'
+              - '!**/*.md'
+              - '!docs/**'
+              - '!stats/**'
+              - '!LICENSE*'
+            wdio:
+              - '{src-tauri,e2e-wdio}/**'
+            ci:
+              - '.github/workflows/ci.yml'
+
+      - name: Decide
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          CODE: ${{ steps.filter.outputs.code }}
+          WDIO: ${{ steps.filter.outputs.wdio }}
+          CI_CHANGED: ${{ steps.filter.outputs.ci }}
+          MAC_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'macos') }}
+        run: |
+          case "$EVENT" in
+            pull_request)
+              linux=$CODE
+              rust_linux=$CODE
+              macos=false
+              [ "$CODE" = true ] && [ "$MAC_LABEL" = true ] && macos=true
+              wdio=false
+              { [ "$WDIO" = true ] || [ "$CI_CHANGED" = true ]; } && wdio=true
+              ;;
+            push)
+              linux=false; rust_linux=true; macos=false; wdio=false ;;
+            *)
+              linux=true; rust_linux=true; macos=true; wdio=true ;;
+          esac
+          {
+            echo "linux=$linux"; echo "rust_linux=$rust_linux"
+            echo "macos=$macos"; echo "wdio=$wdio"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  # ────────────────────────────────────────────────────────
   # Rust: clippy + tests (the only Rust job needed — tests
   # prove it compiles, so a separate cargo check is waste)
   # ────────────────────────────────────────────────────────
   test-rust:
     name: Rust Tests (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    needs: [changes]
+    # Skipped legs run on a cheap Ubuntu runner and report success.
+    runs-on: ${{ (matrix.os == 'macos-latest' && needs.changes.outputs.macos == 'true') && 'macos-latest' || 'ubuntu-latest' }}
     timeout-minutes: 25
+    env:
+      RUN: ${{ (matrix.os == 'macos-latest' && needs.changes.outputs.macos == 'true') || (matrix.os == 'ubuntu-latest' && needs.changes.outputs.rust_linux == 'true') }}
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-latest]
     steps:
+      - name: Skipped (no relevant changes for this event)
+        if: env.RUN != 'true'
+        run: echo "Nothing to run for this event/changes; reporting success."
+
       - uses: actions/checkout@v6
+        if: env.RUN == 'true'
 
       - name: Install Rust toolchain
+        if: env.RUN == 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust
+        if: env.RUN == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
       - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
+        if: env.RUN == 'true' && (runner.os == 'Linux')
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libgtk-3-dev mold clang
 
       - name: Run clippy
+        if: env.RUN == 'true'
         working-directory: src-tauri
         run: cargo clippy -- --allow clippy::too_many_arguments --allow clippy::type_complexity
 
       - name: Run tests
+        if: env.RUN == 'true'
         working-directory: src-tauri
         run: cargo test
 
@@ -62,24 +150,36 @@ jobs:
   # ────────────────────────────────────────────────────────
   frontend-check:
     name: Frontend Check
+    needs: [changes]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      RUN: ${{ needs.changes.outputs.linux }}
     steps:
+      - name: Skipped (no relevant changes for this event)
+        if: env.RUN != 'true'
+        run: echo "Nothing to run for this event/changes; reporting success."
+
       - uses: actions/checkout@v6
+        if: env.RUN == 'true'
 
       - name: Setup Node.js
+        if: env.RUN == 'true'
         uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: npm
 
       - name: Install npm dependencies
+        if: env.RUN == 'true'
         run: npm ci
 
       - name: Build frontend
+        if: env.RUN == 'true'
         run: npm run build
 
       - name: Svelte type check
+        if: env.RUN == 'true'
         run: npx svelte-check --threshold error
 
   # ────────────────────────────────────────────────────────
@@ -93,8 +193,12 @@ jobs:
     name: E2E Playwright (${{ matrix.os }})
     # Keep matrix.os as the label so required check names stay unchanged;
     # pin the Ubuntu runner to 24.04 (Playwright WebKit unsupported on ubuntu26.04).
-    runs-on: ${{ matrix.runner || matrix.os }}
+    needs: [changes]
+    # Skipped legs run on a cheap Ubuntu runner and report success.
+    runs-on: ${{ (matrix.os == 'macos-latest' && needs.changes.outputs.macos != 'true') && 'ubuntu-latest' || (matrix.runner || matrix.os) }}
     timeout-minutes: 30
+    env:
+      RUN: ${{ (matrix.os == 'macos-latest' && needs.changes.outputs.macos == 'true') || (matrix.os == 'ubuntu-latest' && needs.changes.outputs.linux == 'true') }}
     strategy:
       fail-fast: false
       matrix:
@@ -103,21 +207,47 @@ jobs:
           - os: ubuntu-latest
             runner: ubuntu-24.04
     steps:
+      - name: Skipped (no relevant changes for this event)
+        if: env.RUN != 'true'
+        run: echo "Nothing to run for this event/changes; reporting success."
+
       - uses: actions/checkout@v6
+        if: env.RUN == 'true'
 
       - name: Setup Node.js
+        if: env.RUN == 'true'
         uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: npm
 
       - name: Install npm dependencies
+        if: env.RUN == 'true'
         run: npm ci
 
+      - name: Get Playwright version
+        if: env.RUN == 'true'
+        id: pw
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        if: env.RUN == 'true'
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.os == 'macOS' && '~/Library/Caches/ms-playwright' || '~/.cache/ms-playwright' }}
+          key: playwright-webkit-${{ runner.os }}-${{ matrix.runner || matrix.os }}-${{ steps.pw.outputs.version }}
+
       - name: Install Playwright WebKit
+        if: env.RUN == 'true' && (steps.pw-cache.outputs.cache-hit != 'true')
         run: npx playwright install --with-deps webkit
 
+      - name: Install Playwright WebKit system deps (cache hit)
+        if: env.RUN == 'true' && (steps.pw-cache.outputs.cache-hit == 'true' && runner.os == 'Linux')
+        run: npx playwright install-deps webkit
+
       - name: Run Playwright E2E tests
+        if: env.RUN == 'true'
         run: |
           # Playwright WebKit sometimes exits with code 1 even when all tests
           # pass (browser process cleanup issue). Parse the stdout summary to
@@ -138,7 +268,7 @@ jobs:
           CI: true
 
       - name: Upload Playwright report
-        if: failure()
+        if: failure() && env.RUN == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report-${{ matrix.os }}
@@ -147,14 +277,14 @@ jobs:
 
   # ────────────────────────────────────────────────────────
   # Tier 2 E2E: WebdriverIO (real binary, real IPC)
-  # Only on PRs — not every push to main.
+  # Only when src-tauri/ or e2e-wdio/ change (plus nightly/manual).
   # Only Linux — macOS is 10x cost and tests the same app logic.
   # continue-on-error: advisory until the suite is fully stable.
   # ────────────────────────────────────────────────────────
   e2e-webdriverio:
     name: E2E WebdriverIO
-    if: github.event_name == 'pull_request'
-    needs: [test-rust]
+    needs: [changes, test-rust]
+    if: ${{ !cancelled() && needs.changes.outputs.wdio == 'true' && needs.test-rust.result == 'success' }}
     # Pinned: ubuntu-latest moved to 26.04, whose newer WebKitGTK breaks
     # WebDriver-driven navigation (clicks succeed but pages don't change).
     runs-on: ubuntu-24.04

@@ -1,67 +1,58 @@
 version: 2
+# Monthly, grouped updates to keep PR volume low. Each ecosystem gets one
+# minor/patch group PR; majors still arrive as individual PRs.
+# Tauri npm + cargo packages must be version-matched, so each ecosystem keeps
+# a dedicated `tauri` group and both run on the same monthly day.
 updates:
   # npm — frontend (Svelte, Tauri JS bindings)
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
+      interval: "monthly"
     commit-message:
       prefix: "deps(npm):"
     labels:
       - "dependencies"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
+    ignore:
+      # SvelteKit doesn't support TypeScript 7 yet.
+      - dependency-name: "typescript"
+        versions: [">=7"]
     groups:
-      tauri-plugins:
+      tauri:
         patterns:
           - "@tauri-apps/*"
-      svelte:
-        patterns:
-          - "svelte*"
-          - "@sveltejs/*"
-      dev-deps:
-        dependency-type: "development"
+      npm-minor-patch:
+        update-types: ["minor", "patch"]
 
   # Cargo — Rust backend (Tauri, rusqlite, reqwest, etc.)
   - package-ecosystem: "cargo"
     directory: "/src-tauri"
     schedule:
-      interval: "weekly"
-      day: "monday"
+      interval: "monthly"
     commit-message:
       prefix: "deps(cargo):"
     labels:
       - "dependencies"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
     groups:
       tauri:
         patterns:
           - "tauri"
           - "tauri-*"
-      serde:
-        patterns:
-          - "serde"
-          - "serde_*"
-      async-runtime:
-        patterns:
-          - "tokio"
-          - "tokio-*"
-          - "futures"
-          - "async-*"
-      network:
-        patterns:
-          - "reqwest"
-          - "tungstenite"
-          - "url"
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
 
   # GitHub Actions — CI/CD workflows
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
+      interval: "monthly"
     commit-message:
       prefix: "deps(actions):"
     labels:
       - "dependencies"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
+    groups:
+      actions-minor-patch:
+        update-types: ["minor", "patch"]
