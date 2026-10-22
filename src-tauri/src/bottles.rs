@@ -1,7 +1,6 @@
 //! Wine bottle detection for CrossOver, Whisky, Moonshine, Mythic, Heroic,
 //! and native Wine/Proton managers on macOS and Linux.
 
-#[cfg(target_os = "linux")]
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -233,7 +232,6 @@ pub fn normalize_container_path(path: &Path) -> PathBuf {
 
 /// Compare two paths for identity: equal verbatim, or equal once both
 /// successfully canonicalize (resolving symlinks and `.`/`..` segments).
-#[cfg(target_os = "linux")]
 fn same_dir(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
@@ -998,32 +996,63 @@ fn get_heroic_wine_prefix(heroic_config_dir: &Path, app_name: &str) -> Option<Pa
         })
 }
 
-/// Find all Heroic config directories (standard + Flatpak + macOS).
+/// Find all Heroic config directories (standard + custom XDG + Flatpak + macOS).
 fn find_heroic_config_dirs() -> Vec<PathBuf> {
-    let mut config_dirs = Vec::new();
-    if let Some(home) = dirs::home_dir() {
-        // Linux: standard install
-        let standard = home.join(".config").join("heroic");
-        if standard.is_dir() {
-            config_dirs.push(standard);
-        }
-        // Linux: Flatpak install
-        let flatpak = home
-            .join(".var")
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    // Heroic (Electron) resolves its config under `$XDG_CONFIG_HOME` on Linux;
+    // other platforms never honor it.
+    let xdg_config_home = if cfg!(target_os = "linux") {
+        std::env::var_os("XDG_CONFIG_HOME")
+    } else {
+        None
+    };
+    heroic_config_dirs_with_xdg(&home, xdg_config_home.as_deref())
+}
+
+/// Heroic config dir under a custom `$XDG_CONFIG_HOME`. Per the XDG Base
+/// Directory spec, empty or relative values are invalid and must be ignored,
+/// leaving the `~/.config/heroic` default in effect.
+fn xdg_heroic_config_dir(xdg_config_home: Option<&OsStr>) -> Option<PathBuf> {
+    let base = Path::new(xdg_config_home?);
+    if !base.is_absolute() {
+        return None;
+    }
+    Some(base.join("heroic"))
+}
+
+/// Collect existing Heroic config directories, taking `$XDG_CONFIG_HOME` as an
+/// explicit parameter so it can be tested without mutating the environment.
+///
+/// An active custom XDG config dir is listed first: it's where a running
+/// Heroic actually writes, so its entries should win `app_name` dedup over a
+/// stale `~/.config/heroic`. When it resolves to the default dir, it collapses
+/// onto it and ordering is unchanged.
+fn heroic_config_dirs_with_xdg(home: &Path, xdg_config_home: Option<&OsStr>) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    candidates.extend(xdg_heroic_config_dir(xdg_config_home));
+    // Linux: standard install
+    candidates.push(home.join(".config").join("heroic"));
+    // Linux: Flatpak install
+    candidates.push(
+        home.join(".var")
             .join("app")
             .join("com.heroicgameslauncher.hgl")
             .join("config")
-            .join("heroic");
-        if flatpak.is_dir() {
-            config_dirs.push(flatpak);
-        }
-        // macOS
-        let macos = home
-            .join("Library")
+            .join("heroic"),
+    );
+    // macOS
+    candidates.push(
+        home.join("Library")
             .join("Application Support")
-            .join("heroic");
-        if macos.is_dir() {
-            config_dirs.push(macos);
+            .join("heroic"),
+    );
+
+    let mut config_dirs: Vec<PathBuf> = Vec::new();
+    for dir in candidates {
+        if dir.is_dir() && !config_dirs.iter().any(|d| same_dir(d, &dir)) {
+            config_dirs.push(dir);
         }
     }
     config_dirs
@@ -2328,5 +2357,85 @@ mod tests {
             bottles[0].path, default_pfx,
             "a secondary library listed only by the default root's vdf must not be preferred; mtime decides"
         );
+    }
+
+    #[test]
+    fn heroic_config_dirs_default_without_xdg() {
+        let home = tempfile::tempdir().unwrap();
+        let standard = home.path().join(".config").join("heroic");
+        let flatpak = home
+            .path()
+            .join(".var")
+            .join("app")
+            .join("com.heroicgameslauncher.hgl")
+            .join("config")
+            .join("heroic");
+        fs::create_dir_all(&standard).unwrap();
+        fs::create_dir_all(&flatpak).unwrap();
+
+        let dirs = heroic_config_dirs_with_xdg(home.path(), None);
+
+        assert_eq!(dirs, vec![standard, flatpak]);
+    }
+
+    #[test]
+    fn heroic_config_dirs_honors_absolute_xdg_config_home() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let xdg_heroic = xdg.path().join("heroic");
+        let standard = home.path().join(".config").join("heroic");
+        fs::create_dir_all(&xdg_heroic).unwrap();
+        fs::create_dir_all(&standard).unwrap();
+
+        let dirs = heroic_config_dirs_with_xdg(home.path(), Some(xdg.path().as_os_str()));
+
+        assert_eq!(dirs, vec![xdg_heroic, standard]);
+    }
+
+    #[test]
+    fn heroic_config_dirs_ignores_empty_and_relative_xdg() {
+        assert_eq!(xdg_heroic_config_dir(Some(OsStr::new(""))), None);
+        assert_eq!(
+            xdg_heroic_config_dir(Some(OsStr::new("relative/config"))),
+            None
+        );
+        assert_eq!(xdg_heroic_config_dir(None), None);
+
+        let home = tempfile::tempdir().unwrap();
+        let standard = home.path().join(".config").join("heroic");
+        fs::create_dir_all(&standard).unwrap();
+
+        let no_xdg = heroic_config_dirs_with_xdg(home.path(), None);
+        let empty_xdg = heroic_config_dirs_with_xdg(home.path(), Some(OsStr::new("")));
+        let relative_xdg =
+            heroic_config_dirs_with_xdg(home.path(), Some(OsStr::new("relative/config")));
+
+        assert_eq!(empty_xdg, no_xdg);
+        assert_eq!(relative_xdg, no_xdg);
+    }
+
+    #[test]
+    fn heroic_config_dirs_xdg_equal_to_default_collapses() {
+        let home = tempfile::tempdir().unwrap();
+        let standard = home.path().join(".config").join("heroic");
+        fs::create_dir_all(&standard).unwrap();
+
+        let xdg = home.path().join(".config");
+        let dirs = heroic_config_dirs_with_xdg(home.path(), Some(xdg.as_os_str()));
+
+        assert_eq!(dirs, vec![standard]);
+    }
+
+    #[test]
+    fn heroic_config_dirs_skips_missing_xdg_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let standard = home.path().join(".config").join("heroic");
+        fs::create_dir_all(&standard).unwrap();
+        // `xdg` exists, but `xdg/heroic` does not.
+
+        let dirs = heroic_config_dirs_with_xdg(home.path(), Some(xdg.path().as_os_str()));
+
+        assert_eq!(dirs, vec![standard]);
     }
 }
