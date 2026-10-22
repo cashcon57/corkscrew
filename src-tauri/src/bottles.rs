@@ -1025,15 +1025,19 @@ fn xdg_heroic_config_dir(xdg_config_home: Option<&OsStr>) -> Option<PathBuf> {
 /// Collect existing Heroic config directories, taking `$XDG_CONFIG_HOME` as an
 /// explicit parameter so it can be tested without mutating the environment.
 ///
-/// An active custom XDG config dir is listed first: it's where a running
-/// Heroic actually writes, so its entries should win `app_name` dedup over a
-/// stale `~/.config/heroic`. When it resolves to the default dir, it collapses
-/// onto it and ordering is unchanged.
+/// The native (non-Flatpak) Heroic config dir is exactly one of
+/// `$XDG_CONFIG_HOME/heroic` or `~/.config/heroic`: a running Heroic only
+/// writes to the former when it's set, so a leftover `~/.config/heroic` is
+/// stale and scanning it could surface games that are no longer installed.
+/// The default is used only when the custom dir is unset, invalid, or absent.
 fn heroic_config_dirs_with_xdg(home: &Path, xdg_config_home: Option<&OsStr>) -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
-    candidates.extend(xdg_heroic_config_dir(xdg_config_home));
-    // Linux: standard install
-    candidates.push(home.join(".config").join("heroic"));
+    // Linux: standard install (custom XDG config home, else the default)
+    candidates.push(
+        xdg_heroic_config_dir(xdg_config_home)
+            .filter(|dir| dir.is_dir())
+            .unwrap_or_else(|| home.join(".config").join("heroic")),
+    );
     // Linux: Flatpak install
     candidates.push(
         home.join(".var")
@@ -2389,7 +2393,43 @@ mod tests {
 
         let dirs = heroic_config_dirs_with_xdg(home.path(), Some(xdg.path().as_os_str()));
 
-        assert_eq!(dirs, vec![xdg_heroic, standard]);
+        assert_eq!(dirs, vec![xdg_heroic]);
+    }
+
+    #[test]
+    fn heroic_config_dirs_custom_xdg_omits_stale_default_games() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let xdg_heroic = xdg.path().join("heroic");
+        let flatpak = home
+            .path()
+            .join(".var")
+            .join("app")
+            .join("com.heroicgameslauncher.hgl")
+            .join("config")
+            .join("heroic");
+        fs::create_dir_all(&xdg_heroic).unwrap();
+        fs::create_dir_all(&flatpak).unwrap();
+        // A game that exists only in the stale default config.
+        let stale_gog = home.path().join(".config").join("heroic").join("gog_store");
+        fs::create_dir_all(&stale_gog).unwrap();
+        fs::write(
+            stale_gog.join("installed.json"),
+            r#"{"installed":[{"appName":"stale1","install_path":"/games/Stale","platform":"windows"}]}"#,
+        )
+        .unwrap();
+
+        // Sanity: the stale entry is parseable, so its absence below is real.
+        assert_eq!(parse_heroic_gog_games(stale_gog.parent().unwrap()).len(), 1);
+
+        let dirs = heroic_config_dirs_with_xdg(home.path(), Some(xdg.path().as_os_str()));
+
+        assert_eq!(dirs, vec![xdg_heroic, flatpak]);
+        let games: Vec<_> = dirs.iter().flat_map(|d| parse_heroic_gog_games(d)).collect();
+        assert!(
+            games.iter().all(|g| g.app_name != "stale1"),
+            "stale default-only game leaked: {games:?}"
+        );
     }
 
     #[test]
