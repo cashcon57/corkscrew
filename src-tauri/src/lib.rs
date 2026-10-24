@@ -592,6 +592,13 @@ pub fn run() {
             };
             log::error!("PANIC at {}: {}", location, payload);
             let _ = panic_db.record_error_event("rust_panic", &location, &payload);
+            // Release builds are stripped and ship no debug files, so Sentry
+            // can't symbolicate panic frames. Attach the source location so
+            // panics like RUST-T can be traced to a file and line.
+            sentry::configure_scope(|scope| {
+                scope.set_tag("panic.location", &location);
+                scope.set_extra("panic.location", location.clone().into());
+            });
             // Forward to previous hook (Sentry's panic handler if active)
             prev_hook(info);
         }));
