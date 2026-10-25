@@ -668,14 +668,18 @@ fn deduplicate_bottles_by_name(bottles: Vec<Bottle>) -> Vec<Bottle> {
 ///
 /// A bottle is "preferred" when its path starts with one of `preferred_roots`
 /// (used on Linux to mark the active `$XDG_DATA_HOME` Steam compatdata and
-/// native Bottles/Lutris roots). When both same-name duplicates come from the
-/// same source and exactly one is preferred, the preferred one always wins,
-/// regardless of mtime — this keeps a stale default-root prefix from
-/// shadowing the active custom-XDG one. Cross-source collisions (e.g. Proton
-/// vs Bottles) are never overridden. Otherwise, the existing behavior
-/// applies: the instance with the most
-/// recent `bottle.toml` (or `drive_c`) mtime wins, and the first occurrence
-/// wins on a tie.
+/// native Bottles/Lutris roots). Resolution happens in two stages so the
+/// outcome does not depend on insertion order:
+///
+/// 1. Within each source (Proton, Bottles, Lutris, ...), a preferred-root
+///    bottle always beats a non-preferred one regardless of mtime — this keeps
+///    a stale default-root prefix from shadowing the active custom-XDG one.
+///    Otherwise the newer `bottle.toml` (or `drive_c`) mtime wins.
+/// 2. The per-source winners are then compared across sources purely by
+///    mtime; preference never overrides a cross-source collision.
+///
+/// Ties at either stage go to the first-seen candidate. The output keeps the
+/// position of each name's first occurrence.
 fn deduplicate_bottles_by_name_preferring(
     bottles: Vec<Bottle>,
     preferred_roots: &[PathBuf],
@@ -685,47 +689,66 @@ fn deduplicate_bottles_by_name_preferring(
     let is_preferred =
         |bottle: &Bottle| preferred_roots.iter().any(|root| bottle.path.starts_with(root));
 
-    // Preserve insertion order so that the output is deterministic.  We build
-    // a map from lowercase name -> index into `result`, and update the entry
-    // whenever a replacement should win.
-    let mut result: Vec<Bottle> = Vec::with_capacity(bottles.len());
+    // Group by lowercase name (in first-seen order), then by source within
+    // each name (also in first-seen order). Each source slot holds that
+    // source's current winner.
+    let mut groups: Vec<Vec<Bottle>> = Vec::new();
     let mut name_to_idx: HashMap<String, usize> = HashMap::new();
 
     for bottle in bottles {
         let key = bottle.name.to_lowercase();
-        match name_to_idx.get(&key).copied() {
-            None => {
-                // First time we see this name.
-                name_to_idx.insert(key, result.len());
-                result.push(bottle);
-            }
-            Some(existing_idx) => {
-                let existing = &result[existing_idx];
-                // The preferred-root override only arbitrates same-source
-                // collisions (Proton vs Proton, Bottles vs Bottles, ...);
-                // cross-source pairings keep the plain mtime/first-wins policy.
-                let same_source = bottle.source == existing.source;
-                let replace = match (same_source, is_preferred(&bottle), is_preferred(existing)) {
-                    (true, true, false) => true,
-                    (true, false, true) => false,
-                    // Otherwise fall back to mtime, keep the one with the
-                    // newer bottle.toml (or drive_c) mtime.
-                    _ => bottle_mtime(&bottle) > bottle_mtime(existing),
-                };
-                if replace {
-                    log::debug!(
-                        "CrossOver bottle '{}': preferring path {} over {}",
-                        bottle.name,
-                        bottle.path.display(),
-                        result[existing_idx].path.display()
-                    );
-                    result[existing_idx] = bottle;
-                }
-            }
+        let Some(&group_idx) = name_to_idx.get(&key) else {
+            name_to_idx.insert(key, groups.len());
+            groups.push(vec![bottle]);
+            continue;
+        };
+        let group = &mut groups[group_idx];
+        let Some(existing) = group.iter_mut().find(|b| b.source == bottle.source) else {
+            group.push(bottle);
+            continue;
+        };
+        let replace = match (is_preferred(&bottle), is_preferred(existing)) {
+            (true, false) => true,
+            (false, true) => false,
+            _ => bottle_mtime(&bottle) > bottle_mtime(existing),
+        };
+        if replace {
+            log::debug!(
+                "Bottle '{}' ({}): preferring path {} over {}",
+                bottle.name,
+                bottle.source,
+                bottle.path.display(),
+                existing.path.display()
+            );
+            *existing = bottle;
         }
     }
 
-    result
+    groups
+        .into_iter()
+        .map(|group| {
+            let mut candidates = group.into_iter();
+            let first = candidates.next().expect("name groups are never empty");
+            let mut winner_mtime = bottle_mtime(&first);
+            let mut winner = first;
+            for candidate in candidates {
+                let mtime = bottle_mtime(&candidate);
+                if mtime > winner_mtime {
+                    log::debug!(
+                        "Bottle '{}': preferring {} path {} over {} path {}",
+                        candidate.name,
+                        candidate.source,
+                        candidate.path.display(),
+                        winner.source,
+                        winner.path.display()
+                    );
+                    winner = candidate;
+                    winner_mtime = mtime;
+                }
+            }
+            winner
+        })
+        .collect()
 }
 
 /// Return the mtime of a bottle as seconds since the Unix epoch.
@@ -2353,6 +2376,53 @@ mod tests {
             assert_eq!(
                 deduped[0].path, path_heroic,
                 "newer non-Proton bottle should win over preferred-root Proton prefix"
+            );
+        }
+    }
+
+    /// Regression: preference is resolved within each source before sources
+    /// are compared, so a newer cross-source bottle is not lost when a
+    /// preferred-root candidate displaces an older same-source one. Default
+    /// Lutris (mtime 2), default Bottles (mtime 3), custom-XDG Bottles
+    /// (mtime 1): Bottles resolves to the XDG copy (mtime 1), which then loses
+    /// to Lutris (mtime 2) — in every insertion order.
+    #[test]
+    fn deduplicate_bottles_by_name_preferring_resolves_preference_per_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let preferred_root = tmp.path().join("xdg");
+
+        let make = |root: &Path, dir: &str, secs: i64| {
+            let path = create_fake_bottle(root, dir);
+            filetime::set_file_mtime(path.join("drive_c"), filetime::FileTime::from_unix_time(secs, 0))
+                .unwrap();
+            path
+        };
+        let path_lutris = make(tmp.path(), "default_lutris", 2_000_000);
+        let path_bottles = make(tmp.path(), "default_bottles", 3_000_000);
+        let path_xdg_bottles = make(&preferred_root, "xdg_bottles", 1_000_000);
+
+        let lutris =
+            Bottle { name: "MySkyrim".into(), path: path_lutris.clone(), source: "Lutris".into() };
+        let bottles =
+            Bottle { name: "MySkyrim".into(), path: path_bottles, source: "Bottles".into() };
+        let xdg_bottles =
+            Bottle { name: "MySkyrim".into(), path: path_xdg_bottles, source: "Bottles".into() };
+
+        let orders = [
+            vec![lutris.clone(), bottles.clone(), xdg_bottles.clone()],
+            vec![lutris.clone(), xdg_bottles.clone(), bottles.clone()],
+            vec![bottles.clone(), lutris.clone(), xdg_bottles.clone()],
+            vec![bottles.clone(), xdg_bottles.clone(), lutris.clone()],
+            vec![xdg_bottles.clone(), lutris.clone(), bottles.clone()],
+            vec![xdg_bottles, bottles, lutris],
+        ];
+        for order in orders {
+            let deduped =
+                deduplicate_bottles_by_name_preferring(order, &[preferred_root.clone()]);
+            assert_eq!(deduped.len(), 1);
+            assert_eq!(
+                deduped[0].path, path_lutris,
+                "newer Lutris should beat the resolved (XDG) Bottles winner"
             );
         }
     }
