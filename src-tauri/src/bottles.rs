@@ -678,8 +678,10 @@ fn deduplicate_bottles_by_name(bottles: Vec<Bottle>) -> Vec<Bottle> {
 /// 2. The per-source winners are then compared across sources purely by
 ///    mtime; preference never overrides a cross-source collision.
 ///
-/// Ties at either stage go to the first-seen candidate. The output keeps the
-/// position of each name's first occurrence.
+/// Ties at either stage go to the first-seen candidate; across sources this
+/// means the per-source winner that was itself encountered first (not the
+/// source that appeared first). The output keeps the position of each name's
+/// first occurrence.
 fn deduplicate_bottles_by_name_preferring(
     bottles: Vec<Bottle>,
     preferred_roots: &[PathBuf],
@@ -691,26 +693,28 @@ fn deduplicate_bottles_by_name_preferring(
 
     // Group by lowercase name (in first-seen order), then by source within
     // each name (also in first-seen order). Each source slot holds that
-    // source's current winner.
-    let mut groups: Vec<Vec<Bottle>> = Vec::new();
+    // source's current winner along with the input index at which that
+    // winner was encountered, so cross-source ties go to the earliest-seen
+    // winner rather than to whichever source happened to appear first.
+    let mut groups: Vec<Vec<(usize, Bottle)>> = Vec::new();
     let mut name_to_idx: HashMap<String, usize> = HashMap::new();
 
-    for bottle in bottles {
+    for (seen_at, bottle) in bottles.into_iter().enumerate() {
         let key = bottle.name.to_lowercase();
         let Some(&group_idx) = name_to_idx.get(&key) else {
             name_to_idx.insert(key, groups.len());
-            groups.push(vec![bottle]);
+            groups.push(vec![(seen_at, bottle)]);
             continue;
         };
         let group = &mut groups[group_idx];
-        let Some(existing) = group.iter_mut().find(|b| b.source == bottle.source) else {
-            group.push(bottle);
+        let Some(existing) = group.iter_mut().find(|(_, b)| b.source == bottle.source) else {
+            group.push((seen_at, bottle));
             continue;
         };
-        let replace = match (is_preferred(&bottle), is_preferred(existing)) {
+        let replace = match (is_preferred(&bottle), is_preferred(&existing.1)) {
             (true, false) => true,
             (false, true) => false,
-            _ => bottle_mtime(&bottle) > bottle_mtime(existing),
+            _ => bottle_mtime(&bottle) > bottle_mtime(&existing.1),
         };
         if replace {
             log::debug!(
@@ -718,9 +722,9 @@ fn deduplicate_bottles_by_name_preferring(
                 bottle.name,
                 bottle.source,
                 bottle.path.display(),
-                existing.path.display()
+                existing.1.path.display()
             );
-            *existing = bottle;
+            *existing = (seen_at, bottle);
         }
     }
 
@@ -728,12 +732,13 @@ fn deduplicate_bottles_by_name_preferring(
         .into_iter()
         .map(|group| {
             let mut candidates = group.into_iter();
-            let first = candidates.next().expect("name groups are never empty");
+            let (mut winner_seen_at, first) =
+                candidates.next().expect("name groups are never empty");
             let mut winner_mtime = bottle_mtime(&first);
             let mut winner = first;
-            for candidate in candidates {
+            for (seen_at, candidate) in candidates {
                 let mtime = bottle_mtime(&candidate);
-                if mtime > winner_mtime {
+                if mtime > winner_mtime || (mtime == winner_mtime && seen_at < winner_seen_at) {
                     log::debug!(
                         "Bottle '{}': preferring {} path {} over {} path {}",
                         candidate.name,
@@ -744,6 +749,7 @@ fn deduplicate_bottles_by_name_preferring(
                     );
                     winner = candidate;
                     winner_mtime = mtime;
+                    winner_seen_at = seen_at;
                 }
             }
             winner
@@ -2425,6 +2431,38 @@ mod tests {
                 "newer Lutris should beat the resolved (XDG) Bottles winner"
             );
         }
+    }
+
+    /// Regression: a same-source replacement carries its own encounter index,
+    /// so cross-source ties go to the winner seen first. Early Lutris
+    /// (mtime 1), Bottles (mtime 2), later Lutris (mtime 2): Lutris resolves to
+    /// its later copy, which ties Bottles on mtime; Bottles was encountered
+    /// first and must win even though Lutris's slot appeared first.
+    #[test]
+    fn deduplicate_bottles_by_name_preferring_ties_use_winner_encounter_order() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let make = |dir: &str, secs: i64| {
+            let path = create_fake_bottle(tmp.path(), dir);
+            filetime::set_file_mtime(path.join("drive_c"), filetime::FileTime::from_unix_time(secs, 0))
+                .unwrap();
+            path
+        };
+        let path_early_lutris = make("early_lutris", 1_000_000);
+        let path_bottles = make("bottles", 2_000_000);
+        let path_late_lutris = make("late_lutris", 2_000_000);
+
+        let bottles = vec![
+            Bottle { name: "MySkyrim".into(), path: path_early_lutris, source: "Lutris".into() },
+            Bottle { name: "Other".into(), path: create_fake_bottle(tmp.path(), "other"), source: "Lutris".into() },
+            Bottle { name: "MySkyrim".into(), path: path_bottles.clone(), source: "Bottles".into() },
+            Bottle { name: "myskyrim".into(), path: path_late_lutris, source: "Lutris".into() },
+        ];
+        let deduped = deduplicate_bottles_by_name_preferring(bottles, &[]);
+        assert_eq!(deduped.len(), 2);
+        assert_eq!(deduped[0].name, "MySkyrim", "name keeps its first-occurrence position");
+        assert_eq!(deduped[0].path, path_bottles, "earliest-seen per-source winner wins the tie");
+        assert_eq!(deduped[1].name, "Other");
     }
 
     /// Regression: a same-name Proton prefix under the active custom
