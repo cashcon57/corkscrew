@@ -424,6 +424,22 @@ fn platform_search_locations_with_xdg(
         },
     ];
 
+    // Native Lutris and Bottles under a custom $XDG_DATA_HOME, unless the
+    // directory is one of the hard-coded locations above (e.g.
+    // XDG_DATA_HOME=~/.local/share collapsing onto the default).
+    if let Some(xdg_data) =
+        crate::proton::xdg_data_root(xdg_data_home).map(|p| normalize_container_path(&p))
+    {
+        for (source, path) in [
+            ("Lutris", xdg_data.join("lutris").join("runners").join("wine").join("prefixes")),
+            ("Bottles", xdg_data.join("bottles").join("bottles")),
+        ] {
+            if !locations.iter().any(|l| same_dir(&l.path, &path)) {
+                locations.push(SearchLocation { source, path });
+            }
+        }
+    }
+
     // Custom $XDG_DATA_HOME Steam install, unless it's the same directory as
     // one of the hard-coded locations above (e.g. XDG_DATA_HOME=~/.local/share
     // collapsing onto the default).
@@ -1536,6 +1552,67 @@ mod tests {
                 .collect();
             assert_eq!(paths, default_paths, "value: {invalid:?}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn custom_xdg_data_home_discovers_native_bottles_and_lutris_prefixes() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let bottles_pfx = create_fake_bottle(&xdg.path().join("bottles/bottles"), "XdgBottle");
+        let lutris_pfx =
+            create_fake_bottle(&xdg.path().join("lutris/runners/wine/prefixes"), "XdgLutris");
+        let default_pfx =
+            create_fake_bottle(&home.path().join(".local/share/bottles/bottles"), "DefaultBottle");
+
+        // Without XDG_DATA_HOME only the default location is discovered.
+        let bottles = collect_fixture_bottles(home.path());
+        assert_eq!(bottles.len(), 1, "bottles: {bottles:?}");
+        assert_eq!(bottles[0].path, default_pfx);
+
+        let mut bottles = collect_fixture_bottles_xdg(home.path(), Some(xdg.path().as_os_str()));
+        bottles.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(bottles.len(), 3, "bottles: {bottles:?}");
+        assert_eq!(bottles[0].name, "DefaultBottle");
+        assert_eq!(bottles[0].path, default_pfx);
+        assert_eq!(bottles[0].source, "Bottles");
+        assert_eq!(bottles[1].name, "XdgBottle");
+        assert_eq!(bottles[1].path, bottles_pfx);
+        assert_eq!(bottles[1].source, "Bottles");
+        assert_eq!(bottles[2].name, "XdgLutris");
+        assert_eq!(bottles[2].path, lutris_pfx);
+        assert_eq!(bottles[2].source, "Lutris");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn custom_xdg_data_home_equal_to_default_does_not_duplicate_bottles_or_lutris() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = home.path().join(".local/share");
+        let bottles_root = xdg.join("bottles/bottles");
+        let lutris_root = xdg.join("lutris/runners/wine/prefixes");
+        create_fake_bottle(&bottles_root, "Game");
+        create_fake_bottle(&lutris_root, "LutrisGame");
+
+        let locations = platform_search_locations_with_xdg(home.path(), Some(xdg.as_os_str()));
+        for root in [&bottles_root, &lutris_root] {
+            let matching = locations.iter().filter(|l| same_dir(&l.path, root)).count();
+            assert_eq!(matching, 1, "root: {}", root.display());
+        }
+
+        // Spelling the same base differently (trailing `.` component) must
+        // still collapse onto the default via canonicalization.
+        let dotted = xdg.join(".");
+        let dotted_paths: Vec<PathBuf> =
+            platform_search_locations_with_xdg(home.path(), Some(dotted.as_os_str()))
+                .into_iter()
+                .map(|l| l.path)
+                .collect();
+        let default_paths: Vec<PathBuf> = platform_search_locations_with_xdg(home.path(), None)
+            .into_iter()
+            .map(|l| l.path)
+            .collect();
+        assert_eq!(dotted_paths, default_paths);
     }
 
     #[cfg(target_os = "linux")]
