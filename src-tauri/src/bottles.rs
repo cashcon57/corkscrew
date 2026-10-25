@@ -337,7 +337,70 @@ fn platform_search_locations_with_xdg(
     let home = home.as_path();
     let xdg_steam =
         crate::proton::xdg_steam_root(xdg_data_home).map(|p| normalize_container_path(&p));
-    let mut locations = vec![
+    let mut locations = default_search_locations(home);
+
+    // Native Lutris and Bottles under a custom $XDG_DATA_HOME, unless the
+    // directory is one of the hard-coded defaults (e.g.
+    // XDG_DATA_HOME=~/.local/share collapsing onto the default).
+    for location in xdg_native_locations(xdg_data_home) {
+        if !locations.iter().any(|l| same_dir(&l.path, &location.path)) {
+            locations.push(location);
+        }
+    }
+
+    // Custom $XDG_DATA_HOME Steam install, unless it's the same directory as
+    // one of the locations collected so far (e.g. XDG_DATA_HOME=~/.local/share
+    // collapsing onto the default).
+    if let Some(ref xdg_root) = xdg_steam {
+        let compatdata = xdg_root.join("steamapps").join("compatdata");
+        let already_present = locations.iter().any(|l| same_dir(&l.path, &compatdata));
+        if !already_present {
+            locations.push(SearchLocation {
+                source: "Proton",
+                path: compatdata,
+            });
+        }
+    }
+
+    // Also scan secondary Steam library folders (e.g. SD card on Steam Deck)
+    let mut steam_dirs = vec![home.join(".local/share/Steam"), home.join(".steam/steam")];
+    steam_dirs.extend(xdg_steam);
+    for steam_dir in &steam_dirs {
+        for vdf_name in &["steamapps/libraryfolders.vdf", "config/libraryfolders.vdf"] {
+            let vdf_path = steam_dir.join(vdf_name);
+            if let Ok(content) = fs::read_to_string(&vdf_path) {
+                for line in content.lines() {
+                    if let Some(root) = steam_library_root_from_vdf_line(line) {
+                        let lib_path = root.join("steamapps").join("compatdata");
+                        // Avoid duplicates (e.g. the custom XDG root listed as
+                        // entry "0" inside its own libraryfolders.vdf).
+                        if !locations.iter().any(|l| same_dir(&l.path, &lib_path))
+                            && lib_path.is_dir()
+                        {
+                            log::info!(
+                                "Found additional Steam library: {}",
+                                lib_path.display()
+                            );
+                            locations.push(SearchLocation {
+                                source: "Proton",
+                                path: lib_path,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    locations
+}
+
+/// Hard-coded Linux scan locations under an (already normalized) `home`:
+/// the standard, Flatpak and SteamOS-symlink paths, independent of
+/// `$XDG_DATA_HOME` and Steam `libraryfolders.vdf` contents.
+#[cfg(target_os = "linux")]
+fn default_search_locations(home: &Path) -> Vec<SearchLocation> {
+    vec![
         // Native Wine default prefix
         SearchLocation {
             source: "Wine",
@@ -422,72 +485,32 @@ fn platform_search_locations_with_xdg(
                 .join("steamapps")
                 .join("compatdata"),
         },
-    ];
-
-    // Native Lutris and Bottles under a custom $XDG_DATA_HOME, unless the
-    // directory is one of the hard-coded locations above (e.g.
-    // XDG_DATA_HOME=~/.local/share collapsing onto the default).
-    if let Some(xdg_data) =
-        crate::proton::xdg_data_root(xdg_data_home).map(|p| normalize_container_path(&p))
-    {
-        for (source, path) in [
-            ("Lutris", xdg_data.join("lutris").join("runners").join("wine").join("prefixes")),
-            ("Bottles", xdg_data.join("bottles").join("bottles")),
-        ] {
-            if !locations.iter().any(|l| same_dir(&l.path, &path)) {
-                locations.push(SearchLocation { source, path });
-            }
-        }
-    }
-
-    // Custom $XDG_DATA_HOME Steam install, unless it's the same directory as
-    // one of the hard-coded locations above (e.g. XDG_DATA_HOME=~/.local/share
-    // collapsing onto the default).
-    if let Some(ref xdg_root) = xdg_steam {
-        let compatdata = xdg_root.join("steamapps").join("compatdata");
-        let already_present = locations.iter().any(|l| same_dir(&l.path, &compatdata));
-        if !already_present {
-            locations.push(SearchLocation {
-                source: "Proton",
-                path: compatdata,
-            });
-        }
-    }
-
-    // Also scan secondary Steam library folders (e.g. SD card on Steam Deck)
-    let mut steam_dirs = vec![home.join(".local/share/Steam"), home.join(".steam/steam")];
-    steam_dirs.extend(xdg_steam);
-    for steam_dir in &steam_dirs {
-        for vdf_name in &["steamapps/libraryfolders.vdf", "config/libraryfolders.vdf"] {
-            let vdf_path = steam_dir.join(vdf_name);
-            if let Ok(content) = fs::read_to_string(&vdf_path) {
-                for line in content.lines() {
-                    if let Some(root) = steam_library_root_from_vdf_line(line) {
-                        let lib_path = root.join("steamapps").join("compatdata");
-                        // Avoid duplicates (e.g. the custom XDG root listed as
-                        // entry "0" inside its own libraryfolders.vdf).
-                        if !locations.iter().any(|l| same_dir(&l.path, &lib_path))
-                            && lib_path.is_dir()
-                        {
-                            log::info!(
-                                "Found additional Steam library: {}",
-                                lib_path.display()
-                            );
-                            locations.push(SearchLocation {
-                                source: "Proton",
-                                path: lib_path,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    locations
+    ]
 }
 
-/// Compatdata root(s) that should win name-collision deduplication
+/// Native Lutris and Bottles prefix roots under a custom `$XDG_DATA_HOME`
+/// (empty when it is unset or invalid). Callers dedupe against the
+/// hard-coded `~/.local/share` defaults.
+#[cfg(target_os = "linux")]
+fn xdg_native_locations(xdg_data_home: Option<&OsStr>) -> Vec<SearchLocation> {
+    let Some(xdg_data) =
+        crate::proton::xdg_data_root(xdg_data_home).map(|p| normalize_container_path(&p))
+    else {
+        return Vec::new();
+    };
+    vec![
+        SearchLocation {
+            source: "Lutris",
+            path: xdg_data.join("lutris").join("runners").join("wine").join("prefixes"),
+        },
+        SearchLocation {
+            source: "Bottles",
+            path: xdg_data.join("bottles").join("bottles"),
+        },
+    ]
+}
+
+/// Root(s) that should win name-collision deduplication
 /// (`deduplicate_bottles_by_name_preferring`) regardless of mtime: the
 /// directory that the active `$XDG_DATA_HOME` Steam install's compatdata
 /// resolves to among the locations actually scanned, plus the compatdata
@@ -505,6 +528,12 @@ fn platform_search_locations_with_xdg(
 /// root's compatdata is also dropped unless it *is* the XDG primary itself —
 /// otherwise a vdf alias could let the stale default copy be preferred
 /// after all. The result is deduplicated by directory identity.
+///
+/// The custom `$XDG_DATA_HOME` native Bottles and Lutris roots are preferred
+/// too, but only when they were scanned as distinct locations — one that is
+/// the same directory as a hard-coded default (e.g.
+/// `XDG_DATA_HOME=~/.local/share`) was collapsed onto it and adds nothing,
+/// and one that isn't a directory is dropped.
 ///
 /// Empty when `$XDG_DATA_HOME` is unset or invalid.
 #[cfg(target_os = "linux")]
@@ -562,6 +591,18 @@ fn preferred_bottle_roots(home: &Path, xdg_data_home: Option<&OsStr>) -> Vec<Pat
             if !roots.iter().any(|r| same_dir(r, &resolved)) {
                 roots.push(resolved);
             }
+        }
+    }
+
+    // Same condition `platform_search_locations_with_xdg` uses to scan the
+    // XDG native roots as their own locations.
+    let defaults = default_search_locations(&home);
+    for native in xdg_native_locations(xdg_data_home) {
+        if !defaults.iter().any(|l| same_dir(&l.path, &native.path))
+            && native.path.is_dir()
+            && !roots.iter().any(|r| same_dir(r, &native.path))
+        {
+            roots.push(native.path);
         }
     }
 
@@ -626,12 +667,12 @@ fn deduplicate_bottles_by_name(bottles: Vec<Bottle>) -> Vec<Bottle> {
 /// deterministic override for `preferred_roots`.
 ///
 /// A bottle is "preferred" when its path starts with one of `preferred_roots`
-/// (used on Linux to mark the active `$XDG_DATA_HOME` Steam compatdata root).
-/// When both same-name duplicates are Proton prefixes and exactly one is
-/// preferred, the preferred one always wins, regardless of mtime — this keeps
-/// a stale default-root Proton prefix from shadowing the active custom-XDG
-/// one. Collisions involving any non-Proton bottle (Heroic, Bottles, Wine,
-/// CrossOver, ...) are never overridden. Otherwise, the existing behavior
+/// (used on Linux to mark the active `$XDG_DATA_HOME` Steam compatdata and
+/// native Bottles/Lutris roots). When both same-name duplicates come from the
+/// same source and exactly one is preferred, the preferred one always wins,
+/// regardless of mtime — this keeps a stale default-root prefix from
+/// shadowing the active custom-XDG one. Cross-source collisions (e.g. Proton
+/// vs Bottles) are never overridden. Otherwise, the existing behavior
 /// applies: the instance with the most
 /// recent `bottle.toml` (or `drive_c`) mtime wins, and the first occurrence
 /// wins on a tie.
@@ -660,11 +701,11 @@ fn deduplicate_bottles_by_name_preferring(
             }
             Some(existing_idx) => {
                 let existing = &result[existing_idx];
-                // The preferred-root override only arbitrates Proton-vs-Proton
-                // collisions; any pairing involving a non-Proton bottle keeps
-                // the plain mtime/first-wins policy.
-                let both_proton = bottle.source == "Proton" && existing.source == "Proton";
-                let replace = match (both_proton, is_preferred(&bottle), is_preferred(existing)) {
+                // The preferred-root override only arbitrates same-source
+                // collisions (Proton vs Proton, Bottles vs Bottles, ...);
+                // cross-source pairings keep the plain mtime/first-wins policy.
+                let same_source = bottle.source == existing.source;
+                let replace = match (same_source, is_preferred(&bottle), is_preferred(existing)) {
                     (true, true, false) => true,
                     (true, false, true) => false,
                     // Otherwise fall back to mtime, keep the one with the
@@ -1613,6 +1654,61 @@ mod tests {
             .map(|l| l.path)
             .collect();
         assert_eq!(dotted_paths, default_paths);
+
+        // Collapsed onto the defaults, the XDG roots add no preference.
+        assert!(preferred_bottle_roots(home.path(), Some(xdg.as_os_str()))
+            .iter()
+            .all(|r| !same_dir(r, &bottles_root) && !same_dir(r, &lutris_root)));
+    }
+
+    /// Regression: a same-name native Bottles/Lutris prefix under a custom
+    /// `$XDG_DATA_HOME` must win over a default-root duplicate even when the
+    /// default copy's mtime is newer, while a cross-source collision still
+    /// falls back to mtime.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn custom_xdg_native_bottles_and_lutris_win_same_name_collisions() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let set_mtime = |pfx: &Path, secs| {
+            filetime::set_file_mtime(pfx.join("drive_c"), filetime::FileTime::from_unix_time(secs, 0))
+                .unwrap();
+        };
+
+        let xdg_bottle = create_fake_bottle(&xdg.path().join("bottles/bottles"), "Game");
+        let default_bottle =
+            create_fake_bottle(&home.path().join(".local/share/bottles/bottles"), "Game");
+        let xdg_lutris =
+            create_fake_bottle(&xdg.path().join("lutris/runners/wine/prefixes"), "LutrisGame");
+        let default_lutris = create_fake_bottle(
+            &home.path().join(".local/share/lutris/runners/wine/prefixes"),
+            "LutrisGame",
+        );
+        set_mtime(&xdg_bottle, 1_000_000);
+        set_mtime(&default_bottle, 2_000_000);
+        set_mtime(&xdg_lutris, 1_000_000);
+        set_mtime(&default_lutris, 2_000_000);
+
+        let mut bottles = collect_fixture_bottles_xdg(home.path(), Some(xdg.path().as_os_str()));
+        bottles.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(bottles.len(), 2, "bottles: {bottles:?}");
+        assert_eq!(bottles[0].name, "Game");
+        assert_eq!(bottles[0].path, xdg_bottle);
+        assert_eq!(bottles[1].name, "LutrisGame");
+        assert_eq!(bottles[1].path, xdg_lutris);
+
+        // Cross-source: an XDG Bottles prefix does not shadow a newer
+        // same-name default Lutris prefix.
+        let lutris_named_game = create_fake_bottle(
+            &home.path().join(".local/share/lutris/runners/wine/prefixes"),
+            "Game",
+        );
+        set_mtime(&lutris_named_game, 3_000_000);
+        let bottles = collect_fixture_bottles_xdg(home.path(), Some(xdg.path().as_os_str()));
+        let game: Vec<_> = bottles.iter().filter(|b| b.name == "Game").collect();
+        assert_eq!(game.len(), 1, "bottles: {bottles:?}");
+        assert_eq!(game[0].path, lutris_named_game);
+        assert_eq!(game[0].source, "Lutris");
     }
 
     #[cfg(target_os = "linux")]
@@ -2222,7 +2318,7 @@ mod tests {
         );
     }
 
-    /// Regression: the preferred-root override is scoped to Proton-vs-Proton
+    /// Regression: the preferred-root override is scoped to same-source
     /// collisions. A custom-XDG Proton prefix must NOT automatically shadow a
     /// newer same-name non-Proton bottle — mtime still decides, in either
     /// insertion order.
