@@ -440,6 +440,13 @@ fn platform_search_locations_with_xdg(
 
     // Snap Steam (Ubuntu's `steam` snap keeps its whole Steam root under the
     // snap's per-user `common` dir), unless it aliases a location above.
+    //
+    // Deliberately NOT added to `preferred_bottle_roots`: unlike
+    // `$XDG_DATA_HOME`, nothing on the host says which Steam is active. The
+    // snap remaps HOME, so its `~/.steam/steam` pointer lives under
+    // `~/snap/steam/common/` and the host one keeps targeting native Steam;
+    // `/snap/steam` only proves it's installed, and both can coexist. Same-
+    // name native-vs-Snap prefixes therefore use the plain mtime policy.
     let snap_steam = home.join("snap/steam/common/.local/share/Steam");
     let snap_compatdata = snap_steam.join("steamapps").join("compatdata");
     if !locations
@@ -1597,6 +1604,70 @@ mod tests {
             .count();
         assert_eq!(hits, 1);
         assert_eq!(proton_bottles(home.path()).len(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn set_drive_c_mtime(pfx: &Path, secs: i64) {
+        filetime::set_file_mtime(
+            pfx.join("drive_c"),
+            filetime::FileTime::from_unix_time(secs, 0),
+        )
+        .unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_vs_snap_same_name_prefix_uses_mtime_not_snap_priority() {
+        // No host-side signal identifies the active Steam between native and
+        // Snap, so neither root is preferred: the newer prefix wins either way.
+        for snap_is_newer in [true, false] {
+            let home = tempfile::tempdir().unwrap();
+            let native_pfx = create_fake_proton_prefix(
+                &home.path().join(".local/share/Steam"),
+                "489830",
+                "Skyrim Special Edition",
+            );
+            let snap_pfx = create_fake_proton_prefix(
+                &home.path().join("snap/steam/common/.local/share/Steam"),
+                "489830",
+                "Skyrim Special Edition",
+            );
+            let (old, new) = if snap_is_newer {
+                (&native_pfx, &snap_pfx)
+            } else {
+                (&snap_pfx, &native_pfx)
+            };
+            set_drive_c_mtime(old, 1_000_000);
+            set_drive_c_mtime(new, 2_000_000);
+
+            let bottles = proton_bottles(home.path());
+            assert_eq!(bottles.len(), 1, "snap_is_newer={snap_is_newer}");
+            assert_same_path(&bottles[0].path, new);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn custom_xdg_prefix_beats_newer_snap_same_name_prefix() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let xdg_pfx = create_fake_proton_prefix(
+            &xdg.path().join("Steam"),
+            "489830",
+            "Skyrim Special Edition",
+        );
+        let snap_pfx = create_fake_proton_prefix(
+            &home.path().join("snap/steam/common/.local/share/Steam"),
+            "489830",
+            "Skyrim Special Edition",
+        );
+        set_drive_c_mtime(&xdg_pfx, 1_000_000);
+        set_drive_c_mtime(&snap_pfx, 2_000_000);
+
+        let xdg_os = xdg_steam_env(&xdg);
+        let bottles = proton_bottles_xdg(home.path(), Some(&xdg_os));
+        assert_eq!(bottles.len(), 1);
+        assert_same_path(&bottles[0].path, &xdg_pfx);
     }
 
     #[cfg(target_os = "linux")]
