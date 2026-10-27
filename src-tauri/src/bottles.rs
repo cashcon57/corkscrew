@@ -438,8 +438,26 @@ fn platform_search_locations_with_xdg(
         }
     }
 
+    // Snap Steam (Ubuntu's `steam` snap keeps its whole Steam root under the
+    // snap's per-user `common` dir), unless it aliases a location above.
+    let snap_steam = home.join("snap/steam/common/.local/share/Steam");
+    let snap_compatdata = snap_steam.join("steamapps").join("compatdata");
+    if !locations
+        .iter()
+        .any(|l| same_dir(&l.path, &snap_compatdata))
+    {
+        locations.push(SearchLocation {
+            source: "Proton",
+            path: snap_compatdata,
+        });
+    }
+
     // Also scan secondary Steam library folders (e.g. SD card on Steam Deck)
-    let mut steam_dirs = vec![home.join(".local/share/Steam"), home.join(".steam/steam")];
+    let mut steam_dirs = vec![
+        home.join(".local/share/Steam"),
+        home.join(".steam/steam"),
+        snap_steam,
+    ];
     steam_dirs.extend(xdg_steam);
     for steam_dir in &steam_dirs {
         for vdf_name in &["steamapps/libraryfolders.vdf", "config/libraryfolders.vdf"] {
@@ -1481,6 +1499,104 @@ mod tests {
         assert_eq!(bottles[0].path, secondary_pfx);
         assert_eq!(bottles[1].name, "Skyrim Special Edition");
         assert_eq!(bottles[1].path, primary_pfx);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn snap_steam_primary_and_secondary_libraries_discover_proton_prefixes() {
+        let home = tempfile::tempdir().unwrap();
+        let snap_steam = home.path().join("snap/steam/common/.local/share/Steam");
+        let primary_pfx =
+            create_fake_proton_prefix(&snap_steam, "489830", "Skyrim Special Edition");
+
+        let secondary_library = tempfile::tempdir().unwrap();
+        let secondary_pfx =
+            create_fake_proton_prefix(secondary_library.path(), "377160", "Fallout 4");
+
+        // Snap Steam's own vdf lists itself as entry "0" plus a secondary
+        // library, and also carries an unsafe relative entry that must be
+        // ignored.
+        fs::write(
+            snap_steam.join("steamapps/libraryfolders.vdf"),
+            format!(
+                "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{primary}\"\n\t}}\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{secondary}\"\n\t}}\n\t\"2\"\n\t{{\n\t\t\"path\"\t\t\"../escape\"\n\t}}\n}}\n",
+                primary = snap_steam.display(),
+                secondary = secondary_library.path().display(),
+            ),
+        )
+        .unwrap();
+
+        let mut bottles = proton_bottles(home.path());
+        bottles.sort_by(|a, b| a.name.cmp(&b.name));
+
+        assert_eq!(bottles.len(), 2, "bottles: {bottles:?}");
+        assert_eq!(bottles[0].name, "Fallout 4");
+        assert_eq!(bottles[0].path, secondary_pfx);
+        assert_eq!(bottles[1].name, "Skyrim Special Edition");
+        assert_eq!(bottles[1].path, primary_pfx);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn snap_steam_libraries_are_deduplicated_against_other_roots() {
+        let home = tempfile::tempdir().unwrap();
+        let snap_steam = home.path().join("snap/steam/common/.local/share/Steam");
+        create_fake_proton_prefix(&snap_steam, "489830", "Skyrim Special Edition");
+        let snap_compatdata = snap_steam.join("steamapps/compatdata");
+
+        let shared_library = tempfile::tempdir().unwrap();
+        create_fake_proton_prefix(shared_library.path(), "377160", "Fallout 4");
+        let shared = shared_library.path().display();
+
+        // The secondary library is declared by both the native and the Snap
+        // Steam roots (in both vdf formats); the Snap vdf also lists the Snap
+        // root itself, which is already a primary location.
+        write_libraryfolders(
+            home.path(),
+            &format!("\"LibraryFolders\"\n{{\n\t\"1\"\t\t\"{shared}\"\n}}\n"),
+        );
+        fs::write(
+            snap_steam.join("steamapps/libraryfolders.vdf"),
+            format!(
+                "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{snap}\"\n\t}}\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{shared}\"\n\t}}\n}}\n",
+                snap = snap_steam.display(),
+            ),
+        )
+        .unwrap();
+
+        let locations = platform_search_locations(home.path());
+        let snap_hits = locations
+            .iter()
+            .filter(|l| same_dir(&l.path, &snap_compatdata))
+            .count();
+        let shared_hits = locations
+            .iter()
+            .filter(|l| l.path.starts_with(shared_library.path()))
+            .count();
+        assert_eq!(snap_hits, 1);
+        assert_eq!(shared_hits, 1);
+        assert_eq!(proton_bottles(home.path()).len(), 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn snap_steam_root_aliasing_default_root_is_not_duplicated() {
+        // Some setups symlink the Snap Steam root onto the native one; the
+        // Snap compatdata must then collapse onto the existing location.
+        let home = tempfile::tempdir().unwrap();
+        let native = home.path().join(".local/share/Steam");
+        create_fake_proton_prefix(&native, "489830", "Skyrim Special Edition");
+        let snap_parent = home.path().join("snap/steam/common/.local/share");
+        fs::create_dir_all(&snap_parent).unwrap();
+        std::os::unix::fs::symlink(&native, snap_parent.join("Steam")).unwrap();
+
+        let native_compatdata = native.join("steamapps/compatdata");
+        let hits = platform_search_locations(home.path())
+            .into_iter()
+            .filter(|l| same_dir(&l.path, &native_compatdata))
+            .count();
+        assert_eq!(hits, 1);
+        assert_eq!(proton_bottles(home.path()).len(), 1);
     }
 
     #[cfg(target_os = "linux")]
