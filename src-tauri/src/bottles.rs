@@ -439,7 +439,12 @@ fn platform_search_locations_with_xdg(
     }
 
     // Also scan secondary Steam library folders (e.g. SD card on Steam Deck)
-    let mut steam_dirs = vec![home.join(".local/share/Steam"), home.join(".steam/steam")];
+    let mut steam_dirs = vec![
+        home.join(".local/share/Steam"),
+        home.join(".steam/steam"),
+        // Flatpak Steam keeps its own libraryfolders.vdf inside the sandbox
+        home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
+    ];
     steam_dirs.extend(xdg_steam);
     for steam_dir in &steam_dirs {
         for vdf_name in &["steamapps/libraryfolders.vdf", "config/libraryfolders.vdf"] {
@@ -1444,6 +1449,36 @@ mod tests {
             .collect();
         assert_eq!(locations.len(), 1);
         assert_eq!(proton_bottles(home.path()).len(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn flatpak_steam_secondary_library_discovers_proton_prefix() {
+        let home = tempfile::tempdir().unwrap();
+        let library = tempfile::tempdir().unwrap();
+        let pfx = create_fake_proton_prefix(library.path(), "489830", "Skyrim Special Edition");
+        let flatpak_steam = home
+            .path()
+            .join(".var/app/com.valvesoftware.Steam/.local/share/Steam");
+        let config = flatpak_steam.join("config");
+        fs::create_dir_all(&config).unwrap();
+        // Only the Flatpak root's config/ copy lists the library; the native
+        // roots have no libraryfolders.vdf at all.
+        fs::write(
+            config.join("libraryfolders.vdf"),
+            format!(
+                "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{root}\"\n\t}}\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{lib}\"\n\t}}\n}}\n",
+                root = flatpak_steam.display(),
+                lib = library.path().display(),
+            ),
+        )
+        .unwrap();
+
+        let bottles = proton_bottles(home.path());
+
+        assert_eq!(bottles.len(), 1, "bottles: {bottles:?}");
+        assert_eq!(bottles[0].name, "Skyrim Special Edition");
+        assert_eq!(bottles[0].path, pfx);
     }
 
     #[cfg(target_os = "linux")]
