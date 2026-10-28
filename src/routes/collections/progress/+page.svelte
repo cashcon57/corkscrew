@@ -156,7 +156,7 @@
 
     const oldRecent = untrack(() => recentlyCompleted);
     if (newRecent.length > 0) {
-      recentlyCompleted = [...oldRecent.filter((r) => now - r.timestamp < 3000), ...newRecent].slice(-5);
+      recentlyCompleted = [...oldRecent.filter((r) => now - r.timestamp < 3000 && !newRecent.some((n) => n.index === r.index)), ...newRecent].slice(-5);
     } else {
       recentlyCompleted = oldRecent.filter((r) => now - r.timestamp < 3000);
     }
