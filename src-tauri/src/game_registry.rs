@@ -1611,6 +1611,97 @@ pub fn remove_custom_game_for_bottle(
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Shared fixture for plugins that parse `libraryfolders.vdf` themselves:
+/// a Proton prefix whose in-prefix Steam VDF lists a host library holding a
+/// game the prefix does not own.
+#[cfg(test)]
+pub(crate) mod proton_test_fixture {
+    use super::Bottle;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    pub(crate) struct ProtonVdfFixture {
+        _tmp: tempfile::TempDir,
+        /// `<owner library>/steamapps/compatdata/<owner app id>/pfx`.
+        pub pfx: PathBuf,
+        /// The owner library's `steamapps` (empty until [`Self::install_owner_game`]).
+        pub owner_steamapps: PathBuf,
+        /// The unowned game, in a host library listed by the in-prefix VDF.
+        pub host_game: PathBuf,
+    }
+
+    /// Lay out the fixture. `game_rel` is the game's path under
+    /// `steamapps/common` (e.g. `["Genshin Impact", "Genshin Impact game"]`);
+    /// `exe` is written into its last component.
+    pub(crate) fn new(owner_app_id: &str, game_rel: &[&str], exe: &str) -> ProtonVdfFixture {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let host_library = tmp.path().join("HostLibrary");
+        let host_game = write_game(&host_library.join("steamapps/common"), game_rel, exe);
+
+        let owner_steamapps = tmp.path().join("OwnerLibrary/steamapps");
+        let pfx = owner_steamapps
+            .join("compatdata")
+            .join(owner_app_id)
+            .join("pfx");
+        let steamapps_in_pfx = pfx.join("drive_c/Program Files (x86)/Steam/steamapps");
+        fs::create_dir_all(&steamapps_in_pfx).unwrap();
+        fs::write(
+            steamapps_in_pfx.join("libraryfolders.vdf"),
+            format!(
+                "\"libraryfolders\"\n{{\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n}}\n",
+                host_library.display()
+            ),
+        )
+        .unwrap();
+
+        ProtonVdfFixture {
+            _tmp: tmp,
+            pfx,
+            owner_steamapps,
+            host_game,
+        }
+    }
+
+    impl ProtonVdfFixture {
+        pub(crate) fn bottle(&self, source: &str) -> Bottle {
+            Bottle {
+                name: format!("{source} fixture"),
+                path: self.pfx.clone(),
+                source: source.to_string(),
+            }
+        }
+
+        /// Install the game as the prefix's owner: an appmanifest for the
+        /// owner app id plus the game under the owner library's `common/`.
+        pub(crate) fn install_owner_game(
+            &self,
+            app_id: &str,
+            game_rel: &[&str],
+            exe: &str,
+        ) -> PathBuf {
+            fs::write(
+                self.owner_steamapps
+                    .join(format!("appmanifest_{app_id}.acf")),
+                format!(
+                    "\"AppState\"\n{{\n\t\"appid\"\t\"{app_id}\"\n\t\"name\"\t\"{0}\"\n\
+                     \t\"installdir\"\t\"{0}\"\n\t\"StateFlags\"\t\"4\"\n}}\n",
+                    game_rel[0]
+                ),
+            )
+            .unwrap();
+            write_game(&self.owner_steamapps.join("common"), game_rel, exe)
+        }
+    }
+
+    fn write_game(common: &Path, game_rel: &[&str], exe: &str) -> PathBuf {
+        let dir = game_rel.iter().fold(common.to_path_buf(), |p, c| p.join(c));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(exe), b"fake").unwrap();
+        dir
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

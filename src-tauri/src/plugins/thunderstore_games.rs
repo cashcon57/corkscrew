@@ -297,6 +297,15 @@ fn check_steam_default(bottle: &Bottle, spec: &ThunderstoreGameSpec) -> Option<P
 }
 
 fn check_steam_library_folders(bottle: &Bottle, spec: &ThunderstoreGameSpec) -> Option<PathBuf> {
+    // Proton prefixes: only the owning app's host install. Never scan the
+    // prefix's libraryfolders.vdf — it maps onto host libraries holding other apps.
+    if bottle.source == "Proton" {
+        return spec
+            .steam_dirs
+            .iter()
+            .find_map(|name| crate::game_registry::find_proton_prefix_game(bottle, name));
+    }
+
     let steam_dir = bottle.find_path(&["Program Files (x86)", "Steam"])?;
     let vdf_primary = steam_dir.join("steamapps").join("libraryfolders.vdf");
     let vdf_alt = steam_dir.join("config").join("libraryfolders.vdf");
@@ -519,5 +528,24 @@ mod tests {
         assert_eq!(p.categorize_mod_file("x/data.cfg"), Some("config".into()));
         assert_eq!(p.categorize_mod_file("x/textures/foo.png"), Some("texture".into()));
         assert_eq!(p.categorize_mod_file("x/readme.md"), None);
+    }
+
+    /// A Proton prefix's own libraryfolders.vdf can list host libraries holding
+    /// other apps; the library scan must only ever return the prefix owner's game.
+    #[test]
+    fn library_scan_in_proton_prefix_is_owner_only() {
+        use crate::game_registry::proton_test_fixture;
+        let scan = |b: &Bottle| check_steam_library_folders(b, silksong_spec());
+        let game: &[&str] = &["Hollow Knight Silksong"];
+
+        // Unowned game in a VDF-listed library: ignored under Proton...
+        let fx = proton_test_fixture::new("1000", game, "Hollow Knight Silksong.exe");
+        assert_eq!(scan(&fx.bottle("Proton")), None);
+        // ...but found by the same scan in a regular bottle.
+        assert_eq!(scan(&fx.bottle("CrossOver")), Some(fx.host_game.clone()));
+
+        // The prefix owner's own host install is still found.
+        let owned = fx.install_owner_game("1000", game, "Hollow Knight Silksong.exe");
+        assert_eq!(scan(&fx.bottle("Proton")), Some(owned));
     }
 }
