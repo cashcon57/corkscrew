@@ -257,6 +257,11 @@ fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
 /// resolves Windows-style VDF path strings against every `drive_X` directory
 /// present in the bottle, rather than assuming paths are under `drive_c`.
 fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
+    // Proton prefixes install the game on the host, not inside the prefix.
+    if let Some(dir) = crate::game_registry::find_proton_prefix_game(bottle, STEAM_GAME_DIR) {
+        return Some(dir);
+    }
+
     let library_paths = crate::game_registry::collect_steam_library_paths(bottle);
     for steamapps in library_paths {
         let common = steamapps.join("common");
@@ -648,5 +653,52 @@ mod tests {
             "Skyrim SE on D: SteamLibrary should be detected via VDF"
         );
         assert_eq!(detected.unwrap().game_id, "skyrimse");
+    }
+
+    /// Proton prefixes (`<library>/steamapps/compatdata/<appid>/pfx`) don't
+    /// install the game inside the prefix — Skyrim SE lives on the host at
+    /// `<library>/steamapps/common/Skyrim Special Edition`. Verify
+    /// `detect_wine` finds it there via `find_proton_prefix_game`, and that
+    /// the resolved game path is outside the bottle (the prefix) entirely.
+    #[test]
+    fn detect_finds_game_via_proton_prefix_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let library = tmp.path().join("SteamLibrary");
+        let steamapps = library.join("steamapps");
+
+        // The game, installed on the host by Steam/Proton.
+        let game_dir = steamapps.join("common").join("Skyrim Special Edition");
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("SkyrimSE.exe"), b"fake").unwrap();
+
+        // The appmanifest that ties app id 489830 to that install dir.
+        let acf = "\"AppState\"\n{\n\
+             \t\"appid\"\t\"489830\"\n\
+             \t\"name\"\t\"The Elder Scrolls V: Skyrim Special Edition\"\n\
+             \t\"installdir\"\t\"Skyrim Special Edition\"\n\
+             \t\"StateFlags\"\t\"4\"\n\
+             }\n";
+        fs::write(steamapps.join("appmanifest_489830.acf"), acf).unwrap();
+
+        // The Proton prefix itself — empty, no game inside it.
+        let pfx = steamapps.join("compatdata").join("489830").join("pfx");
+        fs::create_dir_all(pfx.join("drive_c")).unwrap();
+
+        let bottle = Bottle {
+            name: "Proton 489830".into(),
+            path: pfx,
+            source: "Proton".to_string(),
+        };
+
+        let plugin = SkyrimSEPlugin;
+        let detected = plugin
+            .detect_wine(&bottle)
+            .expect("should find Skyrim SE via the Proton prefix's owning library");
+        assert_eq!(detected.game_id, "skyrimse");
+        assert_eq!(detected.game_path, game_dir);
+        assert!(
+            !detected.game_path.starts_with(&bottle.path),
+            "game must live outside the prefix, on the host library"
+        );
     }
 }
