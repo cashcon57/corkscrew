@@ -28,8 +28,6 @@ use crate::bottles::Bottle;
 use crate::games::{DetectedGame, GamePlugin};
 use crate::runtime::{GameRuntime, WineContext};
 
-const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "common"];
-
 /// Generic GOG installation roots scanned for FromSoft games. Sekiro and
 /// Elden Ring aren't on GOG, but the scan is harmless — it only matches
 /// existing directories that also contain the spec's executable.
@@ -306,7 +304,7 @@ fn find_game_path(bottle: &Bottle, spec: &FromSoftGameSpec) -> Option<PathBuf> {
 }
 
 fn check_steam_default(bottle: &Bottle, spec: &FromSoftGameSpec) -> Option<PathBuf> {
-    let common = bottle.find_path(STEAM_COMMON)?;
+    let common = crate::game_registry::default_steam_common(bottle)?;
     for name in spec.steam_dirs {
         if let Some(dir) = find_child_ci(&common, name) {
             if dir.is_dir() && find_executable(&dir, spec.executables).is_some() {

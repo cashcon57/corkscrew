@@ -19,9 +19,6 @@ use crate::runtime::{GameRuntime, WineContext};
 /// Known executable names for Fallout 4 (checked case-insensitively).
 const EXECUTABLES: &[&str] = &["Fallout4.exe", "Fallout4Launcher.exe"];
 
-/// Relative path components from `drive_c` to the default Steam library.
-const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "common"];
-
 /// The game's directory name inside a Steam library.
 const STEAM_GAME_DIR: &str = "Fallout 4";
 
@@ -227,7 +224,7 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
 
 /// Check the default Steam common directory.
 fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
-    let path = bottle.find_path(STEAM_COMMON)?;
+    let path = crate::game_registry::default_steam_common(bottle)?;
     let game_dir = find_child_case_insensitive(&path, STEAM_GAME_DIR)?;
     if game_dir.is_dir() {
         Some(game_dir)

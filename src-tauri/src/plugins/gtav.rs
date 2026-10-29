@@ -53,9 +53,6 @@ use crate::runtime::{GameRuntime, WineContext};
 /// Known executable names for GTA V (checked case-insensitively).
 const EXECUTABLES: &[&str] = &["GTA5.exe", "PlayGTAV.exe", "gtav.exe"];
 
-/// Relative path from `drive_c` to the default Steam library `common` dir.
-const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "common"];
-
 /// Steam common directory name for GTA V.
 const STEAM_GAME_DIR: &str = "Grand Theft Auto V";
 
@@ -274,7 +271,7 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
 }
 
 fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
-    let common = bottle.find_path(STEAM_COMMON)?;
+    let common = crate::game_registry::default_steam_common(bottle)?;
     let game_dir = find_child_case_insensitive(&common, STEAM_GAME_DIR)?;
     if game_dir.is_dir() {
         Some(game_dir)

@@ -186,13 +186,27 @@ impl GamePlugin for RegistryGamePlugin {
 /// Standard Steam common path components.
 const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "common"];
 
+/// The bottle's default in-prefix Steam `common/` dir
+/// (`drive_c/Program Files (x86)/Steam/steamapps/common`).
+///
+/// Always `None` for Proton prefixes: that path can map onto a host Steam
+/// library holding other apps, so a Proton prefix only ever resolves its game
+/// through the owner-validated [`find_proton_prefix_game`]. Every default
+/// Steam lookup (registry and per-game plugins) must go through here.
+pub(crate) fn default_steam_common(bottle: &Bottle) -> Option<PathBuf> {
+    if bottle.source == "Proton" {
+        return None;
+    }
+    bottle.find_path(STEAM_COMMON)
+}
+
 /// Attempt to locate a game inside a Wine bottle.
 fn find_game_path(bottle: &Bottle, entry: &GameEntry) -> Option<PathBuf> {
     // Determine the Steam directory name.
     let steam_dir_name = entry.steam_dir.as_deref().unwrap_or(&entry.name);
 
-    // 1. Check default Steam library.
-    if let Some(common) = bottle.find_path(STEAM_COMMON) {
+    // 1. Check default Steam library (never for Proton prefixes).
+    if let Some(common) = default_steam_common(bottle) {
         if let Some(game_dir) = find_child_case_insensitive(&common, steam_dir_name) {
             if game_dir.is_dir() {
                 return Some(game_dir);
@@ -2292,5 +2306,60 @@ mod tests {
         assert!(find_proton_prefix_game(&bottle, "Fallout 4").is_none());
         assert!(detect_unregistered_steam_games(&bottle, &[]).is_empty());
         assert!(scan_steam_games_with_appid(&bottle).is_empty());
+    }
+
+    /// A Proton prefix whose default in-prefix Steam path
+    /// (`drive_c/Program Files (x86)/Steam/steamapps`) maps onto another host
+    /// library must never resolve a game through it — only through the
+    /// owner-validated appmanifest.
+    #[cfg(unix)]
+    #[test]
+    fn proton_prefix_default_steam_path_mapped_to_other_library_is_ignored() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut bottle, steamapps) = make_proton_bottle(&root.path().join("LibA"), "1234");
+        let own_dir = steamapps.join("common").join("Own Game");
+        fs::create_dir_all(&own_dir).unwrap();
+
+        // Another host library holding a different app (and a same-named copy
+        // of the prefix's own game), mapped in at the default Steam path.
+        let other_steamapps = root.path().join("LibB").join("steamapps");
+        fs::create_dir_all(other_steamapps.join("common").join("Other Game")).unwrap();
+        fs::create_dir_all(other_steamapps.join("common").join("Own Game")).unwrap();
+        write_appmanifest(&other_steamapps, "5678", "Other Game", "Other Game");
+        let steam_dir = bottle.path.join("drive_c/Program Files (x86)/Steam");
+        fs::create_dir_all(&steam_dir).unwrap();
+        std::os::unix::fs::symlink(&other_steamapps, steam_dir.join("steamapps")).unwrap();
+
+        let other_entry = registry_entry("Other Game", "5678");
+        let own_entry = registry_entry("Own Game", "1234");
+        assert!(default_steam_common(&bottle).is_none());
+
+        // Owner manifest missing: nothing resolves, not even the own game's
+        // same-named folder in the mapped library.
+        assert!(find_game_path(&bottle, &other_entry).is_none());
+        assert!(find_game_path(&bottle, &own_entry).is_none());
+
+        // Owner manifest declaring a different appid: still nothing.
+        fs::write(
+            steamapps.join("appmanifest_1234.acf"),
+            "\"AppState\"\n{\n\t\"appid\"\t\"5678\"\n\t\"name\"\t\"Own Game\"\n\t\"installdir\"\t\"Own Game\"\n\t\"StateFlags\"\t\"4\"\n}\n",
+        )
+        .unwrap();
+        assert!(find_game_path(&bottle, &other_entry).is_none());
+        assert!(find_game_path(&bottle, &own_entry).is_none());
+
+        // Valid owner manifest: own game resolves through the owner library
+        // (not the mapped default path); the other app still doesn't.
+        write_appmanifest(&steamapps, "1234", "Own Game", "Own Game");
+        assert_eq!(find_game_path(&bottle, &own_entry), Some(own_dir));
+        assert!(find_game_path(&bottle, &other_entry).is_none());
+
+        // Control: a non-Proton bottle with the same layout does use the
+        // default path, so the assertions above exercise a real vector.
+        bottle.source = "CrossOver".to_string();
+        assert_eq!(
+            find_game_path(&bottle, &other_entry),
+            Some(steam_dir.join("steamapps/common/Other Game"))
+        );
     }
 }

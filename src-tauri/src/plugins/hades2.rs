@@ -24,9 +24,6 @@ use crate::runtime::{GameRuntime, WineContext};
 /// Known executable names for Hades II (case-insensitive).
 const EXECUTABLES: &[&str] = &["Hades2.exe", "HadesII.exe"];
 
-/// Relative path components from `drive_c` to the default Steam library.
-const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "common"];
-
 /// Known directory names inside Steam's common folder.
 const STEAM_GAME_DIRS: &[&str] = &["Hades II", "HadesII", "Hades2"];
 
@@ -220,7 +217,7 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
 }
 
 fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
-    let common = bottle.find_path(STEAM_COMMON)?;
+    let common = crate::game_registry::default_steam_common(bottle)?;
     for name in STEAM_GAME_DIRS {
         if let Some(dir) = find_child_case_insensitive(&common, name) {
             if dir.is_dir() {
