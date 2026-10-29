@@ -33,6 +33,9 @@ const EXECUTABLES: &[&str] = &["HogwartsLegacy.exe"];
 /// The game's directory name inside a Steam library.
 const STEAM_GAME_DIR: &str = "Hogwarts Legacy";
 
+/// Hogwarts Legacy's Steam app ID.
+const STEAM_APP_ID: &str = "990080";
+
 /// Epic Games Store installation paths to check (relative to `drive_c`).
 const EPIC_PATHS: &[&[&str]] = &[
     &["Program Files", "Epic Games", "Hogwarts Legacy"],
@@ -213,7 +216,7 @@ impl GamePlugin for HogwartsLegacyPlugin {
     }
 
     fn steam_launch_id(&self) -> Option<&str> {
-        Some("990080")
+        Some(STEAM_APP_ID)
     }
 
     fn launch_executable(&self, game_path: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -657,7 +660,9 @@ fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
 /// present in the bottle, rather than assuming paths are under `drive_c`.
 fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
     // Proton prefixes install the game on the host, not inside the prefix.
-    if let Some(dir) = crate::game_registry::find_proton_prefix_game(bottle, STEAM_GAME_DIR) {
+    if let Some(dir) =
+        crate::game_registry::find_proton_prefix_game(bottle, STEAM_GAME_DIR, Some(STEAM_APP_ID))
+    {
         return Some(dir);
     }
 

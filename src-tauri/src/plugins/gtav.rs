@@ -56,6 +56,9 @@ const EXECUTABLES: &[&str] = &["GTA5.exe", "PlayGTAV.exe", "gtav.exe"];
 /// Steam common directory name for GTA V.
 const STEAM_GAME_DIR: &str = "Grand Theft Auto V";
 
+/// GTA V's Steam app ID.
+const STEAM_APP_ID: &str = "271590";
+
 /// Rockstar Games Launcher install paths (relative to `drive_c`).
 const ROCKSTAR_PATHS: &[&[&str]] = &[
     &["Program Files", "Rockstar Games", "Grand Theft Auto V"],
@@ -176,7 +179,7 @@ impl GamePlugin for GtaVPlugin {
     }
 
     fn steam_launch_id(&self) -> Option<&str> {
-        Some("271590")
+        Some(STEAM_APP_ID)
     }
 
     fn launch_executable(&self, game_path: &Path) -> Option<PathBuf> {
@@ -284,7 +287,11 @@ fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
     // Proton prefixes: only the owning app's host install. Never scan the
     // prefix's libraryfolders.vdf — it maps onto host libraries holding other apps.
     if bottle.source == "Proton" {
-        return crate::game_registry::find_proton_prefix_game(bottle, STEAM_GAME_DIR);
+        return crate::game_registry::find_proton_prefix_game(
+            bottle,
+            STEAM_GAME_DIR,
+            Some(STEAM_APP_ID),
+        );
     }
 
     let steam_dir = bottle.find_path(&["Program Files (x86)", "Steam"])?;
@@ -892,7 +899,7 @@ mod tests {
         let game: &[&str] = &["Grand Theft Auto V"];
 
         // Unowned game in a VDF-listed library: ignored under Proton...
-        let fx = proton_test_fixture::new("1000", game, "GTA5.exe");
+        let fx = proton_test_fixture::new(STEAM_APP_ID, game, "GTA5.exe");
         assert_eq!(check_steam_library_folders(&fx.bottle("Proton")), None);
         // ...but found by the same scan in a regular bottle.
         assert_eq!(
@@ -901,7 +908,7 @@ mod tests {
         );
 
         // The prefix owner's own host install is still found.
-        let owned = fx.install_owner_game("1000", game, "GTA5.exe");
+        let owned = fx.install_owner_game(STEAM_APP_ID, game, "GTA5.exe");
         assert_eq!(
             check_steam_library_folders(&fx.bottle("Proton")),
             Some(owned)

@@ -234,7 +234,9 @@ fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
     if bottle.source == "Proton" {
         return STEAM_GAME_DIRS
             .iter()
-            .find_map(|name| crate::game_registry::find_proton_prefix_game(bottle, name));
+            .find_map(|name| {
+                crate::game_registry::find_proton_prefix_game(bottle, name, Some(STEAM_APP_ID))
+            });
     }
 
     let steam_dir = bottle.find_path(&["Program Files (x86)", "Steam"])?;
@@ -622,7 +624,7 @@ mod tests {
         let game: &[&str] = &["Hades II"];
 
         // Unowned game in a VDF-listed library: ignored under Proton...
-        let fx = proton_test_fixture::new("1000", game, "Hades2.exe");
+        let fx = proton_test_fixture::new(STEAM_APP_ID, game, "Hades2.exe");
         assert_eq!(check_steam_library_folders(&fx.bottle("Proton")), None);
         // ...but found by the same scan in a regular bottle.
         assert_eq!(
@@ -631,7 +633,7 @@ mod tests {
         );
 
         // The prefix owner's own host install is still found.
-        let owned = fx.install_owner_game("1000", game, "Hades2.exe");
+        let owned = fx.install_owner_game(STEAM_APP_ID, game, "Hades2.exe");
         assert_eq!(
             check_steam_library_folders(&fx.bottle("Proton")),
             Some(owned)

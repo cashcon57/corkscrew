@@ -331,7 +331,11 @@ fn check_steam_library_folders(bottle: &Bottle, spec: &FromSoftGameSpec) -> Opti
     // prefix's libraryfolders.vdf — it maps onto host libraries holding other apps.
     if bottle.source == "Proton" {
         return spec.steam_dirs.iter().find_map(|name| {
-            let dir = crate::game_registry::find_proton_prefix_game(bottle, name)?;
+            let dir = crate::game_registry::find_proton_prefix_game(
+                bottle,
+                name,
+                Some(spec.steam_app_id),
+            )?;
             // `Game/` may be a symlink out of the confined install.
             let found = library_game_dir(&dir, spec)?;
             crate::game_registry::confine_to_proton_install(&dir, found)
@@ -997,16 +1001,44 @@ mod tests {
         use crate::game_registry::proton_test_fixture;
         let scan = |b: &Bottle| check_steam_library_folders(b, spec_for("eldenring"));
         let game: &[&str] = &["ELDEN RING"];
+        let app_id = spec_for("eldenring").steam_app_id;
 
         // Unowned game in a VDF-listed library: ignored under Proton...
-        let fx = proton_test_fixture::new("1000", game, "eldenring.exe");
+        let fx = proton_test_fixture::new(app_id, game, "eldenring.exe");
         assert_eq!(scan(&fx.bottle("Proton")), None);
         // ...but found by the same scan in a regular bottle.
         assert_eq!(scan(&fx.bottle("CrossOver")), Some(fx.host_game.clone()));
 
         // The prefix owner's own host install is still found.
-        let owned = fx.install_owner_game("1000", game, "eldenring.exe");
+        let owned = fx.install_owner_game(app_id, game, "eldenring.exe");
         assert_eq!(scan(&fx.bottle("Proton")), Some(owned));
+    }
+
+    /// The owner app ID must match the game's real Steam app ID, not just the
+    /// owning appmanifest's `installdir`. A prefix owned by a different app
+    /// that happens to have an `installdir` of "ELDEN RING" must not be
+    /// treated as an Elden Ring install.
+    #[test]
+    fn proton_prefix_owner_app_id_mismatch_is_rejected() {
+        use crate::game_registry::proton_test_fixture;
+        let scan = |b: &Bottle| check_steam_library_folders(b, spec_for("eldenring"));
+        let game: &[&str] = &["ELDEN RING"];
+
+        // Prefix owned by app "1000", whose installdir happens to be
+        // "ELDEN RING" — the installdir matches, but the app ID doesn't.
+        let fx = proton_test_fixture::new("1000", game, "eldenring.exe");
+        fx.install_owner_game("1000", game, "eldenring.exe");
+        assert_eq!(
+            scan(&fx.bottle("Proton")),
+            None,
+            "mismatched owner app id must not be treated as Elden Ring"
+        );
+
+        // Owned by Elden Ring's real app id: detected.
+        let app_id = spec_for("eldenring").steam_app_id;
+        let fx2 = proton_test_fixture::new(app_id, game, "eldenring.exe");
+        let owned = fx2.install_owner_game(app_id, game, "eldenring.exe");
+        assert_eq!(scan(&fx2.bottle("Proton")), Some(owned));
     }
 
     /// The owner install is confined, but its nested `Game/` dir must be too:
@@ -1017,10 +1049,11 @@ mod tests {
     fn proton_nested_game_dir_symlink_escape_is_rejected() {
         use crate::game_registry::proton_test_fixture;
         let scan = |b: &Bottle| check_steam_library_folders(b, spec_for("eldenring"));
-        let fx = proton_test_fixture::new("1000", &["ELDEN RING"], "eldenring.exe");
+        let app_id = spec_for("eldenring").steam_app_id;
+        let fx = proton_test_fixture::new(app_id, &["ELDEN RING"], "eldenring.exe");
 
         // A real nested `Game/` is found and stays inside the owner install.
-        let nested = fx.install_owner_game("1000", &["ELDEN RING", "Game"], "eldenring.exe");
+        let nested = fx.install_owner_game(app_id, &["ELDEN RING", "Game"], "eldenring.exe");
         let found = scan(&fx.bottle("Proton")).expect("nested Game/ should be found");
         assert_eq!(found, nested);
         let install_canon = fx

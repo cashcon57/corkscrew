@@ -22,6 +22,9 @@ const EXECUTABLES: &[&str] = &["Fallout4.exe", "Fallout4Launcher.exe"];
 /// The game's directory name inside a Steam library.
 const STEAM_GAME_DIR: &str = "Fallout 4";
 
+/// Fallout 4's Steam app ID.
+const STEAM_APP_ID: &str = "377160";
+
 /// GOG installation paths to check (relative to `drive_c`).
 const GOG_PATHS: &[&[&str]] = &[
     &["GOG Games", "Fallout 4"],
@@ -240,7 +243,9 @@ fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
 /// present in the bottle, rather than assuming paths are under `drive_c`.
 fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
     // Proton prefixes install the game on the host, not inside the prefix.
-    if let Some(dir) = crate::game_registry::find_proton_prefix_game(bottle, STEAM_GAME_DIR) {
+    if let Some(dir) =
+        crate::game_registry::find_proton_prefix_game(bottle, STEAM_GAME_DIR, Some(STEAM_APP_ID))
+    {
         return Some(dir);
     }
 

@@ -297,7 +297,11 @@ fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
     // Proton prefixes: only the owning app's host install. Never scan the
     // prefix's libraryfolders.vdf — it maps onto host libraries holding other apps.
     if bottle.source == "Proton" {
-        let outer = crate::game_registry::find_proton_prefix_game(bottle, STEAM_GAME_DIR)?;
+        let outer = crate::game_registry::find_proton_prefix_game(
+            bottle,
+            STEAM_GAME_DIR,
+            Some(STEAM_APP_ID),
+        )?;
         // The inner game dir may be a symlink out of the confined install.
         let inner = descend_into_inner_game_dir(&outer)?;
         return crate::game_registry::confine_to_proton_install(&outer, inner);
@@ -995,7 +999,7 @@ mod tests {
         let game: &[&str] = &["Genshin Impact", "Genshin Impact game"];
 
         // Unowned game in a VDF-listed library: ignored under Proton...
-        let fx = proton_test_fixture::new("1000", game, "GenshinImpact.exe");
+        let fx = proton_test_fixture::new(STEAM_APP_ID, game, "GenshinImpact.exe");
         assert_eq!(check_steam_library_folders(&fx.bottle("Proton")), None);
         // ...but found by the same scan in a regular bottle.
         assert_eq!(
@@ -1004,7 +1008,7 @@ mod tests {
         );
 
         // The prefix owner's own host install is still found.
-        let owned = fx.install_owner_game("1000", game, "GenshinImpact.exe");
+        let owned = fx.install_owner_game(STEAM_APP_ID, game, "GenshinImpact.exe");
         assert_eq!(
             check_steam_library_folders(&fx.bottle("Proton")),
             Some(owned)
@@ -1019,10 +1023,10 @@ mod tests {
     fn proton_nested_inner_dir_symlink_escape_is_rejected() {
         use crate::game_registry::proton_test_fixture;
         let game: &[&str] = &["Genshin Impact", "Genshin Impact game"];
-        let fx = proton_test_fixture::new("1000", game, "GenshinImpact.exe");
+        let fx = proton_test_fixture::new(STEAM_APP_ID, game, "GenshinImpact.exe");
 
         // A real inner dir is found and stays inside the owner install.
-        let inner = fx.install_owner_game("1000", game, "GenshinImpact.exe");
+        let inner = fx.install_owner_game(STEAM_APP_ID, game, "GenshinImpact.exe");
         let found =
             check_steam_library_folders(&fx.bottle("Proton")).expect("inner dir should be found");
         assert_eq!(found, inner);
