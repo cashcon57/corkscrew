@@ -567,6 +567,27 @@ pub(crate) fn find_proton_prefix_game(bottle: &Bottle, dir_name: &str) -> Option
     resolve_install_dir(&owner.steamapps, &manifest.install_dir, true, &acf_path)
 }
 
+/// Confine a path derived from a [`find_proton_prefix_game`] install (e.g. a
+/// nested `Game/` subdir) to that install: `candidate` must canonicalize to
+/// `install` itself or somewhere beneath it. Without this, a symlinked nested
+/// dir could point a Proton prefix at an arbitrary host directory even though
+/// the install root itself was confined. Returns `candidate` unchanged on
+/// success.
+pub(crate) fn confine_to_proton_install(install: &Path, candidate: PathBuf) -> Option<PathBuf> {
+    let install_canon = install.canonicalize().ok()?;
+    let candidate_canon = candidate.canonicalize().ok()?;
+    if !candidate_canon.starts_with(&install_canon) {
+        log::warn!(
+            "{} resolves outside Proton install {} ({}), rejecting",
+            candidate.display(),
+            install_canon.display(),
+            candidate_canon.display()
+        );
+        return None;
+    }
+    Some(candidate)
+}
+
 /// A Proton owner's appmanifest must declare the same `appid` as the
 /// `compatdata/<appid>` directory it was looked up by — otherwise a
 /// mislabeled/planted manifest could attach another app's install to this

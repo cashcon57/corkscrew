@@ -332,7 +332,9 @@ fn check_steam_library_folders(bottle: &Bottle, spec: &FromSoftGameSpec) -> Opti
     if bottle.source == "Proton" {
         return spec.steam_dirs.iter().find_map(|name| {
             let dir = crate::game_registry::find_proton_prefix_game(bottle, name)?;
-            library_game_dir(&dir, spec)
+            // `Game/` may be a symlink out of the confined install.
+            let found = library_game_dir(&dir, spec)?;
+            crate::game_registry::confine_to_proton_install(&dir, found)
         });
     }
 
@@ -1005,5 +1007,39 @@ mod tests {
         // The prefix owner's own host install is still found.
         let owned = fx.install_owner_game("1000", game, "eldenring.exe");
         assert_eq!(scan(&fx.bottle("Proton")), Some(owned));
+    }
+
+    /// The owner install is confined, but its nested `Game/` dir must be too:
+    /// a `Game` symlink pointing outside the install is rejected under Proton,
+    /// while non-Proton library scans keep following it.
+    #[cfg(unix)]
+    #[test]
+    fn proton_nested_game_dir_symlink_escape_is_rejected() {
+        use crate::game_registry::proton_test_fixture;
+        let scan = |b: &Bottle| check_steam_library_folders(b, spec_for("eldenring"));
+        let fx = proton_test_fixture::new("1000", &["ELDEN RING"], "eldenring.exe");
+
+        // A real nested `Game/` is found and stays inside the owner install.
+        let nested = fx.install_owner_game("1000", &["ELDEN RING", "Game"], "eldenring.exe");
+        let found = scan(&fx.bottle("Proton")).expect("nested Game/ should be found");
+        assert_eq!(found, nested);
+        let install_canon = fx
+            .owner_steamapps
+            .join("common/ELDEN RING")
+            .canonicalize()
+            .unwrap();
+        assert!(found.canonicalize().unwrap().starts_with(&install_canon));
+
+        // Swap `Game/` for a symlink to a game dir outside the install.
+        std::fs::remove_dir_all(&nested).unwrap();
+        std::os::unix::fs::symlink(&fx.host_game, &nested).unwrap();
+        assert_eq!(scan(&fx.bottle("Proton")), None);
+
+        // Non-Proton behavior is unchanged: the symlinked `Game/` is followed.
+        let spec = spec_for("eldenring");
+        assert_eq!(
+            library_game_dir(&fx.owner_steamapps.join("common/ELDEN RING"), spec),
+            Some(nested)
+        );
     }
 }
