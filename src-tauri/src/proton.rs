@@ -666,6 +666,12 @@ fn find_user_compat_tools_dirs(home: &Path, xdg_data_home: Option<&OsStr>) -> Ve
         dirs.push(flatpak_legacy);
     }
 
+    // Snap Steam: ~/snap/steam/common/.local/share/Steam/compatibilitytools.d
+    let snap = home.join("snap/steam/common/.local/share/Steam/compatibilitytools.d");
+    if snap.is_dir() && !dirs.iter().any(|d| same_dir(d, &snap)) {
+        dirs.push(snap);
+    }
+
     // Custom $XDG_DATA_HOME: $XDG_DATA_HOME/Steam/compatibilitytools.d
     if let Some(root) = xdg_steam_root(xdg_data_home) {
         let custom = root.join("compatibilitytools.d");
@@ -1667,5 +1673,39 @@ mod tests {
         assert_eq!(dirs.len(), 2);
         assert!(same_dir(&dirs[0], &native.join("steamapps/common")));
         assert!(same_dir(&dirs[1], &secondary.join("steamapps/common")));
+    }
+
+    #[test]
+    fn test_snap_compat_tools_dir_discovers_ge_proton() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let compat = home.join(SNAP_STEAM).join("compatibilitytools.d");
+        let ge = compat.join("GE-Proton10-27");
+        std::fs::create_dir_all(ge.join("files/bin")).unwrap();
+        std::fs::write(ge.join("files/bin/wine"), b"fixture").unwrap();
+
+        let dirs = find_user_compat_tools_dirs(&home, None);
+        assert_eq!(dirs, vec![compat]);
+        let mut tools = Vec::new();
+        scan_proton_dir(&dirs[0], &mut tools);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].path, ge);
+        assert_eq!(tools[0].variant, ProtonVariant::GE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_snap_compat_tools_alias_of_native_is_deduplicated() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let native = home.join(NATIVE_STEAM).join("compatibilitytools.d");
+        std::fs::create_dir_all(&native).unwrap();
+        let snap_steam = home.join(SNAP_STEAM);
+        std::fs::create_dir_all(&snap_steam).unwrap();
+        symlink(&native, snap_steam.join("compatibilitytools.d")).unwrap();
+
+        assert_eq!(find_user_compat_tools_dirs(&home, None), vec![native]);
     }
 }
