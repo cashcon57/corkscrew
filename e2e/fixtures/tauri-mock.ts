@@ -118,7 +118,7 @@ export async function injectTauriMock(
       case "get_download_queue": return [];
       case "get_notification_count": return 0;
       case "set_config_value": return null;
-      case "list_profiles": return [{ name: "default", is_active: true, game_id: "skyrimse", bottle_name: "CrossOver Default" }];
+      case "list_profiles_cmd": return [{ id: 1, name: "default", is_active: true, game_id: "skyrimse", bottle_name: "CrossOver Default", created_at: "2026-03-01T12:00:00Z" }];
       case "list_installed_collections": return [
         { slug: "uehwil", name: "The Goblet", game_domain: "hogwartslegacy", game_id: "hogwartslegacy", bottle_name: "CrossOver Default", author: "v2", latest_revision: 63, installed_revision: 63, mod_count: 132, download_size: 4294967296, status: "installed" },
       ];
@@ -128,6 +128,23 @@ export async function injectTauriMock(
       case "check_skyrim_version": return { current_version: "1.6.1170", target_version: "1.5.97", is_downgraded: false, downgrade_path: null };
       case "get_pinned_game_version": return "1.6.1170";
       case "chat_check_new_crashes": return { count: 0, entries: [] };
+
+      // Crash Logs page
+      case "find_crash_logs_cmd": return [];
+      case "analyze_crash_log_cmd": return {
+        log_file: (args && args.logPath) || "crash-2026-03-01-12-00-00.log",
+        timestamp: "2026-03-01T12:00:00Z",
+        exception_type: "EXCEPTION_ACCESS_VIOLATION",
+        crash_address: "0x7FF6D6DDDA",
+        module_name: "SkyrimSE.exe",
+        module_offset: "D6DDDA",
+        diagnosis: [],
+        severity: "Unknown",
+        involved_plugins: [],
+        involved_skse_plugins: [],
+        system_info: null,
+        call_stack_summary: [],
+      };
 
       // Dashboard
       case "get_bottles": return BOTTLES;

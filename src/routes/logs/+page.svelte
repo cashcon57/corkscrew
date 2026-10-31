@@ -48,7 +48,7 @@
   async function loadCrashLogs(g: DetectedGame) {
     loading = true;
     try {
-      logs = await findCrashLogs(g.game_id, (wineCtx(g)?.bottle_name ?? ""));
+      logs = (await findCrashLogs(g.game_id, (wineCtx(g)?.bottle_name ?? ""))) ?? [];
     } catch (e: unknown) {
       showError(`Failed to load crash logs: ${e}`);
     } finally {
@@ -81,7 +81,7 @@
     if (!game || refreshing) return;
     refreshing = true;
     try {
-      logs = await findCrashLogs(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
+      logs = (await findCrashLogs(game.game_id, (wineCtx(game)?.bottle_name ?? ""))) ?? [];
       selectedLogFilename = null;
       selectedReport = null;
       showSuccess("Crash logs refreshed");
