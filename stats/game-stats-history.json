@@ -109,5 +109,116 @@
         "tier": "Standard"
       }
     ]
+  },
+  {
+    "date": "2026-10-31",
+    "supported_count": 85,
+    "gap_count": 137,
+    "total_supported_mods": 804485,
+    "total_gap_mods": 254094,
+    "top_gaps": [
+      {
+        "name": "Helldivers 2",
+        "domain": "helldivers2",
+        "mods": 13125
+      },
+      {
+        "name": "Marvel Rivals",
+        "domain": "marvelrivals",
+        "mods": 9933
+      },
+      {
+        "name": "Star Wars: Battlefront II (2017)",
+        "domain": "starwarsbattlefront22017",
+        "mods": 9884
+      },
+      {
+        "name": "Mount & Blade II: Bannerlord",
+        "domain": "mountandblade2bannerlord",
+        "mods": 9704
+      },
+      {
+        "name": "Elden Ring",
+        "domain": "eldenring",
+        "mods": 7978
+      },
+      {
+        "name": "Red Dead Redemption 2",
+        "domain": "reddeadredemption2",
+        "mods": 6469
+      },
+      {
+        "name": "Resident Evil 4 (2023)",
+        "domain": "residentevil42023",
+        "mods": 5714
+      },
+      {
+        "name": "My Summer Car",
+        "domain": "mysummercar",
+        "mods": 5484
+      },
+      {
+        "name": "Ready or Not",
+        "domain": "readyornot",
+        "mods": 5195
+      },
+      {
+        "name": "Marvel's Spider-Man Remastered",
+        "domain": "marvelsspidermanremastered",
+        "mods": 4488
+      }
+    ],
+    "top_supported": [
+      {
+        "name": "Skyrim Special Edition",
+        "mods": 143149,
+        "tier": "Full"
+      },
+      {
+        "name": "Skyrim VR",
+        "mods": 143149,
+        "tier": "Standard"
+      },
+      {
+        "name": "Fallout 4",
+        "mods": 77514,
+        "tier": "Full"
+      },
+      {
+        "name": "Fallout 4 VR",
+        "mods": 77514,
+        "tier": "Standard"
+      },
+      {
+        "name": "Skyrim",
+        "mods": 73215,
+        "tier": "Standard"
+      },
+      {
+        "name": "Fallout: New Vegas",
+        "mods": 42394,
+        "tier": "Standard"
+      },
+      {
+        "name": "Stardew Valley",
+        "mods": 35069,
+        "tier": "Standard"
+      },
+      {
+        "name": "The Elder Scrolls IV: Oblivion",
+        "mods": 33628,
+        "tier": "Standard"
+      },
+      {
+        "name": "Cyberpunk 2077",
+        "mods": 25530,
+        "tier": "Standard"
+      },
+      {
+        "name": "Baldur's Gate 3",
+        "mods": 20216,
+        "tier": "Standard"
+      }
+    ]
   }
 ]
