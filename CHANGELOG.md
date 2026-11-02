@@ -2,6 +2,12 @@
 
 All notable changes to Corkscrew are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.14.24] - 2026-11-02
+
+### Fixed
+
+- **Linux AppImage in 0.14.23 wouldn't start on most distros**: GitHub moved its `ubuntu-latest` build machines to Ubuntu 26.04, so 0.14.23's AppImage bundled libraries that need glibc 2.43, newer than SteamOS, Ubuntu 24.04, Debian or Fedora 42 ship. Linux builds now run on Ubuntu 22.04 (glibc 2.35), and the release fails if anything in the AppImage needs a newer glibc than that. 0.14.23 was withdrawn from the Linux auto-updater, so Linux users go straight from 0.14.12 to this release, which includes everything listed under 0.14.23. (#202)
+
 ## [0.14.23] - 2026-11-02
 
 First release since 0.14.12. Versions 0.14.13 through 0.14.22 were internal version bumps on `main` that never shipped; everything they contained is listed here.
