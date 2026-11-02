@@ -24,7 +24,9 @@
 //! Genshin can land in three layouts inside a Wine bottle:
 //!
 //! 1. **Steam** — `Program Files (x86)/Steam/steamapps/common/Genshin Impact/Genshin Impact game/`
-//!    (Genshin's Steam release uses a nested `Genshin Impact game` directory).
+//!    (nested `Genshin Impact game` directory). Genshin has no Steam store
+//!    listing, so this only covers a copy placed in a bottle's Steam library by
+//!    hand; it is never resolved through a Proton prefix's owning Steam app.
 //! 2. **HoYoPlay launcher** — `Program Files/HoYoPlay/games/Genshin Impact game/`
 //!    (HoYo's official cross-platform launcher; the path is plural-less).
 //! 3. **Standalone install** — `Program Files/Genshin Impact/Genshin Impact Game/`
@@ -47,9 +49,6 @@ use crate::runtime::{GameRuntime, WineContext};
 /// Known executable filenames (case-insensitive). `YuanShen.exe` is the CN
 /// client; the global build uses `GenshinImpact.exe`.
 const EXECUTABLES: &[&str] = &["GenshinImpact.exe", "YuanShen.exe"];
-
-/// Steam App ID for Genshin Impact (global release).
-const STEAM_APP_ID: &str = "1517290";
 
 /// Steam game directory name. The actual executable lives one level deeper at
 /// `<this>/Genshin Impact game/`.
@@ -172,10 +171,6 @@ impl GamePlugin for GenshinPlugin {
         false
     }
 
-    fn steam_launch_id(&self) -> Option<&str> {
-        Some(STEAM_APP_ID)
-    }
-
     fn critical_files(&self) -> Vec<&str> {
         vec![
             "GenshinImpact.exe",
@@ -294,17 +289,13 @@ fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
 
 /// Parse `libraryfolders.vdf` and check each library path.
 fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
-    // Proton prefixes: only the owning app's host install. Never scan the
-    // prefix's libraryfolders.vdf — it maps onto host libraries holding other apps.
+    // Proton prefixes: Genshin Impact has no Steam app (it ships through
+    // HoYoPlay), so no Proton prefix can own a Steam install of it. A prefix
+    // for a non-Steam shortcut is found by the in-prefix HoYoPlay/standalone
+    // checks instead. Never scan the prefix's libraryfolders.vdf — it maps
+    // onto host libraries holding other apps.
     if bottle.source == "Proton" {
-        let outer = crate::game_registry::find_proton_prefix_game(
-            bottle,
-            STEAM_GAME_DIR,
-            Some(STEAM_APP_ID),
-        )?;
-        // The inner game dir may be a symlink out of the confined install.
-        let inner = descend_into_inner_game_dir(&outer)?;
-        return crate::game_registry::confine_to_proton_install(&outer, inner);
+        return None;
     }
 
     let steam_dir = bottle.find_path(&["Program Files (x86)", "Steam"])?;
@@ -556,7 +547,8 @@ mod tests {
         assert_eq!(plugin.display_name(), "Genshin Impact");
         assert_eq!(plugin.nexus_slug(), "genshinimpact");
         assert_eq!(plugin.executables(), &["GenshinImpact.exe", "YuanShen.exe"]);
-        assert_eq!(plugin.steam_launch_id(), Some("1517290"));
+        // Not on Steam: never launched through a Steam app ID.
+        assert_eq!(plugin.steam_launch_id(), None);
         assert!(!plugin.use_legacy_data_dir());
     }
 
@@ -991,15 +983,15 @@ mod tests {
         assert_eq!(detected.game_path, game_dir);
     }
 
-    /// A Proton prefix's own libraryfolders.vdf can list host libraries holding
-    /// other apps; the library scan must only ever return the prefix owner's game.
+    /// Genshin Impact isn't a Steam app, so a Proton prefix never resolves it
+    /// through Steam libraries — neither the in-prefix VDF's host libraries
+    /// nor an owner install (whatever app owns the prefix).
     #[test]
-    fn library_scan_in_proton_prefix_is_owner_only() {
+    fn library_scan_in_proton_prefix_finds_nothing() {
         use crate::game_registry::proton_test_fixture;
         let game: &[&str] = &["Genshin Impact", "Genshin Impact game"];
 
-        // Unowned game in a VDF-listed library: ignored under Proton...
-        let fx = proton_test_fixture::new(STEAM_APP_ID, game, "GenshinImpact.exe");
+        let fx = proton_test_fixture::new("1000", game, "GenshinImpact.exe");
         assert_eq!(check_steam_library_folders(&fx.bottle("Proton")), None);
         // ...but found by the same scan in a regular bottle.
         assert_eq!(
@@ -1007,39 +999,7 @@ mod tests {
             Some(fx.host_game.clone())
         );
 
-        // The prefix owner's own host install is still found.
-        let owned = fx.install_owner_game(STEAM_APP_ID, game, "GenshinImpact.exe");
-        assert_eq!(
-            check_steam_library_folders(&fx.bottle("Proton")),
-            Some(owned)
-        );
-    }
-
-    /// The owner install is confined, but the nested `Genshin Impact game/`
-    /// dir must be too: a symlink pointing outside the install is rejected
-    /// under Proton, while non-Proton descent keeps following it.
-    #[cfg(unix)]
-    #[test]
-    fn proton_nested_inner_dir_symlink_escape_is_rejected() {
-        use crate::game_registry::proton_test_fixture;
-        let game: &[&str] = &["Genshin Impact", "Genshin Impact game"];
-        let fx = proton_test_fixture::new(STEAM_APP_ID, game, "GenshinImpact.exe");
-
-        // A real inner dir is found and stays inside the owner install.
-        let inner = fx.install_owner_game(STEAM_APP_ID, game, "GenshinImpact.exe");
-        let found =
-            check_steam_library_folders(&fx.bottle("Proton")).expect("inner dir should be found");
-        assert_eq!(found, inner);
-        let outer = fx.owner_steamapps.join("common/Genshin Impact");
-        let install_canon = outer.canonicalize().unwrap();
-        assert!(found.canonicalize().unwrap().starts_with(&install_canon));
-
-        // Swap the inner dir for a symlink to a game dir outside the install.
-        fs::remove_dir_all(&inner).unwrap();
-        std::os::unix::fs::symlink(&fx.host_game, &inner).unwrap();
+        fx.install_owner_game("1000", game, "GenshinImpact.exe");
         assert_eq!(check_steam_library_folders(&fx.bottle("Proton")), None);
-
-        // Non-Proton behavior is unchanged: the symlinked inner dir is followed.
-        assert_eq!(descend_into_inner_game_dir(&outer), Some(inner));
     }
 }
