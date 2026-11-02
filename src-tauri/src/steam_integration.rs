@@ -64,18 +64,22 @@ fn steam_root_candidates(
         candidates.push(xdg_root.clone());
     }
 
-    let mut defaults = vec![
-        home.join(".steam/steam"),
-        home.join(".local/share/Steam"),
-        home.join(".var/app/com.valvesoftware.Steam/.steam/steam"), // Flatpak
-        home.join("snap/steam/current/.steam/steam"),               // Snap
+    // Probe order matters: the first real install wins, so the long-standing
+    // native/Flatpak/Snap pointers stay first and the newer layouts follow.
+    const HOME_STEAM_CANDIDATES: [&str; 8] = [
+        ".steam/steam",
+        ".local/share/Steam",
+        ".var/app/com.valvesoftware.Steam/.steam/steam", // Flatpak pointer
+        "snap/steam/current/.steam/steam",               // Snap pointer
+        ".steam/root",                                   // native client's other symlink
+        ".var/app/com.valvesoftware.Steam/data/Steam",   // Flatpak, current layout
+        ".var/app/com.valvesoftware.Steam/.local/share/Steam", // Flatpak, legacy layout
+        "snap/steam/common/.local/share/Steam",          // Snap data root
     ];
+    let mut defaults: Vec<PathBuf> = HOME_STEAM_CANDIDATES.iter().map(|c| home.join(c)).collect();
     // Also check /var/home variant if the normalized home differs from the raw home
     if home != raw_home {
-        defaults.push(raw_home.join(".steam/steam"));
-        defaults.push(raw_home.join(".local/share/Steam"));
-        defaults.push(raw_home.join(".var/app/com.valvesoftware.Steam/.steam/steam"));
-        defaults.push(raw_home.join("snap/steam/current/.steam/steam"));
+        defaults.extend(HOME_STEAM_CANDIDATES.iter().map(|c| raw_home.join(c)));
     }
 
     for default in defaults {
@@ -1748,5 +1752,36 @@ mod tests {
         assert!(extenders.iter().any(|e| e.game_id == "skyrimse"));
         assert!(extenders.iter().any(|e| e.game_id == "fallout4"));
         assert!(extenders.iter().any(|e| e.game_id == "oblivion"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn detects_steam_in_newer_flatpak_snap_and_root_layouts() {
+        for layout in [
+            ".var/app/com.valvesoftware.Steam/data/Steam",
+            ".var/app/com.valvesoftware.Steam/.local/share/Steam",
+            "snap/steam/common/.local/share/Steam",
+            ".steam/root",
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let root = home.path().join(layout);
+            create_fake_steam_root(&root);
+            let candidates = steam_root_candidates(home.path(), home.path(), None);
+            let found = find_steam_installation(&candidates)
+                .unwrap_or_else(|| panic!("no Steam found for {layout}"));
+            assert!(same_dir(&found.steam_root, &root), "{layout}: {:?}", found.steam_root);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_install_still_wins_over_newer_layouts() {
+        let home = tempfile::tempdir().unwrap();
+        let native = home.path().join(".local/share/Steam");
+        create_fake_steam_root(&native);
+        create_fake_steam_root(&home.path().join(".var/app/com.valvesoftware.Steam/data/Steam"));
+        let candidates = steam_root_candidates(home.path(), home.path(), None);
+        let found = find_steam_installation(&candidates).expect("steam");
+        assert!(same_dir(&found.steam_root, &native));
     }
 }
