@@ -1,7 +1,6 @@
 //! Wine bottle detection for CrossOver, Whisky, Moonshine, Mythic, Heroic,
 //! and native Wine/Proton managers on macOS and Linux.
 
-#[cfg(target_os = "linux")]
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -233,7 +232,6 @@ pub fn normalize_container_path(path: &Path) -> PathBuf {
 
 /// Compare two paths for identity: equal verbatim, or equal once both
 /// successfully canonicalize (resolving symlinks and `.`/`..` segments).
-#[cfg(target_os = "linux")]
 fn same_dir(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
@@ -1106,53 +1104,92 @@ fn get_heroic_wine_prefix(heroic_config_dir: &Path, app_name: &str) -> Option<Pa
         })
 }
 
-/// Find all Heroic config directories (standard + Flatpak + macOS).
+/// Find all Heroic config directories (standard + custom XDG + Flatpak + macOS).
 fn find_heroic_config_dirs() -> Vec<PathBuf> {
-    let mut config_dirs = Vec::new();
-    if let Some(home) = dirs::home_dir() {
-        // Linux: standard install
-        let standard = home.join(".config").join("heroic");
-        if standard.is_dir() {
-            config_dirs.push(standard);
-        }
-        // Linux: Flatpak install
-        let flatpak = home
-            .join(".var")
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    // Heroic (Electron) resolves its config under `$XDG_CONFIG_HOME` on Linux;
+    // other platforms never honor it.
+    let xdg_config_home = if cfg!(target_os = "linux") {
+        std::env::var_os("XDG_CONFIG_HOME")
+    } else {
+        None
+    };
+    heroic_config_dirs_with_xdg(&home, xdg_config_home.as_deref())
+}
+
+/// Heroic config dir under a custom `$XDG_CONFIG_HOME`. Per the XDG Base
+/// Directory spec, empty or relative values are invalid and must be ignored,
+/// leaving the `~/.config/heroic` default in effect.
+fn xdg_heroic_config_dir(xdg_config_home: Option<&OsStr>) -> Option<PathBuf> {
+    let base = Path::new(xdg_config_home?);
+    if !base.is_absolute() {
+        return None;
+    }
+    Some(base.join("heroic"))
+}
+
+/// Collect existing Heroic config directories, taking `$XDG_CONFIG_HOME` as an
+/// explicit parameter so it can be tested without mutating the environment.
+///
+/// A valid custom `$XDG_CONFIG_HOME/heroic` comes first, but `~/.config/heroic`
+/// is still scanned: Corkscrew and Heroic can run with different environments
+/// (e.g. the variable is exported only in a shell profile, while Heroic starts
+/// from the desktop or Game Mode), and dropping the default would then hide
+/// every Heroic game. Duplicate games resolve to the first dir, so the custom
+/// dir wins (see [`heroic_games_from_config_dirs`]).
+fn heroic_config_dirs_with_xdg(home: &Path, xdg_config_home: Option<&OsStr>) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    // Linux: standard install, custom XDG config home first
+    if let Some(custom) = xdg_heroic_config_dir(xdg_config_home) {
+        candidates.push(custom);
+    }
+    candidates.push(home.join(".config").join("heroic"));
+    // Linux: Flatpak install
+    candidates.push(
+        home.join(".var")
             .join("app")
             .join("com.heroicgameslauncher.hgl")
             .join("config")
-            .join("heroic");
-        if flatpak.is_dir() {
-            config_dirs.push(flatpak);
-        }
-        // macOS
-        let macos = home
-            .join("Library")
+            .join("heroic"),
+    );
+    // macOS
+    candidates.push(
+        home.join("Library")
             .join("Application Support")
-            .join("heroic");
-        if macos.is_dir() {
-            config_dirs.push(macos);
+            .join("heroic"),
+    );
+
+    let mut config_dirs: Vec<PathBuf> = Vec::new();
+    for dir in candidates {
+        if dir.is_dir() && !config_dirs.iter().any(|d| same_dir(d, &dir)) {
+            config_dirs.push(dir);
         }
     }
     config_dirs
 }
 
-/// Detect all Heroic games with enriched metadata.
-pub fn detect_heroic_games() -> Vec<HeroicGameInfo> {
+/// Parse Heroic games from config dirs in priority order. A game listed in more
+/// than one dir keeps the entry from the earliest dir (stable sort + dedup).
+fn heroic_games_from_config_dirs(config_dirs: &[PathBuf]) -> Vec<HeroicGameInfo> {
     let mut all_games = Vec::new();
 
-    for config_dir in find_heroic_config_dirs() {
-        let mut gog = parse_heroic_gog_games(&config_dir);
-        let mut epic = parse_heroic_epic_games(&config_dir);
-        let mut sideload = parse_heroic_sideloaded_games(&config_dir);
-        all_games.append(&mut gog);
-        all_games.append(&mut epic);
-        all_games.append(&mut sideload);
+    for config_dir in config_dirs {
+        all_games.append(&mut parse_heroic_gog_games(config_dir));
+        all_games.append(&mut parse_heroic_epic_games(config_dir));
+        all_games.append(&mut parse_heroic_sideloaded_games(config_dir));
     }
 
-    // Deduplicate by app_name
+    // Deduplicate by app_name; the stable sort keeps the earliest dir's entry.
     all_games.sort_by(|a, b| a.app_name.cmp(&b.app_name));
     all_games.dedup_by(|a, b| a.app_name == b.app_name);
+    all_games
+}
+
+/// Detect all Heroic games with enriched metadata.
+pub fn detect_heroic_games() -> Vec<HeroicGameInfo> {
+    let all_games = heroic_games_from_config_dirs(&find_heroic_config_dirs());
 
     log::info!(
         "Detected {} Heroic games ({} GOG, {} Epic, {} sideload)",
@@ -2686,5 +2723,127 @@ mod tests {
             bottles[0].path, default_pfx,
             "a secondary library listed only by the default root's vdf must not be preferred; mtime decides"
         );
+    }
+
+    #[test]
+    fn heroic_config_dirs_default_without_xdg() {
+        let home = tempfile::tempdir().unwrap();
+        let standard = home.path().join(".config").join("heroic");
+        let flatpak = home
+            .path()
+            .join(".var")
+            .join("app")
+            .join("com.heroicgameslauncher.hgl")
+            .join("config")
+            .join("heroic");
+        fs::create_dir_all(&standard).unwrap();
+        fs::create_dir_all(&flatpak).unwrap();
+
+        let dirs = heroic_config_dirs_with_xdg(home.path(), None);
+
+        assert_eq!(dirs, vec![standard, flatpak]);
+    }
+
+    #[test]
+    fn heroic_config_dirs_honors_absolute_xdg_config_home() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let xdg_heroic = xdg.path().join("heroic");
+        let standard = home.path().join(".config").join("heroic");
+        fs::create_dir_all(&xdg_heroic).unwrap();
+        fs::create_dir_all(&standard).unwrap();
+
+        let dirs = heroic_config_dirs_with_xdg(home.path(), Some(xdg.path().as_os_str()));
+
+        assert_eq!(dirs, vec![xdg_heroic, standard]);
+    }
+
+    fn write_heroic_gog(config_dir: &Path, games: &[(&str, &str)]) {
+        let gog = config_dir.join("gog_store");
+        fs::create_dir_all(&gog).unwrap();
+        let entries: Vec<String> = games
+            .iter()
+            .map(|(app, path)| {
+                format!(r#"{{"appName":"{app}","install_path":"{path}","platform":"windows"}}"#)
+            })
+            .collect();
+        fs::write(
+            gog.join("installed.json"),
+            format!(r#"{{"installed":[{}]}}"#, entries.join(",")),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn heroic_custom_xdg_wins_duplicates_and_default_games_stay_visible() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let xdg_heroic = xdg.path().join("heroic");
+        let standard = home.path().join(".config").join("heroic");
+        write_heroic_gog(&xdg_heroic, &[("shared", "/games/FromXdg")]);
+        write_heroic_gog(
+            &standard,
+            &[("shared", "/games/FromDefault"), ("default_only", "/games/DefaultOnly")],
+        );
+
+        let dirs = heroic_config_dirs_with_xdg(home.path(), Some(xdg.path().as_os_str()));
+        assert_eq!(dirs, vec![xdg_heroic, standard]);
+
+        let games = heroic_games_from_config_dirs(&dirs);
+        let by_name = |n: &str| games.iter().find(|g| g.app_name == n).cloned();
+        assert_eq!(games.len(), 2, "{games:?}");
+        assert_eq!(
+            by_name("shared").and_then(|g| g.install_path).as_deref(),
+            Some("/games/FromXdg")
+        );
+        assert!(by_name("default_only").is_some(), "default-only game hidden");
+    }
+
+    #[test]
+    fn heroic_config_dirs_ignores_empty_and_relative_xdg() {
+        assert_eq!(xdg_heroic_config_dir(Some(OsStr::new(""))), None);
+        assert_eq!(
+            xdg_heroic_config_dir(Some(OsStr::new("relative/config"))),
+            None
+        );
+        assert_eq!(xdg_heroic_config_dir(None), None);
+
+        let home = tempfile::tempdir().unwrap();
+        let standard = home.path().join(".config").join("heroic");
+        fs::create_dir_all(&standard).unwrap();
+
+        let no_xdg = heroic_config_dirs_with_xdg(home.path(), None);
+        let empty_xdg = heroic_config_dirs_with_xdg(home.path(), Some(OsStr::new("")));
+        let relative_xdg =
+            heroic_config_dirs_with_xdg(home.path(), Some(OsStr::new("relative/config")));
+
+        assert_eq!(empty_xdg, no_xdg);
+        assert_eq!(relative_xdg, no_xdg);
+    }
+
+    #[test]
+    fn heroic_config_dirs_xdg_equal_to_default_collapses() {
+        let home = tempfile::tempdir().unwrap();
+        let standard = home.path().join(".config").join("heroic");
+        fs::create_dir_all(&standard).unwrap();
+
+        let xdg = home.path().join(".config");
+        let dirs = heroic_config_dirs_with_xdg(home.path(), Some(xdg.as_os_str()));
+
+        assert_eq!(dirs, vec![standard]);
+    }
+
+    #[test]
+    fn heroic_missing_custom_xdg_dir_still_scans_default() {
+        let home = tempfile::tempdir().unwrap();
+        // `xdg` exists but `xdg/heroic` doesn't (Heroic never ran with it set).
+        let xdg = tempfile::tempdir().unwrap();
+        let standard = home.path().join(".config").join("heroic");
+        write_heroic_gog(&standard, &[("game1", "/games/One")]);
+
+        let dirs = heroic_config_dirs_with_xdg(home.path(), Some(xdg.path().as_os_str()));
+
+        assert_eq!(dirs, vec![standard]);
+        assert_eq!(heroic_games_from_config_dirs(&dirs).len(), 1);
     }
 }
