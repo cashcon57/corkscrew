@@ -458,7 +458,7 @@ fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
         {
             warn!(
                 "Skipping symlink entry in ZIP archive: {}",
-                entry.name()
+                String::from_utf8_lossy(raw_name)
             );
             continue;
         }
@@ -471,7 +471,8 @@ fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
         // UTF-8 first protects valid `café.txt`-style filenames from being
         // corrupted by an unconditional CP437 decode of any byte >= 0x80.
         let decoded_name = if raw_name.iter().all(|&b| b < 0x80) {
-            entry.name().to_string()
+            // ASCII is valid UTF-8, so this never substitutes characters.
+            String::from_utf8_lossy(raw_name).into_owned()
         } else {
             match std::str::from_utf8(raw_name) {
                 Ok(s) => s.to_string(),
@@ -613,7 +614,7 @@ fn extract_zip_with_progress(
         {
             warn!(
                 "Skipping symlink entry in ZIP archive: {}",
-                entry.name()
+                String::from_utf8_lossy(raw_name)
             );
             continue;
         }
@@ -626,7 +627,8 @@ fn extract_zip_with_progress(
         // UTF-8 first protects valid `café.txt`-style filenames from being
         // corrupted by an unconditional CP437 decode of any byte >= 0x80.
         let decoded_name = if raw_name.iter().all(|&b| b < 0x80) {
-            entry.name().to_string()
+            // ASCII is valid UTF-8, so this never substitutes characters.
+            String::from_utf8_lossy(raw_name).into_owned()
         } else {
             match std::str::from_utf8(raw_name) {
                 Ok(s) => s.to_string(),
