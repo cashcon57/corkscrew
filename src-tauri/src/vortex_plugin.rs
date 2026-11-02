@@ -149,9 +149,6 @@ impl GamePlugin for VortexGamePlugin {
 // Game detection within Wine bottles
 // ---------------------------------------------------------------------------
 
-/// Standard Steam library path components inside a Wine bottle.
-const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "common"];
-
 /// Try to find a game installation inside a Wine bottle.
 ///
 /// Uses the following search order:
@@ -163,7 +160,7 @@ fn find_game_in_bottle(bottle: &Bottle, reg: &VortexGameRegistration) -> Option<
     let steam_dir = reg.steam_dir_name.as_deref().unwrap_or(&reg.name);
 
     // 1. Default Steam library
-    if let Some(common) = bottle.find_path(STEAM_COMMON) {
+    if let Some(common) = crate::game_registry::default_steam_common(bottle) {
         if let Some(game_dir) = find_child_ci(&common, steam_dir) {
             if game_dir.is_dir() && verify_required_files(&game_dir, &reg.required_files) {
                 return Some(game_dir);
@@ -171,8 +168,12 @@ fn find_game_in_bottle(bottle: &Bottle, reg: &VortexGameRegistration) -> Option<
         }
     }
 
-    // 2. Additional Steam library folders from libraryfolders.vdf
-    if let Some(steam_dir_path) = bottle.find_path(&["Program Files (x86)", "Steam"]) {
+    // 2. Additional Steam library folders from libraryfolders.vdf. Never for
+    // Proton prefixes — their VDF maps onto host libraries holding other apps.
+    if let Some(steam_dir_path) = bottle
+        .find_path(&["Program Files (x86)", "Steam"])
+        .filter(|_| bottle.source != "Proton")
+    {
         if let Some(lib_paths) = parse_library_folders_vdf(&steam_dir_path) {
             for lib_path in lib_paths {
                 let common = lib_path.join("steamapps").join("common");

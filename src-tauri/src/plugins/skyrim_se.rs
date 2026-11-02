@@ -19,9 +19,6 @@ use crate::runtime::{GameRuntime, WineContext};
 /// Known executable names for Skyrim SE (checked case-insensitively).
 const EXECUTABLES: &[&str] = &["SkyrimSE.exe", "SkyrimSELauncher.exe"];
 
-/// Relative path components from `drive_c` to the default Steam library.
-const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "common"];
-
 /// The game's directory name inside a Steam library.
 const STEAM_GAME_DIR: &str = "Skyrim Special Edition";
 
@@ -242,7 +239,7 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
 
 /// Check the default Steam common directory.
 fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
-    let path = bottle.find_path(STEAM_COMMON)?;
+    let path = crate::game_registry::default_steam_common(bottle)?;
     let game_dir = find_child_case_insensitive(&path, STEAM_GAME_DIR)?;
     if game_dir.is_dir() {
         Some(game_dir)
@@ -700,5 +697,37 @@ mod tests {
             !detected.game_path.starts_with(&bottle.path),
             "game must live outside the prefix, on the host library"
         );
+    }
+
+    /// A Proton prefix owned by another app must not pick up Skyrim SE from
+    /// a host library mapped in at the default in-prefix Steam path.
+    #[cfg(unix)]
+    #[test]
+    fn detect_ignores_default_steam_path_in_proton_prefix_owned_by_other_app() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let other_steamapps = tmp.path().join("OtherLibrary").join("steamapps");
+        let game_dir = other_steamapps.join("common").join("Skyrim Special Edition");
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("SkyrimSE.exe"), b"fake").unwrap();
+
+        // Prefix owned by Fallout 4 (377160), no owner manifest for Skyrim.
+        let pfx = tmp
+            .path()
+            .join("SteamLibrary/steamapps/compatdata/377160/pfx");
+        let steam_dir = pfx.join("drive_c/Program Files (x86)/Steam");
+        fs::create_dir_all(&steam_dir).unwrap();
+        std::os::unix::fs::symlink(&other_steamapps, steam_dir.join("steamapps")).unwrap();
+
+        let mut bottle = Bottle {
+            name: "Proton 377160".into(),
+            path: pfx,
+            source: "Proton".to_string(),
+        };
+        assert!(SkyrimSEPlugin.detect_wine(&bottle).is_none());
+
+        // Control: same layout as a CrossOver bottle is detected.
+        bottle.source = "CrossOver".to_string();
+        assert!(SkyrimSEPlugin.detect_wine(&bottle).is_some());
     }
 }

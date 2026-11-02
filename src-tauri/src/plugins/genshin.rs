@@ -51,9 +51,6 @@ const EXECUTABLES: &[&str] = &["GenshinImpact.exe", "YuanShen.exe"];
 /// Steam App ID for Genshin Impact (global release).
 const STEAM_APP_ID: &str = "1517290";
 
-/// Relative path components from `drive_c` to the default Steam library.
-const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "common"];
-
 /// Steam game directory name. The actual executable lives one level deeper at
 /// `<this>/Genshin Impact game/`.
 const STEAM_GAME_DIR: &str = "Genshin Impact";
@@ -287,7 +284,7 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
 /// `Genshin Impact/Genshin Impact game/` layout; we descend into the inner
 /// directory if present.
 fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
-    let common = bottle.find_path(STEAM_COMMON)?;
+    let common = crate::game_registry::default_steam_common(bottle)?;
     let outer = find_child_case_insensitive(&common, STEAM_GAME_DIR)?;
     if !outer.is_dir() {
         return None;

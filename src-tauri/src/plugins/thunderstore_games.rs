@@ -21,8 +21,6 @@ use crate::bottles::Bottle;
 use crate::games::{DetectedGame, GamePlugin};
 use crate::runtime::{GameRuntime, WineContext};
 
-const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "common"];
-
 /// Static spec for one Thunderstore game. Adding a game = add a row here.
 pub struct ThunderstoreGameSpec {
     pub game_id: &'static str,
@@ -287,7 +285,7 @@ fn find_game_path(bottle: &Bottle, spec: &ThunderstoreGameSpec) -> Option<PathBu
 }
 
 fn check_steam_default(bottle: &Bottle, spec: &ThunderstoreGameSpec) -> Option<PathBuf> {
-    let common = bottle.find_path(STEAM_COMMON)?;
+    let common = crate::game_registry::default_steam_common(bottle)?;
     for name in spec.steam_dirs {
         if let Some(dir) = find_child_ci(&common, name) {
             if dir.is_dir() {

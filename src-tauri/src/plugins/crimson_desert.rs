@@ -32,8 +32,6 @@ use crate::runtime::{GameRuntime, WineContext};
 /// in related titles.
 const EXECUTABLES: &[&str] = &["CrimsonDesert.exe", "Crimson Desert.exe", "CD.exe"];
 
-const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "common"];
-
 const STEAM_GAME_DIRS: &[&str] = &["Crimson Desert"];
 
 const STEAM_APP_ID: &str = "3321460";
@@ -189,7 +187,7 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
 }
 
 fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
-    let common = bottle.find_path(STEAM_COMMON)?;
+    let common = crate::game_registry::default_steam_common(bottle)?;
     for name in STEAM_GAME_DIRS {
         if let Some(dir) = find_child_case_insensitive(&common, name) {
             if dir.is_dir() {

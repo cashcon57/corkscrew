@@ -50,9 +50,6 @@ const STEAM_APP_ID: &str = "1222670";
 /// Directory the executable lives in, relative to the game root.
 const EXE_RELATIVE_DIR: &[&str] = &["Game", "Bin"];
 
-/// Steam's `steamapps/common` location inside a bottle.
-const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "common"];
-
 /// Known directory names inside Steam's common folder.
 const STEAM_GAME_DIRS: &[&str] = &["The Sims 4"];
 
@@ -295,7 +292,7 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
 }
 
 fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
-    let common = bottle.find_path(STEAM_COMMON)?;
+    let common = crate::game_registry::default_steam_common(bottle)?;
     for name in STEAM_GAME_DIRS {
         if let Some(dir) = find_child_case_insensitive(&common, name) {
             if dir.is_dir() {
