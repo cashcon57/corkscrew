@@ -1074,6 +1074,17 @@ pub fn run() {
         .setup(move |app| {
             run_startup_recovery(&db_for_setup);
 
+            // The main window is declared with `create: false` and built
+            // here, after recovery: Tauri builds config windows *before* the
+            // setup hook, so the frontend could otherwise start invoking
+            // commands (pending-install banner, deploys) while recovery is
+            // still marking orphaned installs and replaying the journal.
+            if let Some(main_cfg) = app.config().app.windows.iter().find(|w| w.label == "main") {
+                tauri::WebviewWindowBuilder::from_config(app.handle(), main_cfg)?.build()?;
+            } else {
+                log::error!("No \"main\" window in tauri.conf.json; no window was created");
+            }
+
             // Repoint our nxm:// desktop entry if the AppImage moved/was
             // renamed since it was registered. Best-effort, off the main thread.
             // Skipped in debug builds so `cargo tauri dev` doesn't hijack the
