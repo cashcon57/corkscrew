@@ -242,6 +242,11 @@ fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
 /// resolves Windows-style VDF path strings against every `drive_X` directory
 /// present in the bottle, rather than assuming paths are under `drive_c`.
 fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
+    // Proton prefixes install the game on the host, not inside the prefix.
+    if let Some(dir) = crate::game_registry::find_proton_prefix_game(bottle, STEAM_GAME_DIR) {
+        return Some(dir);
+    }
+
     let library_paths = crate::game_registry::collect_steam_library_paths(bottle);
     for steamapps in library_paths {
         let common = steamapps.join("common");
