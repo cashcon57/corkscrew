@@ -7,7 +7,7 @@
   import { initTheme } from "$lib/theme";
   import { formatBytes } from "$lib/format";
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
+  import { listenForDeepLinks } from "$lib/deepLinks";
   import { getVersion } from "@tauri-apps/api/app";
   import { downloadFromNexus, installMod, getAllGames, getDownloadQueue, retryDownload, cancelDownload, clearFinishedDownloads, onDownloadQueueUpdate, listProfiles, listInstalledCollections, getConfig, setConfigValue, launchGame, getAllInterruptedInstalls, resumeCollectionInstall, abandonCollectionInstall, getCheckpointModNames, getPendingWabbajackInstalls, dismissWabbajackInstall, checkSkyrimVersion, getPinnedGameVersion, pinGameVersion, checkSteamStatus, addToSteam, fetchUpdate, installUpdate, chatCheckNewCrashes, listKnownUninstalledGames, getNativeMode, getNativeModeVisible } from "$lib/api";
   import { resumeInstallTracking } from "$lib/installService";
@@ -45,6 +45,7 @@
   let queueItems = $state<QueueItem[]>([]);
   let showQueue = $state(false);
   let queueUnlisten: (() => void) | null = null;
+  let deepLinkUnlisten: (() => void) | null = null;
 
   let activeDownloads = $derived(queueItems.filter(i => i.status === "downloading" || i.status === "pending").length);
   let failedDownloads = $derived(queueItems.filter(i => i.status === "failed").length);
@@ -366,14 +367,13 @@
     getDownloadQueue().then(items => queueItems = items).catch((err) => console.error('Failed to load download queue:', err));
     onDownloadQueueUpdate((items) => { queueItems = items; }).then(fn => queueUnlisten = fn).catch((err) => console.error('Failed to subscribe to download queue:', err));
 
-    // Listen for NXM deep-link URLs (e.g. nxm://skyrimspecialedition/mods/123/files/456?key=abc&expires=123)
-    onOpenUrl((urls) => {
-      for (const url of urls) {
-        if (url.startsWith("nxm://")) {
-          handleNxmLink(url);
-        }
+    // NXM deep-link URLs (e.g. nxm://skyrimspecialedition/mods/123/files/456?key=abc&expires=123),
+    // both the one Corkscrew was launched with (cold start) and later clicks.
+    listenForDeepLinks((url) => {
+      if (url.startsWith("nxm://")) {
+        return handleNxmLink(url);
       }
-    });
+    }).then(fn => deepLinkUnlisten = fn).catch((err) => console.error('Failed to subscribe to deep links:', err));
 
     // Close dropdown on click outside
     function handleClickOutside(e: MouseEvent) {
@@ -504,6 +504,7 @@
       window.removeEventListener('error', handleGlobalError);
       gamepad.stop();
       if (queueUnlisten) queueUnlisten();
+      if (deepLinkUnlisten) deepLinkUnlisten();
       destroyHashingListener();
     };
   });

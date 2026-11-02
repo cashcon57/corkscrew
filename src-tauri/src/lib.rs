@@ -363,6 +363,75 @@ fn kill_mlx_server() {
     log::info!("Killed MLX LM server if running");
 }
 
+/// Crash recovery for the GUI process. Runs at the start of the Tauri `setup`
+/// hook rather than before the builder: on Linux, the single-instance plugin
+/// exits a second process (e.g. one spawned by an nxm:// click while
+/// Corkscrew is already open) during plugin init, which happens before this
+/// hook. Running these earlier let that short-lived process kill the live
+/// instance's MLX server, mark its in-flight Wabbajack install failed, delete
+/// its extraction temp dirs, and replay a deploy journal it was writing.
+fn run_startup_recovery(db: &Arc<ModDatabase>) {
+    // Kill any leftover MLX server from a previous crash/dev restart
+    kill_mlx_server();
+
+    // Recover Dock if a previous session crashed while cursor fix was active
+    cursor_clamp::recover_dock_if_needed();
+
+    // Clean up orphaned Wabbajack installs from previous crash/forced quit
+    commands::cli::cleanup_orphaned_wj_installs(db);
+
+    // Clean up stale corkscrew_extract_* temp dirs from collection installs
+    commands::cli::cleanup_orphaned_temp_dirs();
+
+    // Replay any incomplete deployment journal entries (self-healing)
+    let healed = deploy_journal::replay_incomplete(db);
+    if !healed.is_empty() {
+        log::info!(
+            "Self-healed {} deployment(s) from interrupted operations: {:?}",
+            healed.len(),
+            healed
+        );
+    }
+}
+
+/// Single-instance plugin (Linux). A second launch forwards its argv to this
+/// process; with the `deep-link` feature the plugin first hands that argv to
+/// `tauri-plugin-deep-link`, which emits `deep-link://new-url` for an
+/// `nxm://` / `corkscrew://` URL. We then bring the existing window forward.
+#[cfg(target_os = "linux")]
+fn single_instance_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    let builder = tauri_plugin_single_instance::Builder::new().callback(|app, argv, _cwd| {
+        // argv may hold an nxm:// URL with a download key — don't log it.
+        log::info!(
+            "Another Corkscrew launch was redirected here ({} arg(s)); focusing main window",
+            argv.len()
+        );
+        focus_main_window(app);
+    });
+    // Debug builds use their own D-Bus name so `cargo tauri dev` can run
+    // alongside an installed release build.
+    #[cfg(debug_assertions)]
+    let builder = builder.dbus_id("com.cashconway.corkscrew.dev");
+    builder.build()
+}
+
+#[cfg(target_os = "linux")]
+fn focus_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let Some(window) = app.get_webview_window("main") else {
+        log::warn!("single-instance: main window not found; cannot focus it");
+        return;
+    };
+    if let Err(e) = window.unminimize() {
+        log::warn!("single-instance: failed to unminimize main window: {}", e);
+    }
+    if let Err(e) = window.show() {
+        log::warn!("single-instance: failed to show main window: {}", e);
+    }
+    if let Err(e) = window.set_focus() {
+        log::warn!("single-instance: failed to focus main window: {}", e);
+    }
+}
+
 /// Run startup health checks after self-healing.
 /// Logs results and emits an event if issues are found.
 fn run_startup_health_check(
@@ -457,8 +526,6 @@ pub fn run() {
         }
     }
 
-    // Kill any leftover MLX server from a previous crash/dev restart
-    kill_mlx_server();
     // Register game plugins (dedicated plugins first, then registry)
     plugins::skyrim_se::register();
     plugins::fallout4::register();
@@ -967,32 +1034,30 @@ pub fn run() {
         }
     }
 
-    // Recover Dock if a previous session crashed while cursor fix was active
-    cursor_clamp::recover_dock_if_needed();
-
-    // Clean up orphaned Wabbajack installs from previous crash/forced quit
-    commands::cli::cleanup_orphaned_wj_installs(&db);
-
-    // Clean up stale corkscrew_extract_* temp dirs from collection installs
-    commands::cli::cleanup_orphaned_temp_dirs();
-
-    // Replay any incomplete deployment journal entries (self-healing)
-    {
-        let healed = deploy_journal::replay_incomplete(&db);
-        if !healed.is_empty() {
-            log::info!(
-                "Self-healed {} deployment(s) from interrupted operations: {:?}",
-                healed.len(),
-                healed
-            );
-        }
-    }
+    // NOTE: crash recovery (orphaned WJ installs, temp dirs, deploy journal
+    // replay, ...) runs in the `setup` hook via `run_startup_recovery`, NOT
+    // here — see that function for why.
 
     // Clone db for setup closure access
     let db_for_setup = Arc::clone(&db);
 
     #[allow(unused_mut)]
-    let mut builder = tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    // Single-instance MUST be the first plugin. On Linux every nxm:// click
+    // execs `corkscrew <url>`; this hands the argv to the running instance
+    // over D-Bus (its `deep-link` feature feeds the URL to the deep-link
+    // plugin there, so `onOpenUrl` fires) and exits the new process during
+    // plugin init — before any window or the `setup` hook. macOS doesn't need
+    // it: LaunchServices keeps one instance per bundle and delivers URLs to it
+    // as Apple events.
+    #[cfg(target_os = "linux")]
+    {
+        builder = builder.plugin(single_instance_plugin());
+    }
+
+    #[allow(unused_mut)]
+    let mut builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_deep_link::init())
@@ -1007,6 +1072,15 @@ pub fn run() {
 
     let mut builder = builder
         .setup(move |app| {
+            run_startup_recovery(&db_for_setup);
+
+            // Repoint our nxm:// desktop entry if the AppImage moved/was
+            // renamed since it was registered. Best-effort, off the main thread.
+            // Skipped in debug builds so `cargo tauri dev` doesn't hijack the
+            // installed app's handler.
+            #[cfg(all(target_os = "linux", not(debug_assertions)))]
+            std::thread::spawn(nxm_handler::self_heal_handler_registration);
+
             // Register updater plugin in setup per Tauri docs (advanced pattern)
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;

@@ -661,7 +661,7 @@ pub fn create_desktop_entry(exe_path: &str) -> Result<PathBuf> {
     // Write .desktop file
     let desktop_dir = home.join(".local/share/applications");
     std::fs::create_dir_all(&desktop_dir)?;
-    let desktop_path = desktop_dir.join("corkscrew.desktop");
+    let desktop_path = desktop_dir.join(crate::nxm_handler::MAIN_DESKTOP_FILE_NAME);
 
     let icon_value = if icon_dest.exists() {
         icon_dest.to_string_lossy().into_owned()
@@ -669,17 +669,60 @@ pub fn create_desktop_entry(exe_path: &str) -> Result<PathBuf> {
         "corkscrew".to_string()
     };
 
-    // WEBKIT_DISABLE_DMABUF_RENDERER=1 is a workaround for NVIDIA-only DMA-BUF
-    // rendering bugs in WebKitGTK. Forcing it on AMD/Intel/Steam Deck (RDNA2)
-    // disables hardware accel needlessly. Probe /sys/class/drm for an NVIDIA
-    // device (PCI vendor 0x10de) and only set the env var when one is present.
-    let exec_line = if has_nvidia_gpu() {
-        format!("env WEBKIT_DISABLE_DMABUF_RENDERER=1 {exe_path} %u")
-    } else {
-        format!("{exe_path} %u")
-    };
+    let content = main_desktop_entry_content(exe_path, &icon_value, has_nvidia_gpu())?;
+    std::fs::write(&desktop_path, content)?;
 
-    let content = format!(
+    // Try to update desktop database (non-fatal if missing)
+    if let Err(e) = std::process::Command::new("update-desktop-database")
+        .arg(&desktop_dir)
+        .status()
+    {
+        log::debug!("update-desktop-database not run: {}", e);
+    }
+
+    // Register as NXM handler
+    match std::process::Command::new("xdg-mime")
+        .args([
+            "default",
+            crate::nxm_handler::MAIN_DESKTOP_FILE_NAME,
+            "x-scheme-handler/nxm",
+        ])
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => log::warn!("xdg-mime default for nxm:// exited with {}", status),
+        Err(e) => log::warn!("Failed to run xdg-mime to register nxm:// handler: {}", e),
+    }
+
+    log::info!("Created desktop entry at {:?}", desktop_path);
+
+    Ok(desktop_path)
+}
+
+/// Build the launcher `.desktop` entry for Corkscrew.
+///
+/// The executable is quoted per the Desktop Entry spec (AppImage paths often
+/// contain spaces) and followed by a lone `%u`: `tauri-plugin-deep-link`
+/// only treats argv as a deep link when it is exactly `[bin, url]`.
+///
+/// WEBKIT_DISABLE_DMABUF_RENDERER=1 is a workaround for NVIDIA-only DMA-BUF
+/// rendering bugs in WebKitGTK. Forcing it on AMD/Intel/Steam Deck (RDNA2)
+/// disables hardware accel needlessly, so it is only added when `nvidia`.
+pub(crate) fn main_desktop_entry_content(
+    exe_path: &str,
+    icon_value: &str,
+    nvidia: bool,
+) -> Result<String> {
+    let exe = crate::nxm_handler::quote_exec_arg(exe_path).map_err(anyhow::Error::msg)?;
+    if icon_value.chars().any(char::is_control) {
+        anyhow::bail!("Icon path contains a control character: {:?}", icon_value);
+    }
+    let exec_line = if nvidia {
+        format!("env WEBKIT_DISABLE_DMABUF_RENDERER=1 {exe} %u")
+    } else {
+        format!("{exe} %u")
+    };
+    Ok(format!(
         "[Desktop Entry]\n\
          Name=Corkscrew\n\
          Comment=Mod manager for CrossOver/Wine games on macOS and Linux\n\
@@ -690,23 +733,7 @@ pub fn create_desktop_entry(exe_path: &str) -> Result<PathBuf> {
          MimeType=x-scheme-handler/nxm;\n\
          Terminal=false\n\
          StartupWMClass=Corkscrew\n"
-    );
-
-    std::fs::write(&desktop_path, content)?;
-
-    // Try to update desktop database (non-fatal if missing)
-    let _ = std::process::Command::new("update-desktop-database")
-        .arg(desktop_dir.to_string_lossy().as_ref())
-        .status();
-
-    // Register as NXM handler
-    let _ = std::process::Command::new("xdg-mime")
-        .args(["default", "corkscrew.desktop", "x-scheme-handler/nxm"])
-        .status();
-
-    log::info!("Created desktop entry at {:?}", desktop_path);
-
-    Ok(desktop_path)
+    ))
 }
 
 /// Get the path to the current executable (resolves AppImage path if applicable).
@@ -1240,6 +1267,46 @@ pub fn unpatch_launch_options(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn exec_value(content: &str) -> &str {
+        content
+            .lines()
+            .find_map(|l| l.strip_prefix("Exec="))
+            .expect("Exec= line")
+    }
+
+    #[test]
+    fn main_desktop_entry_quotes_exe_with_spaces() {
+        let content = main_desktop_entry_content(
+            "/home/deck/My Apps/Corkscrew 0.14.AppImage",
+            "corkscrew",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            exec_value(&content),
+            "\"/home/deck/My Apps/Corkscrew 0.14.AppImage\" %u"
+        );
+        assert!(content.contains("MimeType=x-scheme-handler/nxm;"));
+        // Round-trips through the parser the registration check uses.
+        let args = crate::nxm_handler::parse_exec_args(exec_value(&content)).unwrap();
+        assert_eq!(args, vec!["/home/deck/My Apps/Corkscrew 0.14.AppImage", "%u"]);
+    }
+
+    #[test]
+    fn main_desktop_entry_nvidia_env_prefix_keeps_url_last() {
+        let content = main_desktop_entry_content("/opt/Corkscrew.AppImage", "corkscrew", true).unwrap();
+        assert_eq!(
+            exec_value(&content),
+            "env WEBKIT_DISABLE_DMABUF_RENDERER=1 \"/opt/Corkscrew.AppImage\" %u"
+        );
+    }
+
+    #[test]
+    fn main_desktop_entry_rejects_control_chars() {
+        assert!(main_desktop_entry_content("/a\nExec=evil", "corkscrew", false).is_err());
+        assert!(main_desktop_entry_content("/a", "icon\nExec=evil", false).is_err());
+    }
 
     #[cfg(target_os = "linux")]
     fn create_fake_steam_root(root: &Path) {
