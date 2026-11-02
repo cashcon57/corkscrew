@@ -254,7 +254,10 @@ pub async fn install() -> Result<String> {
             .by_index(i)
             .map_err(|e| DDError::Other(format!("ZIP entry error: {}", e)))?;
 
-        let name = file.name().to_string();
+        let name = file
+            .name()
+            .map_err(|e| DDError::Other(format!("ZIP entry name error: {}", e)))?
+            .into_owned();
         if name.ends_with('/') {
             continue; // skip directories
         }

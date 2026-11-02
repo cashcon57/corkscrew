@@ -253,7 +253,7 @@ fn list_zip_contents(archive_path: &Path) -> Result<ArchiveContents> {
 
     for i in 0..archive.len() {
         let entry = archive.by_index_raw(i)?;
-        let raw_path = entry.name().to_string();
+        let raw_path = entry.name()?.into_owned();
         let is_dir = entry.is_dir();
         let normalized = normalize_archive_path(&raw_path);
         let name = leaf_name(&normalized);
@@ -519,7 +519,7 @@ fn extract_file_from_zip(archive_path: &Path, internal_path: &str) -> Result<Vec
     // Fallback: case-insensitive scan
     let lower = normalized.to_lowercase();
     for i in 0..archive.len() {
-        let name = archive.by_index_raw(i)?.name().to_string();
+        let name = archive.by_index_raw(i)?.name()?.into_owned();
         if normalize_archive_path(&name).to_lowercase() == lower {
             let mut entry = archive.by_index(i)?;
             let mut buf = Vec::with_capacity(entry.size() as usize);
@@ -976,5 +976,61 @@ mod tests {
         let json = serde_json::to_string(&node).expect("should serialize");
         assert!(json.contains("\"name\":\"test\""));
         assert!(json.contains("\"children\":["));
+    }
+
+    // -- ZIP ----------------------------------------------------------------
+
+    fn write_test_zip(path: &Path) {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let mut w = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let opts = SimpleFileOptions::default();
+        w.add_directory("Meshes/", opts).unwrap();
+        w.start_file("Textures/Armor/Plate.DDS", opts).unwrap();
+        w.write_all(b"dds-bytes").unwrap();
+        w.start_file("Scripts/Caf\u{e9}.pex", opts).unwrap();
+        w.write_all(b"pex").unwrap();
+        w.finish().unwrap();
+    }
+
+    #[test]
+    fn test_list_zip_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("mod.zip");
+        write_test_zip(&zip_path);
+
+        let contents = list_zip_contents(&zip_path).unwrap();
+        assert_eq!(contents.archive_type, "zip");
+        assert_eq!(contents.total_files, 2);
+        assert_eq!(contents.total_size, 12);
+
+        let paths: Vec<&str> = contents.entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(paths.contains(&"Meshes"));
+        assert!(paths.contains(&"Textures/Armor/Plate.DDS"));
+        assert!(paths.contains(&"Scripts/Caf\u{e9}.pex"));
+        assert!(contents
+            .entries
+            .iter()
+            .any(|e| e.is_dir && e.path == "Meshes"));
+    }
+
+    #[test]
+    fn test_extract_file_from_zip_exact_and_case_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("mod.zip");
+        write_test_zip(&zip_path);
+
+        assert_eq!(
+            extract_file_from_zip(&zip_path, "Textures/Armor/Plate.DDS").unwrap(),
+            b"dds-bytes"
+        );
+        // Wine targets case-insensitive filesystems: a differently-cased,
+        // backslash-separated request must hit the fallback scan.
+        assert_eq!(
+            extract_file_from_zip(&zip_path, "textures\\armor\\plate.dds").unwrap(),
+            b"dds-bytes"
+        );
+        assert!(extract_file_from_zip(&zip_path, "missing.esp").is_err());
     }
 }
