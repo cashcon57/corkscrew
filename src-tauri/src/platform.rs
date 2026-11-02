@@ -82,43 +82,93 @@ fn detect_copy_method_impl(_src_dir: &Path, _dst_dir: &Path) -> FsCopyMethod {
 /// (btrfs or xfs) by reading `/proc/mounts`.
 #[cfg(target_os = "linux")]
 fn supports_reflink(dir: &Path) -> bool {
-    use std::io::BufRead;
-
     // Canonicalize the path so we can match against mount points.
     let canonical = match dir.canonicalize() {
         Ok(p) => p,
         Err(_) => return false,
     };
-    let dir_str = canonical.to_string_lossy();
 
-    let mounts = match fs::File::open("/proc/mounts") {
-        Ok(f) => f,
+    // Read raw bytes: mount points are arbitrary byte strings, and one
+    // non-UTF-8 entry must not hide every other mount.
+    let mounts = match fs::read("/proc/mounts") {
+        Ok(b) => b,
         Err(_) => return false,
     };
 
-    let mut best_mount = String::new();
-    let mut best_fs = String::new();
+    mounts_support_reflink(&canonical, &mounts)
+}
 
-    for line in io::BufReader::new(mounts).lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
+/// Pure helper for [`supports_reflink`]: given an absolute, canonical path and
+/// the contents of `/proc/mounts`, report whether the most specific mount
+/// containing the path is btrfs or xfs.
+///
+/// Mount points are matched with `Path::starts_with` (component-wise), so
+/// `/mnt/games2/x` never matches a `/mnt/games` mount. Among matches the mount
+/// with the most components wins; on ties the later line wins, since a later
+/// mount on the same point shadows earlier ones.
+#[cfg(all(unix, any(target_os = "linux", test)))]
+fn mounts_support_reflink(path: &Path, mounts: &[u8]) -> bool {
+    let mut best: Option<(usize, &[u8])> = None;
+
+    for line in mounts.split(|&b| b == b'\n') {
+        // Fields are space-separated; whitespace inside a field is
+        // octal-escaped by the kernel, so plain splitting is safe. Splitting
+        // is byte-level so non-UTF-8 lines are handled, not dropped.
+        let mut fields = line
+            .split(|b| b.is_ascii_whitespace())
+            .filter(|f| !f.is_empty());
+        let (Some(_device), Some(raw_mount), Some(fs_type)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
         };
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 3 {
+
+        let mount_point = decode_proc_mount_field(raw_mount);
+        if !mount_point.is_absolute() || !path.starts_with(&mount_point) {
             continue;
         }
-        let mount_point = parts[1];
-        let fs_type = parts[2];
 
-        // Find the longest mount point that is a prefix of our path.
-        if dir_str.starts_with(mount_point) && mount_point.len() > best_mount.len() {
-            best_mount = mount_point.to_string();
-            best_fs = fs_type.to_string();
+        let depth = mount_point.components().count();
+        if best.map_or(true, |(best_depth, _)| depth >= best_depth) {
+            best = Some((depth, fs_type));
         }
     }
 
-    matches!(best_fs.as_str(), "btrfs" | "xfs")
+    matches!(best, Some((_, b"btrfs" | b"xfs")))
+}
+
+/// Decode the octal escapes (`\040` space, `\011` tab, `\012` newline,
+/// `\134` backslash) the kernel applies to `/proc/mounts` fields.
+///
+/// Only well-formed `\ooo` sequences that fit in a byte are decoded; any
+/// other backslash is kept literally. Decoding happens at the byte level so
+/// non-UTF-8 mount points round-trip correctly.
+#[cfg(all(unix, any(target_os = "linux", test)))]
+fn decode_proc_mount_field(bytes: &[u8]) -> std::path::PathBuf {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 3 < bytes.len() {
+            let digits = &bytes[i + 1..i + 4];
+            if digits.iter().all(|d| (b'0'..=b'7').contains(d)) {
+                let value = digits
+                    .iter()
+                    .fold(0u32, |acc, d| acc * 8 + u32::from(d - b'0'));
+                if let Ok(byte) = u8::try_from(value) {
+                    out.push(byte);
+                    i += 4;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+
+    OsString::from_vec(out).into()
 }
 
 // ---------------------------------------------------------------------------
@@ -378,6 +428,109 @@ fn try_reflink(_src: &Path, _dst: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    const SAMPLE_MOUNTS: &[u8] = b"\
+/dev/nvme0n1p2 / ext4 rw,relatime 0 0
+proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+/dev/sdb1 /mnt/games btrfs rw,relatime,ssd 0 0
+/dev/sdc1 /mnt/games2 ext4 rw,relatime 0 0
+/dev/sdd1 /mnt/games/Steam\\040Library xfs rw,relatime 0 0
+/dev/sde1 /mnt/games/Steam\\040Library/scratch ext4 rw,relatime 0 0
+";
+
+    #[cfg(unix)]
+    #[test]
+    fn reflink_mounts_respect_component_boundaries() {
+        // /mnt/games (btrfs) must not match a path under sibling /mnt/games2 (ext4).
+        assert!(!mounts_support_reflink(
+            Path::new("/mnt/games2/mods"),
+            SAMPLE_MOUNTS
+        ));
+        assert!(mounts_support_reflink(
+            Path::new("/mnt/games/mods"),
+            SAMPLE_MOUNTS
+        ));
+        // Exact mount point matches itself.
+        assert!(mounts_support_reflink(Path::new("/mnt/games"), SAMPLE_MOUNTS));
+        // Prefix-without-boundary of a btrfs mount falls back to root ext4.
+        let only_btrfs = b"/dev/sda1 / ext4 rw 0 0\n/dev/sdb1 /mnt/games btrfs rw 0 0\n";
+        assert!(!mounts_support_reflink(
+            Path::new("/mnt/games2/mods"),
+            only_btrfs
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reflink_mounts_decode_escaped_spaces() {
+        assert!(mounts_support_reflink(
+            Path::new("/mnt/games/Steam Library/steamapps"),
+            SAMPLE_MOUNTS
+        ));
+        // Literal "\040" in the path is not the same mount.
+        let only_escaped = b"/dev/sda1 / ext4 rw 0 0\n/dev/sdb1 /data\\040disk xfs rw 0 0\n";
+        assert!(mounts_support_reflink(Path::new("/data disk/x"), only_escaped));
+        assert!(!mounts_support_reflink(
+            Path::new("/data\\040disk/x"),
+            only_escaped
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reflink_mounts_pick_most_specific_mount() {
+        // Nested ext4 mount inside an xfs mount inside a btrfs mount.
+        assert!(!mounts_support_reflink(
+            Path::new("/mnt/games/Steam Library/scratch/tmp"),
+            SAMPLE_MOUNTS
+        ));
+        // Root-only fallback.
+        assert!(!mounts_support_reflink(Path::new("/home/deck"), SAMPLE_MOUNTS));
+        // Later mount on the same point shadows the earlier one.
+        let overmount = b"/dev/sda1 / ext4 rw 0 0\n/dev/sdb1 /mnt btrfs rw 0 0\n/dev/sdc1 /mnt ext4 rw 0 0\n";
+        assert!(!mounts_support_reflink(Path::new("/mnt/x"), overmount));
+        // Garbage / short lines are ignored; no match means no reflink.
+        assert!(!mounts_support_reflink(Path::new("/x"), b"garbage\n\n"));
+        // Equal-depth tie: the later entry wins in either order.
+        let undermount = b"/dev/sda1 / ext4 rw 0 0\n/dev/sdc1 /mnt ext4 rw 0 0\n/dev/sdb1 /mnt btrfs rw 0 0\n";
+        assert!(mounts_support_reflink(Path::new("/mnt/x"), undermount));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reflink_mounts_tolerate_unrelated_non_utf8_lines() {
+        // A raw 0xff byte in an unrelated mount point must not suppress
+        // matches on other lines.
+        let mounts = b"/dev/sda1 / ext4 rw 0 0\n\
+/dev/sdx1 /media/\xffbad vfat rw 0 0\n\
+/dev/sdb1 /mnt/games btrfs rw 0 0\n\
+/dev/sdc1 /mnt/fast xfs rw 0 0\n";
+        assert!(mounts_support_reflink(Path::new("/mnt/games/mods"), mounts));
+        assert!(mounts_support_reflink(Path::new("/mnt/fast/x"), mounts));
+        assert!(!mounts_support_reflink(Path::new("/home/deck"), mounts));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn decode_proc_mount_field_handles_escapes() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::PathBuf;
+        assert_eq!(
+            decode_proc_mount_field(b"/a\\040b\\011c\\134d"),
+            PathBuf::from("/a b\tc\\d")
+        );
+        // Malformed or out-of-range escapes are kept literally.
+        assert_eq!(decode_proc_mount_field(b"/a\\04"), PathBuf::from("/a\\04"));
+        assert_eq!(decode_proc_mount_field(b"/a\\9xy"), PathBuf::from("/a\\9xy"));
+        assert_eq!(decode_proc_mount_field(b"/a\\777"), PathBuf::from("/a\\777"));
+        assert_eq!(decode_proc_mount_field(b"/a\\"), PathBuf::from("/a\\"));
+        // Non-UTF-8 bytes round-trip, including alongside escapes.
+        assert_eq!(
+            decode_proc_mount_field(b"/m\xff\\040x").as_os_str().as_bytes(),
+            b"/m\xff x"
+        );
+    }
 
     #[test]
     fn fast_hash_matches_known_sha256() {
