@@ -409,7 +409,16 @@ fn platform_search_locations_with_xdg(
         }
     }
 
-    locations
+    // The hard-coded defaults include both ~/.local/share/Steam and its usual
+    // ~/.steam/steam symlink, so the same compatdata (or any other dir) can
+    // appear twice; scan each real directory once, keeping the first entry.
+    let mut deduped: Vec<SearchLocation> = Vec::with_capacity(locations.len());
+    for location in locations {
+        if !deduped.iter().any(|d| same_dir(&d.path, &location.path)) {
+            deduped.push(location);
+        }
+    }
+    deduped
 }
 
 /// Hard-coded Linux scan locations under an (already normalized) `home`:
