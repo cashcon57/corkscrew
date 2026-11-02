@@ -534,8 +534,12 @@ fn variant_priority(v: &ProtonVariant) -> u32 {
 }
 
 /// Steam roots relative to `$HOME`, covering native, Flatpak and Snap installs.
-const HOME_STEAM_ROOTS: [&str; 5] = [
+/// `.steam/steam` and `.steam/root` are the native client's symlinks; on most
+/// systems they alias `.local/share/Steam`, which callers collapse via
+/// canonicalization.
+const HOME_STEAM_ROOTS: [&str; 6] = [
     ".local/share/Steam",
+    ".steam/steam",
     ".steam/root",
     ".var/app/com.valvesoftware.Steam/data/Steam",
     ".var/app/com.valvesoftware.Steam/.local/share/Steam",
@@ -573,7 +577,7 @@ pub(crate) fn xdg_steam_root(xdg_data_home: Option<&OsStr>) -> Option<PathBuf> {
 
 /// All candidate Steam roots. Callers canonicalize/dedup, so a custom
 /// `$XDG_DATA_HOME` equal to the default collapses onto `~/.local/share/Steam`.
-fn steam_roots(home: &Path, xdg_data_home: Option<&OsStr>) -> Vec<PathBuf> {
+pub(crate) fn steam_roots(home: &Path, xdg_data_home: Option<&OsStr>) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = HOME_STEAM_ROOTS.iter().map(|r| home.join(r)).collect();
     roots.extend(xdg_steam_root(xdg_data_home));
     roots
