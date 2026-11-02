@@ -359,6 +359,28 @@ fn platform_search_locations_with_xdg(
                 .join("heroic")
                 .join("Prefixes"),
         },
+        // Heroic's default per-game prefixes are nested one level deeper, at
+        // `Prefixes/default/<Game Title>` (`defaultWinePrefix` +
+        // title), so they're invisible to the flat `Prefixes/*` scan above.
+        SearchLocation {
+            source: "Heroic",
+            path: home
+                .join("Games")
+                .join("Heroic")
+                .join("Prefixes")
+                .join("default"),
+        },
+        SearchLocation {
+            source: "Heroic",
+            path: home
+                .join(".var")
+                .join("app")
+                .join("com.heroicgameslauncher.hgl")
+                .join("data")
+                .join("heroic")
+                .join("Prefixes")
+                .join("default"),
+        },
         // Lutris
         SearchLocation {
             source: "Lutris",
@@ -1340,6 +1362,61 @@ mod tests {
         assert_eq!(bottles[1].name, "NativeGame");
         assert_eq!(bottles[1].path, native);
         assert_eq!(bottles[1].source, "Bottles");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn heroic_default_nested_prefixes_are_discovered() {
+        let home = tempfile::tempdir().unwrap();
+        let native_root = home.path().join("Games/Heroic/Prefixes");
+        let flatpak_root = home
+            .path()
+            .join(".var/app/com.heroicgameslauncher.hgl/data/heroic/Prefixes");
+        // Heroic's default layout: Prefixes/default/<Game Title>/drive_c
+        let native = create_fake_bottle(&native_root.join("default"), "Cyberpunk 2077");
+        let flatpak = create_fake_bottle(&flatpak_root.join("default"), "Fallout New Vegas");
+        // A custom flat prefix still works alongside the nested layout.
+        let flat = create_fake_bottle(&native_root, "Skyrim");
+
+        let mut bottles: Vec<Bottle> = collect_fixture_bottles(home.path())
+            .into_iter()
+            .filter(|b| b.source == "Heroic")
+            .collect();
+        bottles.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let found: Vec<(&str, &Path)> = bottles
+            .iter()
+            .map(|b| (b.name.as_str(), b.path.as_path()))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                ("Cyberpunk 2077", native.as_path()),
+                ("Fallout New Vegas", flatpak.as_path()),
+                ("Skyrim", flat.as_path()),
+            ]
+        );
+    }
+
+    /// An old-style shared prefix at `Prefixes/default` (itself containing
+    /// `drive_c`) is still detected once, and its Wine internals are not
+    /// mistaken for nested prefixes.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn heroic_shared_default_prefix_is_not_double_counted() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("Games/Heroic/Prefixes");
+        let shared = create_fake_bottle(&root, "default");
+        fs::create_dir_all(shared.join("dosdevices")).unwrap();
+
+        let bottles: Vec<Bottle> = collect_fixture_bottles(home.path())
+            .into_iter()
+            .filter(|b| b.source == "Heroic")
+            .collect();
+
+        assert_eq!(bottles.len(), 1);
+        assert_eq!(bottles[0].name, "default");
+        assert_eq!(bottles[0].path, shared);
     }
 
     /// Create `compatdata/{app_id}/pfx/drive_c` plus an appmanifest under
