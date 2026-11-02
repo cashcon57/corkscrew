@@ -15,10 +15,12 @@ use crate::oauth;
 use crate::wabbajack_directives::DirectiveProcessor;
 use crate::wabbajack_downloader::{verify_xxhash64_async, WjDownloader};
 use crate::wabbajack_types::*;
+use futures::FutureExt;
 
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Read;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -748,21 +750,32 @@ fn log_phase_metrics(app: &AppHandle, phase: &str, start_time: Instant) {
 /// Pipeline steps:
 /// 1. Parse the .wabbajack file
 /// 2. Run pre-flight checks
-/// 3. Create a DB record for this install
+/// 3. (The DB record is created by the caller and passed in as `install_id`)
 /// 4. Download phase (multi-source: Nexus, HTTP, MediaFire, Mega, Google Drive, WJ CDN)
 /// 5. Extraction phase (extract each archive to temp dirs)
 /// 6. Directive processing phase (BSDiff, CreateBSA/BA2, DDS transform, MergedPatch, inline)
 /// 7. Deploy phase (hardlink-first with copy fallback)
-/// 8. Update DB record to completed
+/// 8. Update DB record to completed, emit `InstallCompleted`
 /// 9. Return result
 ///
-/// Checks the `cancel_token` at the start of each major loop iteration.
-/// If cancelled, updates DB to cancelled, emits InstallCancelled, and
-/// returns `WjInstallError::Cancelled`.
+/// `install_id` is the `wabbajack_installs` row the caller created (see
+/// [`install_wabbajack_modlist_cmd`]). This function never creates a row of
+/// its own: every status/progress write goes to `install_id`, so the id the
+/// UI holds always reflects the real install.
+///
+/// Terminal-state contract: on success this function marks the row
+/// `completed` and emits `InstallCompleted`. On any error it returns
+/// `Err` WITHOUT touching the row's terminal status or emitting
+/// `InstallFailed`/`InstallCancelled` — the caller does both exactly once via
+/// [`finalize_failed_wj_install`].
+///
+/// Checks the `cancel_token` at the start of each major loop iteration and
+/// returns `WjInstallError::Cancelled` when it is set.
 #[allow(clippy::too_many_arguments)]
 pub async fn install_wabbajack_modlist(
     app: &AppHandle,
     db: &Arc<ModDatabase>,
+    install_id: i64,
     wabbajack_path: &Path,
     game_id: &str,
     bottle_name: &str,
@@ -844,29 +857,7 @@ pub async fn install_wabbajack_modlist(
         return Err(WjInstallError::Cancelled);
     }
 
-    // -----------------------------------------------------------------------
-    // Step 3: Create DB record
-    // -----------------------------------------------------------------------
-    let install_id = db
-        .create_wj_install(
-            &modlist.name,
-            &modlist.version,
-            modlist.game_type,
-            &install_dir.to_string_lossy(),
-            total_archives,
-            total_directives,
-        )
-        .map_err(|e| WjInstallError::Database(e.to_string()))?;
-
-    log::info!("Created wabbajack_installs record: id={}", install_id);
-
-    // Helper: update DB status on failure/cancel
-    let _mark_failed = |db: &ModDatabase, id: i64, err: &str| {
-        let _ = db.update_wj_install_status(id, "failed", Some(err));
-    };
-    let mark_cancelled = |db: &ModDatabase, id: i64| {
-        let _ = db.update_wj_install_status(id, "cancelled", None);
-    };
+    log::info!("Using wabbajack_installs record: id={}", install_id);
 
     // -----------------------------------------------------------------------
     // Steps 4+5: Combined download + extraction phase
@@ -1629,14 +1620,7 @@ pub async fn install_wabbajack_modlist(
             total_archives,
             summarize_failures(&failure_list),
         );
-        db.update_wj_install_status(install_id, "failed", Some(&reason))
-            .map_err(|e| WjInstallError::Database(e.to_string()))?;
-        emit_progress(
-            app,
-            &WjInstallProgressEvent::InstallFailed {
-                error: reason.clone(),
-            },
-        );
+        // The caller marks the row failed and emits InstallFailed.
         return Err(WjInstallError::Download(reason));
     }
 
@@ -1662,8 +1646,6 @@ pub async fn install_wabbajack_modlist(
 
     // Check cancellation
     if is_cancelled(&cancel_token) {
-        mark_cancelled(db, install_id);
-        emit_progress(app, &WjInstallProgressEvent::InstallCancelled);
         return Err(WjInstallError::Cancelled);
     }
 
@@ -1783,8 +1765,6 @@ pub async fn install_wabbajack_modlist(
 
     // Check cancellation
     if is_cancelled(&cancel_token) {
-        mark_cancelled(db, install_id);
-        emit_progress(app, &WjInstallProgressEvent::InstallCancelled);
         return Err(WjInstallError::Cancelled);
     }
 
@@ -1892,13 +1872,8 @@ pub async fn install_wabbajack_modlist(
             Err(e) => {
                 // Clean up orphaned mod record (deploy_mod_atomic already rolled back files)
                 let _ = db.remove_mod(mod_id);
-                let _ = db.update_wj_install_status(
-                    install_id,
-                    "failed",
-                    Some(&format!("Deployment failed (rolled back): {}", e)),
-                );
                 return Err(WjInstallError::Deployment(format!(
-                    "deploy_mod_atomic for modlist '{}' ({} files): {}",
+                    "deploy_mod_atomic for modlist '{}' ({} files, rolled back): {}",
                     modlist.name,
                     deploy_files.len(),
                     e
@@ -1984,6 +1959,70 @@ pub async fn install_wabbajack_modlist(
 // Tauri commands
 // ---------------------------------------------------------------------------
 
+/// Record a failed or cancelled install on its row and return the single
+/// terminal event to emit for it.
+///
+/// This is the only place a WJ install row becomes `failed`/`cancelled` on
+/// the error path: [`install_wabbajack_modlist`] returns its error without
+/// writing a terminal status or emitting `InstallFailed`/`InstallCancelled`,
+/// so each install produces exactly one terminal event and the row the UI
+/// holds never stays `pending`/`downloading`/`processing` after the worker
+/// has finished.
+fn finalize_failed_wj_install(
+    db: &ModDatabase,
+    install_id: i64,
+    err: &WjInstallError,
+) -> WjInstallProgressEvent {
+    let (status, message, event) = match err {
+        WjInstallError::Cancelled => ("cancelled", None, WjInstallProgressEvent::InstallCancelled),
+        other => {
+            let error = other.to_string();
+            (
+                "failed",
+                Some(error.clone()),
+                WjInstallProgressEvent::InstallFailed { error },
+            )
+        }
+    };
+    if let Err(db_err) = db.update_wj_install_status(install_id, status, message.as_deref()) {
+        log::error!(
+            "Failed to mark wabbajack install {} {}: {}",
+            install_id,
+            status,
+            db_err
+        );
+    }
+    event
+}
+
+/// Await the install worker, converting a panic into `WjInstallError::Other`
+/// so the caller can still finalize the row and emit `InstallFailed`.
+async fn catch_worker_panic<F>(worker: F) -> Result<WjInstallResult, WjInstallError>
+where
+    F: std::future::Future<Output = Result<WjInstallResult, WjInstallError>>,
+{
+    AssertUnwindSafe(worker)
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|panic| {
+            Err(WjInstallError::Other(format!(
+                "Install worker panicked: {}",
+                panic_message(panic.as_ref())
+            )))
+        })
+}
+
+/// Best-effort text of a caught panic payload.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
 /// Tauri command: Start a Wabbajack modlist installation.
 ///
 /// Spawns the installation in a background tokio task and returns the
@@ -2045,37 +2084,39 @@ pub(crate) async fn install_wabbajack_modlist_cmd(
     let cancel_clone = cancel_token;
     tokio::spawn(async move {
         let _deploy_guard = deploy_guard;
-        let result = install_wabbajack_modlist(
+        // Catch a panic in the worker so the row still reaches a terminal
+        // state and the UI gets an InstallFailed event instead of a progress
+        // screen that never finishes. (The DeployGuard is RAII either way.)
+        let result = catch_worker_panic(install_wabbajack_modlist(
             &app_clone,
             &db,
+            install_id,
             &wj_path,
             &game_id,
             &bottle_name,
             &inst_dir,
             &dl_dir,
             cancel_clone,
-        )
+        ))
         .await;
 
         match result {
             Ok(res) => {
+                // The worker already marked the row completed and emitted
+                // InstallCompleted.
                 log::info!(
                     "Wabbajack install {} completed successfully",
                     res.install_id
                 );
             }
-            Err(WjInstallError::Cancelled) => {
-                log::info!("Wabbajack install {} was cancelled", install_id);
-                emit_progress(&app_clone, &WjInstallProgressEvent::InstallCancelled);
-            }
             Err(e) => {
-                log::error!("Wabbajack install {} failed: {}", install_id, e);
-                emit_progress(
-                    &app_clone,
-                    &WjInstallProgressEvent::InstallFailed {
-                        error: e.to_string(),
-                    },
-                );
+                if matches!(e, WjInstallError::Cancelled) {
+                    log::info!("Wabbajack install {} was cancelled", install_id);
+                } else {
+                    log::error!("Wabbajack install {} failed: {}", install_id, e);
+                }
+                let event = finalize_failed_wj_install(&db, install_id, &e);
+                emit_progress(&app_clone, &event);
             }
         }
 
@@ -2206,6 +2247,181 @@ pub(crate) async fn get_wabbajack_install_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- Single install row lifecycle ------------------------------------
+    //
+    // `install_wabbajack_modlist_cmd` creates exactly one row and hands its
+    // id to the worker. These tests drive that row through the same writes
+    // the command + worker perform, and assert it is the only row and that
+    // it ends in the right terminal state.
+
+    const MODLIST: &str = "Test Modlist";
+
+    fn wj_test_db() -> (ModDatabase, tempfile::TempDir) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = ModDatabase::new(&tmp.path().join("corkscrew.db")).unwrap();
+        (db, tmp)
+    }
+
+    /// What `install_wabbajack_modlist_cmd` does before spawning the worker.
+    fn command_creates_row(db: &ModDatabase) -> i64 {
+        db.create_wj_install(MODLIST, "1.0", 1, "/install", 3, 5).unwrap()
+    }
+
+    /// The non-terminal writes the worker makes, all against `install_id`.
+    fn worker_progresses(db: &ModDatabase, install_id: i64) {
+        db.update_wj_install_status(install_id, "downloading", None).unwrap();
+        db.update_wj_install_archive_progress(install_id, 3).unwrap();
+        db.update_wj_install_status(install_id, "processing", None).unwrap();
+        db.update_wj_install_directive_progress(install_id, 5).unwrap();
+        db.update_wj_install_status(install_id, "deploying", None).unwrap();
+    }
+
+    fn status_of(db: &ModDatabase, id: i64) -> (String, Option<String>) {
+        let (status, _, _, _, _, message) = db.get_wj_install_status(id).unwrap().unwrap();
+        (status, message)
+    }
+
+    fn pending_ids_for_modlist(db: &ModDatabase) -> Vec<i64> {
+        db.list_pending_wj_installs()
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.1 == MODLIST)
+            .map(|row| row.0)
+            .collect()
+    }
+
+    #[test]
+    fn successful_install_leaves_one_completed_row() {
+        let (db, _tmp) = wj_test_db();
+        let id = command_creates_row(&db);
+        worker_progresses(&db, id);
+        db.update_wj_install_status(id, "completed", None).unwrap();
+
+        assert_eq!(db.count_wj_installs_for_modlist(MODLIST).unwrap(), 1);
+        assert_eq!(status_of(&db, id), ("completed".to_string(), None));
+        assert!(pending_ids_for_modlist(&db).is_empty());
+        assert!(db.get_stale_wj_installs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_install_leaves_one_failed_row_and_one_failed_event() {
+        let (db, _tmp) = wj_test_db();
+        let id = command_creates_row(&db);
+        worker_progresses(&db, id);
+
+        let err = WjInstallError::Download("All 3 archives failed".to_string());
+        let event = finalize_failed_wj_install(&db, id, &err);
+
+        match event {
+            WjInstallProgressEvent::InstallFailed { error } => {
+                assert_eq!(error, err.to_string())
+            }
+            other => panic!("expected InstallFailed, got {other:?}"),
+        }
+        assert_eq!(db.count_wj_installs_for_modlist(MODLIST).unwrap(), 1);
+        let (status, message) = status_of(&db, id);
+        assert_eq!(status, "failed");
+        assert!(message.unwrap().contains("All 3 archives failed"));
+        // Shown once in the resume banner, and no longer an "active" orphan.
+        assert_eq!(pending_ids_for_modlist(&db), vec![id]);
+        assert!(db.get_stale_wj_installs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn database_error_mid_install_does_not_leave_row_active() {
+        let (db, _tmp) = wj_test_db();
+        let id = command_creates_row(&db);
+        db.update_wj_install_status(id, "processing", None).unwrap();
+
+        finalize_failed_wj_install(&db, id, &WjInstallError::Database("locked".to_string()));
+
+        assert_eq!(status_of(&db, id).0, "failed");
+        assert!(db.get_stale_wj_installs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn preflight_failure_marks_pending_row_failed() {
+        let (db, _tmp) = wj_test_db();
+        let id = command_creates_row(&db);
+
+        let err = WjInstallError::PreFlight("Not enough disk space".to_string());
+        finalize_failed_wj_install(&db, id, &err);
+
+        let (status, message) = status_of(&db, id);
+        assert_eq!(status, "failed");
+        assert!(message.unwrap().contains("Not enough disk space"));
+        assert_eq!(db.count_wj_installs_for_modlist(MODLIST).unwrap(), 1);
+    }
+
+    #[test]
+    fn cancelled_install_leaves_one_cancelled_row_and_one_cancel_event() {
+        let (db, _tmp) = wj_test_db();
+        let id = command_creates_row(&db);
+        db.update_wj_install_status(id, "downloading", None).unwrap();
+
+        let event = finalize_failed_wj_install(&db, id, &WjInstallError::Cancelled);
+
+        assert!(matches!(event, WjInstallProgressEvent::InstallCancelled));
+        assert_eq!(db.count_wj_installs_for_modlist(MODLIST).unwrap(), 1);
+        assert_eq!(status_of(&db, id), ("cancelled".to_string(), None));
+        assert!(pending_ids_for_modlist(&db).is_empty());
+        assert!(db.get_stale_wj_installs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pending_installs_lists_one_entry_per_running_modlist() {
+        let (db, _tmp) = wj_test_db();
+        let id = command_creates_row(&db);
+        db.update_wj_install_status(id, "downloading", None).unwrap();
+
+        assert_eq!(pending_ids_for_modlist(&db), vec![id]);
+    }
+
+    #[test]
+    fn retry_after_failure_still_lists_one_pending_entry() {
+        let (db, _tmp) = wj_test_db();
+        let first = command_creates_row(&db);
+        finalize_failed_wj_install(&db, first, &WjInstallError::Other("boom".to_string()));
+
+        // User retries: the command creates a fresh row, superseding the old one.
+        let second = command_creates_row(&db);
+        db.update_wj_install_status(second, "downloading", None).unwrap();
+
+        assert_eq!(pending_ids_for_modlist(&db), vec![second]);
+        assert_eq!(status_of(&db, first).0, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn worker_panic_becomes_failed_row() {
+        let (db, _tmp) = wj_test_db();
+        let id = command_creates_row(&db);
+        db.update_wj_install_status(id, "processing", None).unwrap();
+
+        let result = catch_worker_panic(async {
+            if id > 0 {
+                panic!("directive blew up");
+            }
+            Err(WjInstallError::Cancelled)
+        })
+        .await;
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("directive blew up"), "{err}");
+
+        let event = finalize_failed_wj_install(&db, id, &err);
+        assert!(matches!(event, WjInstallProgressEvent::InstallFailed { .. }));
+        let (status, message) = status_of(&db, id);
+        assert_eq!(status, "failed");
+        assert!(message.unwrap().contains("panicked"));
+    }
+
+    #[test]
+    fn panic_message_handles_str_and_string_payloads() {
+        let p = std::panic::catch_unwind(|| panic!("static")).unwrap_err();
+        assert_eq!(panic_message(p.as_ref()), "static");
+        let p = std::panic::catch_unwind(|| panic!("{}", String::from("owned"))).unwrap_err();
+        assert_eq!(panic_message(p.as_ref()), "owned");
+    }
 
     #[test]
     fn test_get_available_disk_space() {
