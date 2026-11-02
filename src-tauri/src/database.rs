@@ -2457,6 +2457,17 @@ impl ModDatabase {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Number of `wabbajack_installs` rows (any status) for a modlist.
+    #[cfg(test)]
+    pub(crate) fn count_wj_installs_for_modlist(&self, modlist_name: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM wabbajack_installs WHERE modlist_name = ?1",
+            params![modlist_name],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Update the status of a Wabbajack install.
     pub fn update_wj_install_status(
         &self,
