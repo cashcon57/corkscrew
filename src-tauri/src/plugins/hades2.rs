@@ -24,6 +24,11 @@ use crate::runtime::{GameRuntime, WineContext};
 /// Known executable names for Hades II (case-insensitive).
 const EXECUTABLES: &[&str] = &["Hades2.exe", "HadesII.exe"];
 
+/// Subdirectories that hold the executable, in preference order, when it is
+/// not at the game root. The Steam build ships `Ship/Hades2.exe` plus a
+/// duplicate `Release/` build and has no executable at the root (issue #193).
+const EXE_SUBDIRS: &[&str] = &["Ship", "Release"];
+
 /// Relative path components from `drive_c` to the default Steam library.
 const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "common"];
 
@@ -81,11 +86,8 @@ impl GamePlugin for Hades2Plugin {
 
     fn detect_wine(&self, bottle: &Bottle) -> Option<DetectedGame> {
         let game_path = find_game_path(bottle)?;
-        if find_executable(&game_path).is_none() {
-            return None;
-        }
+        let exe_path = Some(find_executable(&game_path)?);
         let data_dir = self.get_data_dir(&game_path);
-        let exe_path = find_executable(&game_path);
         Some(DetectedGame {
             game_id: self.game_id().to_string(),
             display_name: self.display_name().to_string(),
@@ -342,8 +344,24 @@ fn check_user_documents_paths(bottle: &Bottle) -> Option<PathBuf> {
     None
 }
 
+/// Find the game executable at the game root, falling back to the
+/// [`EXE_SUBDIRS`] used by shipped builds. The game root (which holds
+/// `Content/`) stays the detected game path either way.
 fn find_executable(game_path: &Path) -> Option<PathBuf> {
-    let Ok(entries) = fs::read_dir(game_path) else {
+    find_executable_in(game_path).or_else(|| {
+        EXE_SUBDIRS.iter().find_map(|sub| {
+            let dir = find_child_case_insensitive(game_path, sub)?;
+            if dir.is_dir() {
+                find_executable_in(&dir)
+            } else {
+                None
+            }
+        })
+    })
+}
+
+fn find_executable_in(dir: &Path) -> Option<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
         return None;
     };
     let exe_lower: Vec<String> = EXECUTABLES.iter().map(|e| e.to_lowercase()).collect();
@@ -606,6 +624,89 @@ mod tests {
             .detect_wine(&bottle)
             .expect("should detect Documents/Games install");
         assert_eq!(detected.game_id, "hades2");
+        assert_eq!(detected.game_path, game_dir);
+    }
+
+    fn steam_common(bottle_path: &Path) -> PathBuf {
+        bottle_path
+            .join("drive_c")
+            .join("Program Files (x86)")
+            .join("Steam")
+            .join("steamapps")
+            .join("common")
+    }
+
+    fn bottle_at(bottle_path: PathBuf) -> Bottle {
+        Bottle {
+            name: "T".into(),
+            path: bottle_path,
+            source: "T".into(),
+        }
+    }
+
+    /// The real Steam build (issue #193): no exe at the game root, the
+    /// shipping build in `Ship/` plus a duplicate in `Release/`.
+    #[test]
+    fn detect_finds_steam_build_with_exe_in_ship() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("Bottle");
+        let game_dir = steam_common(&bottle_path).join("Hades II");
+        for sub in ["Ship", "Release"] {
+            fs::create_dir_all(game_dir.join(sub)).unwrap();
+            fs::write(game_dir.join(sub).join("Hades2.exe"), b"fake").unwrap();
+        }
+        fs::create_dir_all(game_dir.join("Content")).unwrap();
+
+        let detected = Hades2Plugin
+            .detect_wine(&bottle_at(bottle_path))
+            .expect("Steam layout with Ship/Hades2.exe must detect");
+        assert_eq!(detected.game_path, game_dir);
+        assert_eq!(detected.exe_path, Some(game_dir.join("Ship").join("Hades2.exe")));
+        assert_eq!(detected.data_dir, game_dir.join("Content").join("Mods"));
+    }
+
+    #[test]
+    fn detect_falls_back_to_release_dir_case_insensitively() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("Bottle");
+        let game_dir = steam_common(&bottle_path).join("Hades II");
+        fs::create_dir_all(game_dir.join("release")).unwrap();
+        fs::write(game_dir.join("release").join("hades2.exe"), b"fake").unwrap();
+
+        let detected = Hades2Plugin
+            .detect_wine(&bottle_at(bottle_path))
+            .expect("release/hades2.exe must detect");
+        // On case-insensitive filesystems (APFS) the lookup may return the
+        // requested casing rather than the on-disk one; both resolve.
+        let exe = detected.exe_path.expect("exe path");
+        assert!(exe.is_file());
+        assert!(exe
+            .to_string_lossy()
+            .to_lowercase()
+            .ends_with("hades ii/release/hades2.exe"));
+    }
+
+    #[test]
+    fn root_exe_still_preferred_over_ship() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game_dir = tmp.path().join("Hades II");
+        fs::create_dir_all(game_dir.join("Ship")).unwrap();
+        fs::write(game_dir.join("Hades2.exe"), b"fake").unwrap();
+        fs::write(game_dir.join("Ship").join("Hades2.exe"), b"fake").unwrap();
+        assert_eq!(find_executable(&game_dir), Some(game_dir.join("Hades2.exe")));
+    }
+
+    #[test]
+    fn detect_non_steam_install_with_exe_in_ship() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle_path = tmp.path().join("Bottle");
+        let game_dir = bottle_path.join("drive_c").join("Games").join("Hades II");
+        fs::create_dir_all(game_dir.join("Ship")).unwrap();
+        fs::write(game_dir.join("Ship").join("Hades2.exe"), b"fake").unwrap();
+
+        let detected = Hades2Plugin
+            .detect_wine(&bottle_at(bottle_path))
+            .expect("exe-anchored non-Steam path must accept Ship/");
         assert_eq!(detected.game_path, game_dir);
     }
 }
