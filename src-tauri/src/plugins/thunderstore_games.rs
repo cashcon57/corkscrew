@@ -300,10 +300,13 @@ fn check_steam_library_folders(bottle: &Bottle, spec: &ThunderstoreGameSpec) -> 
     // Proton prefixes: only the owning app's host install. Never scan the
     // prefix's libraryfolders.vdf — it maps onto host libraries holding other apps.
     if bottle.source == "Proton" {
-        return spec
-            .steam_dirs
-            .iter()
-            .find_map(|name| crate::game_registry::find_proton_prefix_game(bottle, name));
+        return spec.steam_dirs.iter().find_map(|name| {
+            crate::game_registry::find_proton_prefix_game(
+                bottle,
+                name,
+                Some(spec.steam_app_id),
+            )
+        });
     }
 
     let steam_dir = bottle.find_path(&["Program Files (x86)", "Steam"])?;
@@ -537,15 +540,16 @@ mod tests {
         use crate::game_registry::proton_test_fixture;
         let scan = |b: &Bottle| check_steam_library_folders(b, silksong_spec());
         let game: &[&str] = &["Hollow Knight Silksong"];
+        let app_id = silksong_spec().steam_app_id;
 
         // Unowned game in a VDF-listed library: ignored under Proton...
-        let fx = proton_test_fixture::new("1000", game, "Hollow Knight Silksong.exe");
+        let fx = proton_test_fixture::new(app_id, game, "Hollow Knight Silksong.exe");
         assert_eq!(scan(&fx.bottle("Proton")), None);
         // ...but found by the same scan in a regular bottle.
         assert_eq!(scan(&fx.bottle("CrossOver")), Some(fx.host_game.clone()));
 
         // The prefix owner's own host install is still found.
-        let owned = fx.install_owner_game("1000", game, "Hollow Knight Silksong.exe");
+        let owned = fx.install_owner_game(app_id, game, "Hollow Knight Silksong.exe");
         assert_eq!(scan(&fx.bottle("Proton")), Some(owned));
     }
 }

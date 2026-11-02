@@ -177,9 +177,12 @@ fn find_game_in_bottle(bottle: &Bottle, reg: &VortexGameRegistration) -> Option<
         if !reg.name.eq_ignore_ascii_case(steam_dir) {
             candidates.push(&reg.name);
         }
+        let expected_app_id = reg.store_ids.steam_app_id.as_deref();
         let owned = candidates
             .into_iter()
-            .filter_map(|name| crate::game_registry::find_proton_prefix_game(bottle, name))
+            .filter_map(|name| {
+                crate::game_registry::find_proton_prefix_game(bottle, name, expected_app_id)
+            })
             .find(|dir| verify_required_files(dir, &reg.required_files));
         if owned.is_some() {
             return owned;
@@ -410,5 +413,32 @@ mod tests {
         let mut reg = registration(&[]);
         reg.steam_dir_name = None;
         assert_eq!(find_game_in_bottle(&fx.bottle("Proton"), &reg), Some(owned));
+    }
+
+    /// A registration with a known `steam_app_id` must only match a prefix
+    /// actually owned by that app id, not merely one whose installdir
+    /// happens to match the registration's directory name.
+    #[test]
+    fn proton_owner_game_mismatched_steam_app_id_is_rejected() {
+        let game: &[&str] = &["TestGameDir"];
+        // Prefix owned by app "1000" — installdir matches, app id doesn't.
+        let fx = proton_test_fixture::new("1000", game, "TestGame.exe");
+        fx.install_owner_game("1000", game, "TestGame.exe");
+
+        let mut reg = registration(&["TestGame.exe"]);
+        reg.store_ids.steam_app_id = Some("9999".into());
+        assert_eq!(
+            find_game_in_bottle(&fx.bottle("Proton"), &reg),
+            None,
+            "mismatched steam_app_id must not be treated as owned"
+        );
+
+        // Owned by the registration's declared app id: detected.
+        let fx2 = proton_test_fixture::new("9999", game, "TestGame.exe");
+        let owned = fx2.install_owner_game("9999", game, "TestGame.exe");
+        assert_eq!(
+            find_game_in_bottle(&fx2.bottle("Proton"), &reg),
+            Some(owned)
+        );
     }
 }

@@ -22,6 +22,9 @@ const EXECUTABLES: &[&str] = &["SkyrimSE.exe", "SkyrimSELauncher.exe"];
 /// The game's directory name inside a Steam library.
 const STEAM_GAME_DIR: &str = "Skyrim Special Edition";
 
+/// Skyrim Special Edition's Steam app ID.
+const STEAM_APP_ID: &str = "489830";
+
 /// GOG installation paths to check (relative to `drive_c`).
 const GOG_PATHS: &[&[&str]] = &[
     &["GOG Games", "Skyrim Special Edition"],
@@ -255,7 +258,9 @@ fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
 /// present in the bottle, rather than assuming paths are under `drive_c`.
 fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
     // Proton prefixes install the game on the host, not inside the prefix.
-    if let Some(dir) = crate::game_registry::find_proton_prefix_game(bottle, STEAM_GAME_DIR) {
+    if let Some(dir) =
+        crate::game_registry::find_proton_prefix_game(bottle, STEAM_GAME_DIR, Some(STEAM_APP_ID))
+    {
         return Some(dir);
     }
 
@@ -696,6 +701,45 @@ mod tests {
         assert!(
             !detected.game_path.starts_with(&bottle.path),
             "game must live outside the prefix, on the host library"
+        );
+    }
+
+    /// A Proton prefix's owner manifest can declare an `installdir` that
+    /// matches Skyrim SE's directory name even though the prefix's actual
+    /// app id (`compatdata/<appid>`) belongs to a different app entirely.
+    /// `detect_wine` must reject that — installdir alone isn't enough.
+    #[test]
+    fn detect_rejects_proton_prefix_with_mismatched_owner_app_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let library = tmp.path().join("SteamLibrary");
+        let steamapps = library.join("steamapps");
+
+        let game_dir = steamapps.join("common").join("Skyrim Special Edition");
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("SkyrimSE.exe"), b"fake").unwrap();
+
+        // Owner manifest for app "1000" whose installdir happens to be
+        // "Skyrim Special Edition" — not Skyrim SE's real app id (489830).
+        let acf = "\"AppState\"\n{\n\
+             \t\"appid\"\t\"1000\"\n\
+             \t\"name\"\t\"Skyrim Special Edition\"\n\
+             \t\"installdir\"\t\"Skyrim Special Edition\"\n\
+             \t\"StateFlags\"\t\"4\"\n\
+             }\n";
+        fs::write(steamapps.join("appmanifest_1000.acf"), acf).unwrap();
+
+        let pfx = steamapps.join("compatdata").join("1000").join("pfx");
+        fs::create_dir_all(pfx.join("drive_c")).unwrap();
+
+        let bottle = Bottle {
+            name: "Proton 1000".into(),
+            path: pfx,
+            source: "Proton".to_string(),
+        };
+
+        assert!(
+            SkyrimSEPlugin.detect_wine(&bottle).is_none(),
+            "mismatched owner app id must not be treated as a Skyrim SE install"
         );
     }
 

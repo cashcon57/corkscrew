@@ -217,7 +217,8 @@ fn find_game_path(bottle: &Bottle, entry: &GameEntry) -> Option<PathBuf> {
     // 2a. Proton prefixes don't install games inside the prefix — the game
     // lives on the host in the owning library's `steamapps/common/`. Check
     // that before the generic library scan below (which never looks there).
-    if let Some(dir) = find_proton_prefix_game(bottle, steam_dir_name) {
+    if let Some(dir) = find_proton_prefix_game(bottle, steam_dir_name, entry.steam_id.as_deref())
+    {
         return Some(dir);
     }
 
@@ -548,8 +549,30 @@ fn is_safe_install_dir(install_dir: &str) -> bool {
 /// `appmanifest_<appid>.acf` declares a matching `installdir`. This keeps a
 /// Proton prefix scoped to its own single app instead of exposing every game
 /// in the library it happens to sit under.
-pub(crate) fn find_proton_prefix_game(bottle: &Bottle, dir_name: &str) -> Option<PathBuf> {
+///
+/// `expected_app_id`, when known, must also match the prefix owner's app ID
+/// (the `<appid>` in `compatdata/<appid>/pfx`) — this guards against a
+/// prefix directory that was renamed/reused with an `installdir` that
+/// happens to collide with another app's. Pass `None` only when the caller
+/// has no known Steam app ID for the game (keeps prior installdir-only
+/// behavior).
+pub(crate) fn find_proton_prefix_game(
+    bottle: &Bottle,
+    dir_name: &str,
+    expected_app_id: Option<&str>,
+) -> Option<PathBuf> {
     let owner = proton_prefix_owner(bottle)?;
+
+    if let Some(id) = expected_app_id {
+        if owner.app_id != id.trim() {
+            log::debug!(
+                "find_proton_prefix_game: owner app_id {} != expected {}",
+                owner.app_id,
+                id
+            );
+            return None;
+        }
+    }
 
     let acf_path = owner
         .steamapps
@@ -2204,7 +2227,7 @@ mod tests {
         fs::create_dir_all(common.join("Fallout 4")).unwrap();
         write_appmanifest(&steamapps, "377160", "Fallout 4", "Fallout 4");
 
-        let found = find_proton_prefix_game(&bottle, "skyrim special edition");
+        let found = find_proton_prefix_game(&bottle, "skyrim special edition", None);
         assert_eq!(
             found,
             Some(common.join("Skyrim Special Edition")),
@@ -2214,7 +2237,7 @@ mod tests {
         // The prefix owns 489830, not 377160 — must not "see" Fallout 4
         // even though it's in the same library.
         assert!(
-            find_proton_prefix_game(&bottle, "Fallout 4").is_none(),
+            find_proton_prefix_game(&bottle, "Fallout 4", None).is_none(),
             "a Proton prefix must not report games it doesn't own"
         );
     }
@@ -2257,7 +2280,7 @@ mod tests {
         );
 
         assert!(
-            find_proton_prefix_game(&bottle, "skyrim special edition").is_none(),
+            find_proton_prefix_game(&bottle, "skyrim special edition", None).is_none(),
             "non-Proton sources must not get prefix-owner treatment"
         );
         // detect_unregistered_steam_games finds nothing either: the bottle's
@@ -2278,7 +2301,7 @@ mod tests {
             fs::create_dir_all(steamapps.join("common").join(bad_installdir)).unwrap();
 
             assert!(
-                find_proton_prefix_game(&bottle, bad_installdir).is_none(),
+                find_proton_prefix_game(&bottle, bad_installdir, None).is_none(),
                 "malicious installdir '{}' must be rejected",
                 bad_installdir
             );
@@ -2307,7 +2330,7 @@ mod tests {
             source: "Proton".to_string(),
         };
 
-        assert!(find_proton_prefix_game(&bottle, "anything").is_none());
+        assert!(find_proton_prefix_game(&bottle, "anything", None).is_none());
     }
 
     fn registry_entry(name: &str, steam_id: &str) -> GameEntry {
@@ -2398,7 +2421,7 @@ mod tests {
             "Skyrim Special Edition",
         );
 
-        assert!(find_proton_prefix_game(&bottle, "Skyrim Special Edition").is_none());
+        assert!(find_proton_prefix_game(&bottle, "Skyrim Special Edition", None).is_none());
         assert!(detect_unregistered_steam_games(&bottle, &[]).is_empty());
         assert!(scan_steam_games_with_appid(&bottle).is_empty());
     }
@@ -2415,7 +2438,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(find_proton_prefix_game(&bottle, "Fallout 4").is_none());
+        assert!(find_proton_prefix_game(&bottle, "Fallout 4", None).is_none());
         assert!(detect_unregistered_steam_games(&bottle, &[]).is_empty());
         assert!(scan_steam_games_with_appid(&bottle).is_empty());
     }
@@ -2473,5 +2496,54 @@ mod tests {
             find_game_path(&bottle, &other_entry),
             Some(steam_dir.join("steamapps/common/Other Game"))
         );
+    }
+
+    /// `find_proton_prefix_game`'s `expected_app_id` must be checked against
+    /// the prefix owner's actual app id (`compatdata/<appid>`), not just the
+    /// owning appmanifest's `installdir`. Here the owner manifest is fully
+    /// self-consistent (compatdata/1000, appmanifest_1000 declaring appid
+    /// 1000 and installdir "Skyrim Special Edition") — only the caller's
+    /// expectation can distinguish a correct match from a coincidental one.
+    #[test]
+    fn find_proton_prefix_game_checks_expected_app_id() {
+        let root = tempfile::tempdir().unwrap();
+        let (bottle, steamapps) = make_proton_bottle(root.path(), "1000");
+
+        fs::create_dir_all(steamapps.join("common").join("Skyrim Special Edition")).unwrap();
+        write_appmanifest(&steamapps, "1000", "Skyrim Special Edition", "Skyrim Special Edition");
+
+        // Installdir matches, but the real Skyrim SE app id (489830) doesn't
+        // match this prefix's owner (1000).
+        assert!(
+            find_proton_prefix_game(&bottle, "Skyrim Special Edition", Some("489830")).is_none(),
+            "mismatched expected app id must reject an otherwise-matching installdir"
+        );
+        // The prefix's actual owner id matches: detected.
+        assert!(
+            find_proton_prefix_game(&bottle, "Skyrim Special Edition", Some("1000")).is_some()
+        );
+        // No expectation supplied: old installdir-only behavior.
+        assert!(find_proton_prefix_game(&bottle, "Skyrim Special Edition", None).is_some());
+    }
+
+    /// Same check, exercised through `find_game_path` / `GameEntry.steam_id`
+    /// as a real caller would use it.
+    #[test]
+    fn find_game_path_rejects_proton_owner_with_mismatched_steam_id() {
+        let root = tempfile::tempdir().unwrap();
+        let (bottle, steamapps) = make_proton_bottle(root.path(), "1000");
+
+        let game_dir = steamapps.join("common").join("Skyrim Special Edition");
+        fs::create_dir_all(&game_dir).unwrap();
+        write_appmanifest(&steamapps, "1000", "Skyrim Special Edition", "Skyrim Special Edition");
+
+        let mismatched = registry_entry("Skyrim Special Edition", "489830");
+        assert!(
+            find_game_path(&bottle, &mismatched).is_none(),
+            "a GameEntry with the wrong steam_id must not match this prefix's owner"
+        );
+
+        let matching = registry_entry("Skyrim Special Edition", "1000");
+        assert_eq!(find_game_path(&bottle, &matching), Some(game_dir));
     }
 }
