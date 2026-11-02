@@ -2,6 +2,33 @@
 
 All notable changes to Corkscrew are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.14.23] - 2026-11-02
+
+First release since 0.14.12. Versions 0.14.13 through 0.14.22 were internal version bumps on `main` that never shipped; everything they contained is listed here.
+
+### Security
+
+- **Upgraded the `zip` crate from 2.4 to 9.2**: zip 2.x has a critical parser differential (inconsistent local/central headers could bypass security checks) and unbounded symlink-target handling that could crash or exhaust memory while extracting. Corkscrew opens untrusted mod archives with this crate in the installer, collection and Wabbajack pipelines, archive preview, SMAPI setup and the depot downloader. Compression support is unchanged (deflate, deflate64, bzip2, LZMA, XZ, zstd, AES) and PPMd is now supported too. A ZIP entry whose name is neither UTF-8 nor valid CP437 is now reported as an error instead of being guessed at. (#199)
+- Dependency security fixes in the app: quinn-proto (high), openssl, tar, serde_with and xxhash-rust on the Rust side; Svelte, DOMPurify and devalue in the frontend (#101, #135, #138, #141, #144, #153, #161, #187).
+
+### Fixed
+
+- **Hades II not detected on Steam**: the Steam build keeps its executable at `Ship/Hades2.exe` (plus a duplicate `Release/` build) with nothing at the game root, so detection reported "Found 0 games". Corkscrew now checks the root, then `Ship/`, then `Release/`. Mods still deploy to `Content/Mods`. (#201, part of #193)
+- **Linux AppImage failed under firejail and other kernel-mounting launchers**: 0.14.12 packed every directory inside the AppImage as owner-only, so launchers that loop-mount the image (firejail `--appimage`, the AppImage catalog test) failed with `AppRun: Permission denied`. The release build now normalizes permissions and fails if anything is still unreadable. `.DirIcon` now uses the 128px icon instead of a 32px one. (#200)
+- **Linux Steam / Proton discovery**, much broader coverage:
+  - Flatpak Steam: official and secondary libraries are found for Proton discovery (#127), and Flatpak Wine prefixes are discovered (#129).
+  - Snap Steam: Proton is found in secondary libraries (#128).
+  - Legacy `libraryfolders.vdf` (old numeric-index format) is accepted for Proton discovery (#151) and for Proton prefixes in those libraries (#152).
+  - A custom absolute `XDG_DATA_HOME` is honored for Steam, Proton and prefix discovery; its libraries win ties against the default location (#155).
+  - Wine user-data paths inside prefixes are matched case-insensitively (#130).
+- **Steam launch options containing quotes were truncated**: `localconfig.vdf` escapes quotes as `\"`, and the reader stopped at the first one, so options like `WINEDLLOVERRIDES="winhttp=n,b" %command%` or the SKSE launch trick showed up cut off, reported as not patched, and were skipped on unpatch. Launch options are now read and written with Valve's escaping rules, and commented-out lines are ignored (#148).
+- **Display resolution detection on Linux** now handles xrandr monitors with negative offsets (multi-monitor setups with a screen left of or above the primary) (#126).
+
+### Changed
+
+- Tauri updated to 2.12.5, along with its plugins (#172, #198).
+- Rust panics reported to Sentry now include the source file and line, so crash reports from release builds point at code (#184).
+
 ## [0.14.12] - 2026-10-02
 
 ### Fixed
