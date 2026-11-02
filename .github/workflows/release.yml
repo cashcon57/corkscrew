@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - 'v*'
+  # Manual run = Linux-only test build. Artifacts are uploaded to the run;
+  # nothing is published (macOS and the release job only run on tag pushes).
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -14,7 +17,14 @@ env:
 jobs:
   build-linux:
     name: Build Linux (x86_64)
-    runs-on: ubuntu-latest
+    # Pinned to the oldest supported Ubuntu LTS: everything the AppImage
+    # bundles links against the build host's glibc, so building on a newer
+    # image (ubuntu-latest became 26.04 / glibc 2.43 in Oct 2026) makes the
+    # AppImage refuse to start on SteamOS, Ubuntu 24.04, Debian, etc.
+    # Raise GLIBC_MAX below together with this.
+    runs-on: ubuntu-22.04
+    env:
+      GLIBC_MAX: "2.35"
     steps:
       - uses: actions/checkout@v6
 
@@ -31,6 +41,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          # Separate from caches built on newer images: cached build-script
+          # binaries linked against a newer glibc won't run on this runner.
+          key: ubuntu-22.04
 
       - name: Install npm dependencies
         run: npm ci
@@ -101,6 +114,20 @@ jobs:
             echo "::error::AppDir entries not world-accessible: $BAD_PERMS"; exit 1
           fi
 
+          # glibc floor: nothing in the AppImage may need a newer glibc than
+          # the oldest distro we support (GLIBC_MAX, set on this job).
+          # One objdump per file: non-ELF files (scripts, icons) just fail.
+          NEWEST_GLIBC=$(find squashfs-root -type f \
+            -exec sh -c 'for f; do objdump -T "$f" 2>/dev/null; done' sh {} + \
+            | grep -oE 'GLIBC_2\.[0-9]+' | sed 's/GLIBC_//' | sort -uV | tail -1 || true)
+          echo "Newest glibc symbol version required: ${NEWEST_GLIBC:-none}"
+          if [ -z "$NEWEST_GLIBC" ]; then
+            echo "::error::Found no glibc symbol versions; the check is not working"; exit 1
+          fi
+          if [ "$(printf '%s\n%s\n' "$GLIBC_MAX" "$NEWEST_GLIBC" | sort -V | tail -1)" != "$GLIBC_MAX" ]; then
+            echo "::error::AppImage needs glibc $NEWEST_GLIBC, above the supported floor $GLIBC_MAX"; exit 1
+          fi
+
           # Repack with appimagetool
           wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -O /tmp/appimagetool
           chmod +x /tmp/appimagetool
@@ -138,6 +165,7 @@ jobs:
 
   build-macos:
     name: Build macOS (${{ matrix.arch }})
+    if: github.event_name == 'push'
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -268,6 +296,7 @@ jobs:
 
   release:
     name: Publish Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
     steps:
