@@ -544,18 +544,19 @@ fn is_safe_install_dir(install_dir: &str) -> bool {
 /// Find the game a Proton prefix bottle belongs to, on the host Steam
 /// library that owns it (`<library>/steamapps/common/<installdir>`).
 ///
-/// `dir_name` is the Steam directory name the caller expects (e.g.
-/// `"Skyrim Special Edition"`) — only returns a path if the owning
-/// `appmanifest_<appid>.acf` declares a matching `installdir`. This keeps a
-/// Proton prefix scoped to its own single app instead of exposing every game
-/// in the library it happens to sit under.
+/// The prefix belongs to exactly one app (the `<appid>` in
+/// `compatdata/<appid>/pfx`); its `appmanifest_<appid>.acf` is read from the
+/// compatdata's own library, or — when Steam keeps it elsewhere — from
+/// another host Steam library (see [`find_proton_owner_manifest`]). This
+/// keeps a Proton prefix scoped to its own single app instead of exposing
+/// every game in the library it happens to sit under.
 ///
-/// `expected_app_id`, when known, must also match the prefix owner's app ID
-/// (the `<appid>` in `compatdata/<appid>/pfx`) — this guards against a
-/// prefix directory that was renamed/reused with an `installdir` that
-/// happens to collide with another app's. Pass `None` only when the caller
-/// has no known Steam app ID for the game (keeps prior installdir-only
-/// behavior).
+/// `expected_app_id`, when known, must match the prefix owner's app ID. When
+/// it does, the owner manifest's validated `installdir` is trusted even if it
+/// differs from `dir_name`: Steam's folder names don't always match ours
+/// (e.g. Baldur's Gate 3 installs as `Baldurs Gate 3`), and the app ID is the
+/// stronger identity. Pass `None` only when the caller has no known Steam app
+/// ID; then the `installdir` must match `dir_name` (case-insensitively).
 pub(crate) fn find_proton_prefix_game(
     bottle: &Bottle,
     dir_name: &str,
@@ -574,20 +575,79 @@ pub(crate) fn find_proton_prefix_game(
         }
     }
 
-    let acf_path = owner
-        .steamapps
-        .join(format!("appmanifest_{}.acf", owner.app_id));
+    let (steamapps, acf_path) = find_proton_owner_manifest(&owner)?;
     let manifest = parse_appmanifest(&acf_path)?;
 
     if !manifest_matches_owner(&manifest, &owner.app_id, &acf_path) {
         return None;
     }
 
-    if manifest.install_dir.to_lowercase() != dir_name.to_lowercase() {
+    // With a matching expected app ID the owner manifest is authoritative;
+    // without one, the folder name is the only identity check available.
+    if expected_app_id.is_none()
+        && manifest.install_dir.to_lowercase() != dir_name.to_lowercase()
+    {
         return None;
     }
 
-    resolve_install_dir(&owner.steamapps, &manifest.install_dir, true, &acf_path)
+    resolve_install_dir(&steamapps, &manifest.install_dir, true, &acf_path)
+}
+
+/// Locate the owner's `appmanifest_<appid>.acf`, returning the `steamapps/`
+/// dir that holds it plus the manifest path.
+///
+/// Steam normally keeps the manifest next to `compatdata/` in the same
+/// library, but the prefix and the install can live in different libraries
+/// (e.g. the game was moved to an SD card while its prefix stayed on internal
+/// storage). Only when the manifest is absent from the compatdata's library
+/// does this fall back to the host Steam libraries — the Steam roots and the
+/// libraries their `libraryfolders.vdf` list — and never to anything mapped
+/// into the prefix. Callers apply the same manifest validation either way.
+fn find_proton_owner_manifest(owner: &ProtonPrefixOwner) -> Option<(PathBuf, PathBuf)> {
+    let acf_name = format!("appmanifest_{}.acf", owner.app_id);
+
+    let local = owner.steamapps.join(&acf_name);
+    if local.is_file() {
+        return Some((owner.steamapps.clone(), local));
+    }
+
+    host_steam_libraries().into_iter().find_map(|steamapps| {
+        let acf = steamapps.join(&acf_name);
+        acf.is_file().then_some((steamapps, acf))
+    })
+}
+
+/// Host Steam libraries (`steamapps/` dirs) searched for a Proton owner's
+/// appmanifest when it isn't beside the prefix's `compatdata/`.
+#[cfg(not(test))]
+fn host_steam_libraries() -> Vec<PathBuf> {
+    crate::proton::host_steam_library_steamapps()
+}
+
+/// Tests must never see the real machine's Steam libraries; they inject their
+/// own per thread via [`test_host_libraries::set`].
+#[cfg(test)]
+fn host_steam_libraries() -> Vec<PathBuf> {
+    test_host_libraries::get()
+}
+
+#[cfg(test)]
+pub(crate) mod test_host_libraries {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+
+    thread_local! {
+        static LIBS: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Set the host `steamapps/` dirs seen by this test thread.
+    pub(crate) fn set(libs: Vec<PathBuf>) {
+        LIBS.with(|l| *l.borrow_mut() = libs);
+    }
+
+    pub(super) fn get() -> Vec<PathBuf> {
+        LIBS.with(|l| l.borrow().clone())
+    }
 }
 
 /// Confine a path derived from a [`find_proton_prefix_game`] install (e.g. a
@@ -693,7 +753,10 @@ fn manifest_scan_targets(bottle: &Bottle) -> Vec<(PathBuf, Option<String>)> {
         .collect();
 
     if let Some(owner) = proton_prefix_owner(bottle) {
-        targets.push((owner.steamapps, Some(owner.app_id)));
+        let steamapps = find_proton_owner_manifest(&owner)
+            .map(|(steamapps, _)| steamapps)
+            .unwrap_or(owner.steamapps);
+        targets.push((steamapps, Some(owner.app_id)));
     }
 
     targets
@@ -2545,5 +2608,119 @@ mod tests {
 
         let matching = registry_entry("Skyrim Special Edition", "1000");
         assert_eq!(find_game_path(&bottle, &matching), Some(game_dir));
+    }
+
+    /// Steam's `installdir` doesn't always match our folder name (Baldur's
+    /// Gate 3 installs as `Baldurs Gate 3`). With the caller's app ID matching
+    /// the prefix owner, the validated manifest `installdir` is trusted.
+    #[test]
+    fn proton_owner_installdir_trusted_when_expected_app_id_matches() {
+        let root = tempfile::tempdir().unwrap();
+        let (bottle, steamapps) = make_proton_bottle(root.path(), "1086940");
+        let game_dir = steamapps.join("common").join("Baldurs Gate 3");
+        fs::create_dir_all(&game_dir).unwrap();
+        write_appmanifest(&steamapps, "1086940", "Baldur's Gate 3", "Baldurs Gate 3");
+
+        assert_eq!(
+            find_proton_prefix_game(&bottle, "Baldur's Gate 3", Some("1086940")),
+            Some(game_dir.clone())
+        );
+        let entry = registry_entry("Baldur's Gate 3", "1086940");
+        assert_eq!(find_game_path(&bottle, &entry), Some(game_dir));
+
+        // A different expected app ID still rejects, whatever the name.
+        assert!(find_proton_prefix_game(&bottle, "Baldurs Gate 3", Some("489830")).is_none());
+    }
+
+    /// Without an expected app ID the folder name is the only identity check,
+    /// so a differing `installdir` is rejected (and a matching one accepted).
+    #[test]
+    fn proton_owner_installdir_must_match_name_without_expected_app_id() {
+        let root = tempfile::tempdir().unwrap();
+        let (bottle, steamapps) = make_proton_bottle(root.path(), "1086940");
+        let game_dir = steamapps.join("common").join("Baldurs Gate 3");
+        fs::create_dir_all(&game_dir).unwrap();
+        write_appmanifest(&steamapps, "1086940", "Baldur's Gate 3", "Baldurs Gate 3");
+
+        assert!(find_proton_prefix_game(&bottle, "Baldur's Gate 3", None).is_none());
+        assert_eq!(
+            find_proton_prefix_game(&bottle, "baldurs gate 3", None),
+            Some(game_dir)
+        );
+    }
+
+    /// The prefix's `compatdata/` and the game's appmanifest can live in
+    /// different Steam libraries. The owner manifest is then looked up in the
+    /// host Steam libraries, with the same validation.
+    #[test]
+    fn proton_owner_manifest_found_in_other_host_library() {
+        let root = tempfile::tempdir().unwrap();
+        let (bottle, _prefix_steamapps) =
+            make_proton_bottle(&root.path().join("Internal"), "489830");
+        let sd_steamapps = root.path().join("SDCard").join("steamapps");
+        let game_dir = sd_steamapps.join("common").join("Skyrim Special Edition");
+        fs::create_dir_all(&game_dir).unwrap();
+        write_appmanifest(
+            &sd_steamapps,
+            "489830",
+            "The Elder Scrolls V: Skyrim Special Edition",
+            "Skyrim Special Edition",
+        );
+        // An unrelated app in the same host library must stay invisible.
+        fs::create_dir_all(sd_steamapps.join("common").join("Fallout 4")).unwrap();
+        write_appmanifest(&sd_steamapps, "377160", "Fallout 4", "Fallout 4");
+
+        // Not a known host library: nothing is found.
+        test_host_libraries::set(Vec::new());
+        assert!(
+            find_proton_prefix_game(&bottle, "Skyrim Special Edition", Some("489830")).is_none()
+        );
+
+        test_host_libraries::set(vec![sd_steamapps.clone()]);
+        assert_eq!(
+            find_proton_prefix_game(&bottle, "Skyrim Special Edition", Some("489830")),
+            Some(game_dir.clone())
+        );
+        assert!(find_proton_prefix_game(&bottle, "Fallout 4", Some("377160")).is_none());
+        assert!(find_proton_prefix_game(&bottle, "Fallout 4", None).is_none());
+
+        let ids: Vec<_> = detect_unregistered_steam_games(&bottle, &[])
+            .into_iter()
+            .map(|g| g.steam_app_id)
+            .collect();
+        assert_eq!(ids, vec![Some("489830".to_string())]);
+
+        // A manifest in the other library declaring a different appid is
+        // rejected exactly as it would be locally.
+        fs::write(
+            sd_steamapps.join("appmanifest_489830.acf"),
+            "\"AppState\"\n{\n\t\"appid\"\t\"377160\"\n\t\"name\"\t\"Fallout 4\"\n\t\"installdir\"\t\"Fallout 4\"\n\t\"StateFlags\"\t\"4\"\n}\n",
+        )
+        .unwrap();
+        assert!(
+            find_proton_prefix_game(&bottle, "Skyrim Special Edition", Some("489830")).is_none()
+        );
+        assert!(detect_unregistered_steam_games(&bottle, &[]).is_empty());
+        test_host_libraries::set(Vec::new());
+    }
+
+    /// A manifest present (but invalid) in the compatdata's own library is
+    /// authoritative: the host-library fallback only covers a missing one.
+    #[test]
+    fn proton_owner_manifest_fallback_only_when_local_manifest_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let (bottle, prefix_steamapps) = make_proton_bottle(&root.path().join("Internal"), "1000");
+        fs::write(
+            prefix_steamapps.join("appmanifest_1000.acf"),
+            "\"AppState\"\n{\n\t\"appid\"\t\"5678\"\n\t\"name\"\t\"Own Game\"\n\t\"installdir\"\t\"Own Game\"\n\t\"StateFlags\"\t\"4\"\n}\n",
+        )
+        .unwrap();
+        let other = root.path().join("SDCard").join("steamapps");
+        fs::create_dir_all(other.join("common").join("Own Game")).unwrap();
+        write_appmanifest(&other, "1000", "Own Game", "Own Game");
+
+        test_host_libraries::set(vec![other]);
+        assert!(find_proton_prefix_game(&bottle, "Own Game", Some("1000")).is_none());
+        test_host_libraries::set(Vec::new());
     }
 }

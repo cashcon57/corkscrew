@@ -581,6 +581,27 @@ fn find_steam_common_dirs() -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+/// `steamapps/` dirs of every host Steam library: the Steam roots plus the
+/// secondary libraries their `libraryfolders.vdf` list (canonicalized and
+/// deduplicated by [`find_steam_common_dirs_in_home`]). Only libraries that
+/// have a `common/` dir are returned.
+pub(crate) fn host_steam_library_steamapps() -> Vec<PathBuf> {
+    let xdg_data_home = xdg_data_home_env();
+    dirs::home_dir()
+        .map(|home| host_steam_library_steamapps_in_home(&home, xdg_data_home.as_deref()))
+        .unwrap_or_default()
+}
+
+fn host_steam_library_steamapps_in_home(
+    home: &Path,
+    xdg_data_home: Option<&OsStr>,
+) -> Vec<PathBuf> {
+    find_steam_common_dirs_in_home(home, xdg_data_home)
+        .into_iter()
+        .filter_map(|common| common.parent().map(Path::to_path_buf))
+        .collect()
+}
+
 fn find_steam_common_dirs_in_home(home: &Path, xdg_data_home: Option<&OsStr>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -1646,6 +1667,22 @@ mod tests {
         assert_eq!(versions.len(), 2);
         assert!(versions.iter().any(|v| same_dir(&v.path, &native_proton)));
         assert!(versions.iter().any(|v| same_dir(&v.path, &snap_proton)));
+    }
+
+    #[test]
+    fn host_steam_library_steamapps_lists_root_and_vdf_libraries() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let native = home.join(NATIVE_STEAM);
+        let secondary = temp.path().join("sd-card");
+        std::fs::create_dir_all(native.join("steamapps/common")).unwrap();
+        std::fs::create_dir_all(secondary.join("steamapps/common")).unwrap();
+        write_library_folders(&native, &[&native, &secondary]);
+
+        let libs = host_steam_library_steamapps_in_home(&home, None);
+        assert_eq!(libs.len(), 2);
+        assert!(libs.iter().any(|l| same_dir(l, &native.join("steamapps"))));
+        assert!(libs.iter().any(|l| same_dir(l, &secondary.join("steamapps"))));
     }
 
     #[cfg(unix)]
