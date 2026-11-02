@@ -281,6 +281,12 @@ fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
 }
 
 fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
+    // Proton prefixes: only the owning app's host install. Never scan the
+    // prefix's libraryfolders.vdf — it maps onto host libraries holding other apps.
+    if bottle.source == "Proton" {
+        return crate::game_registry::find_proton_prefix_game(bottle, STEAM_GAME_DIR);
+    }
+
     let steam_dir = bottle.find_path(&["Program Files (x86)", "Steam"])?;
     let primary = steam_dir.join("steamapps").join("libraryfolders.vdf");
     let vdf_path = if primary.exists() {
@@ -876,5 +882,29 @@ mod tests {
             .expect("should detect Documents/Games install");
         assert_eq!(detected.game_id, "gtav");
         assert_eq!(detected.game_path, game_dir);
+    }
+
+    /// A Proton prefix's own libraryfolders.vdf can list host libraries holding
+    /// other apps; the library scan must only ever return the prefix owner's game.
+    #[test]
+    fn library_scan_in_proton_prefix_is_owner_only() {
+        use crate::game_registry::proton_test_fixture;
+        let game: &[&str] = &["Grand Theft Auto V"];
+
+        // Unowned game in a VDF-listed library: ignored under Proton...
+        let fx = proton_test_fixture::new("1000", game, "GTA5.exe");
+        assert_eq!(check_steam_library_folders(&fx.bottle("Proton")), None);
+        // ...but found by the same scan in a regular bottle.
+        assert_eq!(
+            check_steam_library_folders(&fx.bottle("CrossOver")),
+            Some(fx.host_game.clone())
+        );
+
+        // The prefix owner's own host install is still found.
+        let owned = fx.install_owner_game("1000", game, "GTA5.exe");
+        assert_eq!(
+            check_steam_library_folders(&fx.bottle("Proton")),
+            Some(owned)
+        );
     }
 }
