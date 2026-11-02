@@ -551,19 +551,24 @@ pub(crate) fn xdg_data_home_env() -> Option<OsString> {
     }
 }
 
-/// Steam root under a custom `$XDG_DATA_HOME`. Per the XDG Base Directory
-/// spec, empty or relative values are invalid and must be ignored, leaving
-/// the `~/.local/share/Steam` default in effect. A `..` component is not
-/// rejected on its own — a path like `/home/user/data/../xdg` is a valid
-/// absolute path (it may legitimately resolve through a symlink), and
-/// lexically normalizing it here would be wrong. Callers canonicalize and
-/// dedupe the resulting candidates instead.
-pub(crate) fn xdg_steam_root(xdg_data_home: Option<&OsStr>) -> Option<PathBuf> {
+/// Validated custom `$XDG_DATA_HOME` base. Per the XDG Base Directory spec,
+/// empty or relative values are invalid and must be ignored, leaving the
+/// `~/.local/share` defaults in effect. A `..` component is not rejected on
+/// its own — a path like `/home/user/data/../xdg` is a valid absolute path
+/// (it may legitimately resolve through a symlink), and lexically
+/// normalizing it here would be wrong. Callers canonicalize and dedupe the
+/// resulting candidates instead.
+pub(crate) fn xdg_data_root(xdg_data_home: Option<&OsStr>) -> Option<PathBuf> {
     let base = Path::new(xdg_data_home?);
     if !base.is_absolute() {
         return None;
     }
-    Some(base.join("Steam"))
+    Some(base.to_path_buf())
+}
+
+/// Steam root under a custom `$XDG_DATA_HOME` (see [`xdg_data_root`]).
+pub(crate) fn xdg_steam_root(xdg_data_home: Option<&OsStr>) -> Option<PathBuf> {
+    xdg_data_root(xdg_data_home).map(|base| base.join("Steam"))
 }
 
 /// All candidate Steam roots. Callers canonicalize/dedup, so a custom
