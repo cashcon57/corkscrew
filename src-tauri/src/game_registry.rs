@@ -593,6 +593,24 @@ pub(crate) fn find_proton_prefix_game(
     resolve_install_dir(&steamapps, &manifest.install_dir, true, &acf_path)
 }
 
+/// The host game install a Proton prefix belongs to: the owner app's
+/// `<library>/steamapps/common/<installdir>`, resolved and validated exactly
+/// like [`find_proton_prefix_game`] (owner manifest appid must match, safe
+/// single-component `installdir`, confined to `common/`). `None` for
+/// non-Proton bottles or when the owner's install can't be resolved.
+///
+/// Used to let "Add game" accept a Proton game's files, which always live
+/// outside the prefix.
+pub(crate) fn proton_owner_install_dir(bottle: &Bottle) -> Option<PathBuf> {
+    let owner = proton_prefix_owner(bottle)?;
+    let (steamapps, acf_path) = find_proton_owner_manifest(&owner)?;
+    let manifest = parse_appmanifest(&acf_path)?;
+    if !manifest_matches_owner(&manifest, &owner.app_id, &acf_path) {
+        return None;
+    }
+    resolve_install_dir(&steamapps, &manifest.install_dir, true, &acf_path)
+}
+
 /// Locate the owner's `appmanifest_<appid>.acf`, returning the `steamapps/`
 /// dir that holds it plus the manifest path.
 ///
@@ -2722,5 +2740,41 @@ mod tests {
         test_host_libraries::set(vec![other]);
         assert!(find_proton_prefix_game(&bottle, "Own Game", Some("1000")).is_none());
         test_host_libraries::set(Vec::new());
+    }
+
+    #[test]
+    fn proton_owner_install_dir_resolves_owning_app_install() {
+        let root = tempfile::tempdir().unwrap();
+        let (bottle, steamapps) = make_proton_bottle(root.path(), "990080");
+        let install = steamapps.join("common").join("Hogwarts Legacy");
+        fs::create_dir_all(&install).unwrap();
+        write_appmanifest(&steamapps, "990080", "Hogwarts Legacy", "Hogwarts Legacy");
+
+        let found = proton_owner_install_dir(&bottle).expect("owner install");
+        assert_eq!(
+            found.canonicalize().unwrap(),
+            install.canonicalize().unwrap()
+        );
+
+        // Non-Proton bottles have no owner install.
+        let crossover = Bottle {
+            source: "CrossOver".into(),
+            ..bottle.clone()
+        };
+        assert_eq!(proton_owner_install_dir(&crossover), None);
+    }
+
+    #[test]
+    fn proton_owner_install_dir_rejects_mismatched_manifest_appid() {
+        let root = tempfile::tempdir().unwrap();
+        let (bottle, steamapps) = make_proton_bottle(root.path(), "990080");
+        fs::create_dir_all(steamapps.join("common").join("Other Game")).unwrap();
+        // Manifest file named for 990080 but declaring another app.
+        fs::write(
+            steamapps.join("appmanifest_990080.acf"),
+            "\"AppState\"\n{\n\t\"appid\"\t\"12345\"\n\t\"installdir\"\t\"Other Game\"\n}\n",
+        )
+        .unwrap();
+        assert_eq!(proton_owner_install_dir(&bottle), None);
     }
 }
