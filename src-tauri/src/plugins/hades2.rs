@@ -740,4 +740,38 @@ mod tests {
             Some(owned)
         );
     }
+
+    /// A Proton prefix owned by Hades II with the real Steam layout: the exe
+    /// exists only at `Ship/Hades2.exe` in the owning library's install.
+    #[test]
+    fn detect_proton_owner_install_with_exe_only_in_ship() {
+        let tmp = tempfile::tempdir().unwrap();
+        let steamapps = tmp.path().join("steamapps");
+        let pfx = steamapps.join("compatdata").join(STEAM_APP_ID).join("pfx");
+        fs::create_dir_all(pfx.join("drive_c")).unwrap();
+        fs::write(
+            steamapps.join(format!("appmanifest_{STEAM_APP_ID}.acf")),
+            format!(
+                "\"AppState\"\n{{\n\t\"appid\"\t\"{STEAM_APP_ID}\"\n\t\"name\"\t\"Hades II\"\n\
+                 \t\"installdir\"\t\"Hades II\"\n\t\"StateFlags\"\t\"4\"\n}}\n"
+            ),
+        )
+        .unwrap();
+        let game_dir = steamapps.join("common").join("Hades II");
+        fs::create_dir_all(game_dir.join("Ship")).unwrap();
+        fs::write(game_dir.join("Ship").join("Hades2.exe"), b"fake").unwrap();
+        fs::create_dir_all(game_dir.join("Content")).unwrap();
+
+        let bottle = Bottle {
+            name: "Proton Hades II".into(),
+            path: pfx,
+            source: "Proton".into(),
+        };
+        let detected = Hades2Plugin
+            .detect_wine(&bottle)
+            .expect("Proton owner install with Ship/Hades2.exe must detect");
+        assert_eq!(detected.game_path, game_dir);
+        assert_eq!(detected.exe_path, Some(game_dir.join("Ship").join("Hades2.exe")));
+        assert_eq!(detected.data_dir, game_dir.join("Content").join("Mods"));
+    }
 }

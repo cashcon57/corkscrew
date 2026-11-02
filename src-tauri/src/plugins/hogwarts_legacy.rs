@@ -1670,4 +1670,94 @@ mod tests {
         fs::write(win64.join("UE4SS.dll"), b"fake").unwrap();
         assert!(is_ue4ss_installed(tmp.path()));
     }
+
+    /// Lay out a Proton prefix at `<lib>/steamapps/compatdata/<prefix_app>/pfx`
+    /// and Hogwarts Legacy (appmanifest 990080) in the same library's
+    /// `common/<installdir>` with the real Phoenix executable.
+    fn proton_hogwarts_library(
+        root: &Path,
+        prefix_app: &str,
+        installdir: &str,
+        real_exe: bool,
+    ) -> (Bottle, PathBuf) {
+        let steamapps = root.join("steamapps");
+        let pfx = steamapps.join("compatdata").join(prefix_app).join("pfx");
+        fs::create_dir_all(pfx.join("drive_c")).unwrap();
+        fs::write(
+            steamapps.join("appmanifest_990080.acf"),
+            format!(
+                "\"AppState\"\n{{\n\t\"appid\"\t\"990080\"\n\t\"name\"\t\"Hogwarts Legacy\"\n\
+                 \t\"installdir\"\t\"{installdir}\"\n\t\"StateFlags\"\t\"4\"\n}}\n"
+            ),
+        )
+        .unwrap();
+        let game_dir = steamapps.join("common").join(installdir);
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("HogwartsLegacy.exe"), b"launcher").unwrap();
+        if real_exe {
+            let bin = game_dir.join("Phoenix/Binaries/Win64");
+            fs::create_dir_all(&bin).unwrap();
+            fs::write(bin.join("HogwartsLegacy.exe"), b"fake").unwrap();
+        }
+        let bottle = Bottle {
+            name: format!("Proton {prefix_app}"),
+            path: pfx,
+            source: "Proton".to_string(),
+        };
+        (bottle, game_dir)
+    }
+
+    fn lower(p: &Path) -> String {
+        p.to_string_lossy().replace('\\', "/").to_lowercase()
+    }
+
+    /// Issue #194: on SteamOS the game lives outside the prefix, in the same
+    /// library's `steamapps/common/`.
+    #[test]
+    fn detect_proton_prefix_finds_game_in_owning_library() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (bottle, game_dir) =
+            proton_hogwarts_library(tmp.path(), STEAM_APP_ID, "Hogwarts Legacy", true);
+
+        let detected = HogwartsLegacyPlugin
+            .detect_wine(&bottle)
+            .expect("Hogwarts Legacy in the owning library must be detected");
+        assert_eq!(lower(&detected.game_path), lower(&game_dir));
+        let exe = detected.exe_path.expect("exe path");
+        assert!(lower(&exe).ends_with("/hogwarts legacy/phoenix/binaries/win64/hogwartslegacy.exe"));
+        match detected.runtime {
+            GameRuntime::Wine(ctx) => {
+                assert_eq!(ctx.bottle_path, bottle.path);
+                assert_eq!(ctx.source, "Proton");
+            }
+            other => panic!("expected Wine runtime, got {other:?}"),
+        }
+    }
+
+    /// The owner manifest's `installdir` wins over our folder name.
+    #[test]
+    fn detect_proton_honors_manifest_installdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (bottle, game_dir) =
+            proton_hogwarts_library(tmp.path(), STEAM_APP_ID, "HogwartsLegacyCustom", true);
+        let detected = HogwartsLegacyPlugin
+            .detect_wine(&bottle)
+            .expect("installdir from the owner appmanifest should be honored");
+        assert_eq!(lower(&detected.game_path), lower(&game_dir));
+    }
+
+    #[test]
+    fn detect_proton_ignores_prefix_of_another_app() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (bottle, _) = proton_hogwarts_library(tmp.path(), "489830", "Hogwarts Legacy", true);
+        assert!(HogwartsLegacyPlugin.detect_wine(&bottle).is_none());
+    }
+
+    #[test]
+    fn detect_proton_requires_real_phoenix_executable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (bottle, _) =
+            proton_hogwarts_library(tmp.path(), STEAM_APP_ID, "Hogwarts Legacy", false);
+        assert!(HogwartsLegacyPlugin.detect_wine(&bottle).is_none());
+    }
 }
