@@ -1079,7 +1079,13 @@ pub fn run() {
             // setup hook, so the frontend could otherwise start invoking
             // commands (pending-install banner, deploys) while recovery is
             // still marking orphaned installs and replaying the journal.
-            if let Some(main_cfg) = app.config().app.windows.iter().find(|w| w.label == "main") {
+            // Platform overlays (tauri.<os>.conf.json) replace the whole
+            // `windows` array, so each must keep `create: false`; if one
+            // doesn't, Tauri has already built "main" and we must not build
+            // a second one (that fails with "label already exists").
+            if app.get_webview_window("main").is_some() {
+                log::warn!("Main window was created before startup recovery; check that every tauri.*.conf.json sets \"create\": false");
+            } else if let Some(main_cfg) = app.config().app.windows.iter().find(|w| w.label == "main") {
                 tauri::WebviewWindowBuilder::from_config(app.handle(), main_cfg)?.build()?;
             } else {
                 log::error!("No \"main\" window in tauri.conf.json; no window was created");
@@ -1623,4 +1629,39 @@ pub fn run() {
             }
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod window_config_tests {
+    /// The main window is built in the setup hook after startup recovery, so
+    /// it must never be auto-created from config. Platform overlays replace
+    /// the whole `windows` array, so every config file has to say so itself.
+    #[test]
+    fn every_tauri_config_defers_main_window_creation() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut checked = 0;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if !(name.starts_with("tauri.") && name.ends_with(".conf.json")) {
+                continue;
+            }
+            let json: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let Some(windows) = json.pointer("/app/windows").and_then(|w| w.as_array()) else {
+                continue;
+            };
+            let main = windows
+                .iter()
+                .find(|w| w.get("label").and_then(|l| l.as_str()).unwrap_or("main") == "main")
+                .unwrap_or_else(|| panic!("{name}: windows array has no \"main\" window"));
+            assert_eq!(
+                main.get("create").and_then(|c| c.as_bool()),
+                Some(false),
+                "{name}: main window must set \"create\": false"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 2, "expected tauri.conf.json and at least one overlay");
+    }
 }

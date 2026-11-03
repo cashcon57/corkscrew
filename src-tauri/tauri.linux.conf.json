@@ -3,6 +3,8 @@
   "app": {
     "windows": [
       {
+        "label": "main",
+        "create": false,
         "title": "Corkscrew",
         "width": 1280,
         "height": 800,
