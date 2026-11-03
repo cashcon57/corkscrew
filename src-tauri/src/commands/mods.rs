@@ -1810,15 +1810,38 @@ pub async fn launch_game_cmd(
     let game_path = PathBuf::from(&game.game_path);
     let data_dir_check = PathBuf::from(&game.data_dir);
 
-    // NotProton games start through the macOS Steam client (see
-    // `launcher::launch_via_steam`), which runs the game's own executable.
-    // Script extenders and custom executables need a different exe and aren't
-    // wired up for NotProton yet.
-    let via_steam = bottle.source == crate::bottles::NOTPROTON_SOURCE;
-    if via_steam && use_skse {
-        return Err("Launching through a script extender isn't supported for NotProton games yet. \
-                    Turn off the script extender option to start the game through Steam."
-            .to_string());
+    // Steam Play games (Proton on Linux, NotProton on macOS) must be started
+    // by the Steam client so they get its Steam bridge; running the exe under
+    // Wine directly makes Steam-DRM games like Skyrim exit at once. GameHub
+    // games are started by GameHub. Both start the game's launcher exe, so a
+    // script extender runs by taking the launcher's place (`launcher_swap`).
+    let via_steam = bottle.is_steam_compat_prefix();
+    let started_by_client = via_steam || bottle.source == crate::gamehub::SOURCE;
+    let launcher_swap = if started_by_client {
+        crate::launcher_swap::for_game(&game_id)
+    } else {
+        None
+    };
+    if started_by_client {
+        match (use_skse, launcher_swap) {
+            (true, Some(swap)) => {
+                crate::launcher_swap::apply(&game_path, swap).map_err(|e| {
+                    format!("Couldn't set up the script extender for a {} launch: {e}", bottle.source)
+                })?;
+            }
+            (true, None) => {
+                return Err(format!(
+                    "Script extenders aren't supported for this game under {} yet. \
+                     Turn off the script extender option to start the game normally.",
+                    bottle.source
+                ));
+            }
+            (false, Some(swap)) => {
+                crate::launcher_swap::restore(&game_path, swap)
+                    .map_err(|e| format!("Couldn't restore {}: {e}", swap.launcher))?;
+            }
+            (false, None) => {}
+        }
     }
 
     // Pre-launch self-healing: check if deployment is consistent, auto-fix if not
@@ -1850,7 +1873,7 @@ pub async fn launch_game_cmd(
 
     // When SKSE is requested, it takes priority over custom executables.
     // Otherwise, check for a custom default executable first.
-    if !use_skse && !via_steam {
+    if !use_skse && !started_by_client {
         let custom_exe =
             executables::get_default_executable(&db, &game_id, &bottle_name).unwrap_or(None);
 
@@ -2135,10 +2158,27 @@ pub async fn launch_game_cmd(
 
     let mut result = if via_steam {
         launcher::launch_via_steam(&bottle)
+    } else if started_by_client {
+        // GameHub starts the game itself; with a script extender its launcher
+        // entry now runs the loader, so hand GameHub the game's own exe.
+        let game_exe = games::with_plugin(&game_id, |p| {
+            p.executables().first().and_then(|n| launcher::find_executable(&game_path, n))
+        })
+        .flatten()
+        .unwrap_or_else(|| exe_path.clone());
+        launcher::launch_game(&bottle, &game_exe, Some(&game_path), Some(&game_id), None)
     } else {
         launcher::launch_game(&bottle, &exe_path, Some(&game_path), Some(&game_id), None)
     }
     .map_err(|e| format!("Launch failed ({}): {}", bottle.source, e))?;
+    if use_skse && launcher_swap.is_some() {
+        let note = "The script extender starts in place of the game's launcher. \
+                    If Steam verifies or updates the game, Corkscrew sets it up again on the next launch.";
+        result.warning = Some(match result.warning.take() {
+            Some(w) => format!("{w}\n{note}"),
+            None => note.to_string(),
+        });
+    }
 
     // Cursor fix is now handled by Wine registry keys (set in auto_fix_display
     // above via fix_cursor_grab). No runtime Dock/Hot Corner/event tap needed.

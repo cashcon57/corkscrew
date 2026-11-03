@@ -615,13 +615,16 @@ pub fn launch_via_steam(bottle: &Bottle) -> Result<LaunchResult> {
     })?;
     let url = format!("steam://rungameid/{app_id}");
 
-    #[cfg(target_os = "macos")]
-    let opener = "open";
-    #[cfg(not(target_os = "macos"))]
-    let opener = "xdg-open";
-
     info!("Launching {} through Steam: {}", bottle.name, url);
-    Command::new(opener).arg(&url).spawn()?;
+    #[cfg(target_os = "macos")]
+    Command::new("open").arg(&url).spawn()?;
+    // xdg-open uses the desktop's steam:// handler (native or Flatpak
+    // Steam); the `steam` binary forwards the URL to a running client.
+    #[cfg(not(target_os = "macos"))]
+    if let Err(e) = Command::new("xdg-open").arg(&url).spawn() {
+        warn!("xdg-open failed ({e}); trying the steam binary");
+        Command::new("steam").arg(&url).spawn()?;
+    }
 
     Ok(LaunchResult {
         executable: url,

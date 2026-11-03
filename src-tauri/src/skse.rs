@@ -322,6 +322,14 @@ fn skse_dll_version(dll: &Path) -> Option<String> {
 pub fn uninstall_skse(game_path: &Path) -> Result<SkseStatus> {
     info!("Uninstalling SKSE from {}", game_path.display());
 
+    // If a Steam Play / GameHub launch put the loader in the launcher's
+    // place, put the real launcher back first.
+    if let Some(swap) = crate::launcher_swap::for_game("skyrimse") {
+        if let Err(e) = crate::launcher_swap::restore(game_path, swap) {
+            warn!("Couldn't restore {}: {}", swap.launcher, e);
+        }
+    }
+
     let mut removed = 0u32;
 
     // Remove SKSE executables and DLLs from game root
