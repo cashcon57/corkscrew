@@ -1446,7 +1446,7 @@
             <span class="row-label">SKSE (Script Extender)</span>
             <span class="tool-description">
               {#if skse?.installed}
-                Installed{skse.version ? ` — v${skse.version}` : ""}
+                Installed{skse.version ? ` — v${skse.version}` : ""}{skse.runtime ? ` (for Skyrim ${skse.runtime})` : ""}
               {:else}
                 Required by most Skyrim mods
               {/if}
