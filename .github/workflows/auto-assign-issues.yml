@@ -1,0 +1,23 @@
+name: Auto-assign issues
+
+# Issue templates set the assignee, but blank issues and API-filed issues
+# skip templates. Assign the maintainer to any new issue that has no assignee.
+
+on:
+  issues:
+    types: [opened, reopened]
+
+permissions:
+  issues: write
+
+jobs:
+  assign:
+    if: ${{ toJSON(github.event.issue.assignees) == '[]' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assign maintainer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: gh issue edit "$ISSUE" --repo "$REPO" --add-assignee cashcon57
