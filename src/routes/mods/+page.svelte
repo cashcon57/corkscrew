@@ -1559,10 +1559,14 @@
   }
 
   async function toggleGameFixes() {
-    disableGameFixes = !disableGameFixes;
+    const next = !disableGameFixes;
     try {
-      await setConfigValue("disable_game_fixes", disableGameFixes ? "true" : "false");
-    } catch { /* best-effort */ }
+      await setConfigValue("disable_game_fixes", next ? "true" : "false");
+      disableGameFixes = next;
+    } catch (e: unknown) {
+      console.error("Failed to save launch fixes setting:", e);
+      showError(`Failed to save launch fixes setting: ${e}`);
+    }
   }
 
   async function handleFixDisplay() {
@@ -2644,6 +2648,23 @@
             <button class="dropdown-item" onclick={() => { showSkseMenu = false; doLaunch(false); }}>
               <span class="dropdown-check"></span>
               Launch Game Directly
+            </button>
+            <div class="dropdown-divider"></div>
+            <button
+              class="dropdown-item"
+              onclick={(e) => { e.stopPropagation(); toggleGameFixes(); }}
+              title="Before launch: Wine cursor/input fixes, and repair SkyrimPrefs.ini display settings. Your fullscreen, borderless, or SSE Display Tweaks mode is kept."
+              role="menuitemcheckbox"
+              aria-checked={!disableGameFixes}
+            >
+              <span class="dropdown-check">
+                {#if !disableGameFixes}
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M10 3L4.5 8.5L2 6" />
+                  </svg>
+                {/if}
+              </span>
+              Apply display &amp; cursor fixes
             </button>
             <div class="dropdown-divider"></div>
             <div class="dropdown-info">

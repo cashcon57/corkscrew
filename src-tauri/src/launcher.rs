@@ -7,7 +7,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
@@ -54,6 +55,16 @@ pub enum LauncherError {
     #[error("Unsupported bottle source: {0}")]
     UnsupportedSource(String),
 
+    #[error("The game exited immediately ({}).{}\n\nFull log: {}",
+        code.map_or_else(|| "killed by a signal".to_string(), |c| format!("exit code {c}")),
+        if tail.is_empty() { String::new() } else { format!(" Last output:\n{tail}") },
+        log_path.display())]
+    EarlyExit {
+        code: Option<i32>,
+        log_path: PathBuf,
+        tail: String,
+    },
+
     #[error("{0}")]
     Other(String),
 }
@@ -83,49 +94,26 @@ pub struct LaunchResult {
 // Wine binary resolution
 // ---------------------------------------------------------------------------
 
-/// Well-known path to the CrossOver Wine binary on macOS.
-#[cfg(target_os = "macos")]
-const CROSSOVER_WINE: &str =
-    "/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/wine";
-
-/// Path from a CrossOver.app bundle root to its Wine binary.
-#[cfg(target_os = "macos")]
-const CROSSOVER_WINE_SUFFIX: &str = "Contents/SharedSupport/CrossOver/bin/wine";
-
 /// Base container path for Whisky on macOS.
 #[cfg(target_os = "macos")]
 const WHISKY_CONTAINER: &str = "Library/Containers/com.isaacmarovitz.Whisky";
 
-/// Attempt to locate the Wine binary for a CrossOver bottle.
+/// Locate the Wine binary of the CrossOver install that owns `bottle` (see
+/// [`crate::crossover_install`]): a per-bottle override, the build whose
+/// wineserver is running for the prefix, or the build that created it.
 #[cfg(target_os = "macos")]
-fn find_crossover_wine() -> Option<PathBuf> {
-    // System-wide and per-user Applications folders.
-    let mut bundles = vec![PathBuf::from("/Applications/CrossOver.app")];
-    if let Some(home) = dirs::home_dir() {
-        bundles.push(home.join("Applications").join("CrossOver.app"));
+fn find_crossover_wine(bottle: &Bottle) -> Result<PathBuf> {
+    use crate::crossover_install::{select_for_bottle, SelectError};
+    match select_for_bottle(&bottle.name, &bottle.path) {
+        Ok(sel) => Ok(sel.install.wine()),
+        Err(SelectError::NoInstalls) => Err(LauncherError::WineNotFound {
+            bottle_source: bottle.source.clone(),
+            tried: "CrossOver*.app in /Applications and ~/Applications, and Spotlight \
+                    (com.codeweavers.CrossOver*)"
+                .to_string(),
+        }),
+        Err(e) => Err(LauncherError::Other(e.to_string())),
     }
-    for bundle in &bundles {
-        let wine = bundle.join(CROSSOVER_WINE_SUFFIX);
-        if wine.exists() {
-            return Some(wine);
-        }
-    }
-
-    // Fall back to a Spotlight lookup by bundle identifier, which finds
-    // CrossOver wherever the user moved it.
-    let output = std::process::Command::new("mdfind")
-        .arg("kMDItemCFBundleIdentifier == 'com.codeweavers.CrossOver'")
-        .output()
-        .ok()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        let wine = Path::new(line.trim()).join(CROSSOVER_WINE_SUFFIX);
-        if wine.exists() {
-            return Some(wine);
-        }
-    }
-
-    None
 }
 
 /// Attempt to locate a Wine binary shipped inside the Whisky container.
@@ -277,13 +265,6 @@ fn resolve_wine_binary(bottle: &Bottle) -> Result<WineCommand> {
     let wine_bin = match source {
         #[cfg(target_os = "macos")]
         "CrossOver" => {
-            let wine = find_crossover_wine().ok_or_else(|| LauncherError::WineNotFound {
-                bottle_source: source.to_string(),
-                tried: format!(
-                    "{}, ~/Applications/CrossOver.app, and Spotlight (com.codeweavers.CrossOver)",
-                    CROSSOVER_WINE
-                ),
-            })?;
             // Validate bottle name with a whitelist of safe characters.
             // CrossOver bottle names are directory names (e.g. "Skyrim: Anniversary Edition").
             if bottle.name.is_empty()
@@ -299,6 +280,7 @@ fn resolve_wine_binary(bottle: &Bottle) -> Result<WineCommand> {
                     bottle.name
                 )));
             }
+            let wine = find_crossover_wine(bottle)?;
             prefix_args.push("--bottle".to_string());
             prefix_args.push(bottle.name.clone());
             wine
@@ -636,6 +618,12 @@ pub fn launch_via_steam(bottle: &Bottle) -> Result<LaunchResult> {
     })
 }
 
+/// Launch `exe_path` in `bottle` under the bottle's Wine.
+///
+/// Blocks for up to [`EARLY_EXIT_WINDOW`] watching for an immediate failure:
+/// a non-zero exit in that window is returned as
+/// [`LauncherError::EarlyExit`] (with the tail of the per-launch log in
+/// [`launch_log_dir`]) instead of a success the UI would show as "running".
 pub fn launch_game(
     bottle: &Bottle,
     exe_path: &Path,
@@ -734,41 +722,209 @@ pub fn launch_game(
         }
     }
 
-    // Build and spawn the command.
+    run_wine(
+        bottle,
+        &wine_cmd,
+        &resolved_exe,
+        &work_dir,
+        &launch_log_dir(),
+        EARLY_EXIT_WINDOW,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Spawning and early-exit detection
+// ---------------------------------------------------------------------------
+
+/// How long a freshly started game is watched for an immediate failure
+/// (e.g. CrossOver's `wine` refusing a bottle whose wineserver belongs to
+/// another CrossOver build exits within a few seconds).
+const EARLY_EXIT_WINDOW: Duration = Duration::from_secs(8);
+
+/// Per-launch Wine output logs kept on disk.
+const MAX_LAUNCH_LOGS: usize = 20;
+
+/// Lines of Wine output quoted in an early-exit error.
+const EARLY_EXIT_TAIL_LINES: usize = 15;
+
+/// Directory for per-launch Wine output logs.
+pub fn launch_log_dir() -> PathBuf {
+    crate::config::data_dir().join("logs").join("launch")
+}
+
+/// `launch-YYYYmmdd-HHMMSS-<label>.log` in `dir`, pruning old launch logs.
+fn new_launch_log_path(dir: &Path, label: &str) -> PathBuf {
+    if let Ok(entries) = fs::read_dir(dir) {
+        let mut logs: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("launch-") && n.ends_with(".log"))
+            })
+            .collect();
+        if logs.len() >= MAX_LAUNCH_LOGS {
+            logs.sort(); // timestamped names sort chronologically
+            for old in &logs[..=logs.len() - MAX_LAUNCH_LOGS] {
+                let _ = fs::remove_file(old);
+            }
+        }
+    }
+    let label: String = label
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .take(48)
+        .collect();
+    dir.join(format!(
+        "launch-{}-{}.log",
+        chrono::Local::now().format("%Y%m%d-%H%M%S%.3f"),
+        label
+    ))
+}
+
+/// Last `n` non-empty lines of a log file.
+fn log_tail(path: &Path, n: usize) -> String {
+    let content = fs::read(path).unwrap_or_default();
+    // Only the end matters; cap what we decode.
+    let start = content.len().saturating_sub(64 * 1024);
+    let text = String::from_utf8_lossy(&content[start..]);
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
+}
+
+/// Build the Wine command for `exe` and start it (see [`spawn_and_watch`]).
+fn run_wine(
+    bottle: &Bottle,
+    wine_cmd: &WineCommand,
+    exe: &Path,
+    work_dir: &Path,
+    log_dir: &Path,
+    window: Duration,
+) -> Result<LaunchResult> {
     let mut cmd = Command::new(&wine_cmd.binary);
     // Add prefix args (e.g. CrossOver --bottle <name>) before the exe
-    for arg in &wine_cmd.prefix_args {
-        cmd.arg(arg);
-    }
-    cmd.arg(&resolved_exe);
-    cmd.current_dir(&work_dir);
-
+    cmd.args(&wine_cmd.prefix_args);
+    cmd.arg(exe);
+    cmd.current_dir(work_dir);
     for (key, value) in &wine_cmd.env_vars {
         cmd.env(key, value);
         debug!("  env: {}={}", key, value);
     }
 
-    // Detach the child so the Tauri app does not block.
-    // On Unix, we can use spawn() which does not wait.
-    match cmd.spawn() {
-        Ok(child) => {
-            let pid = child.id();
-            info!(
-                "Game process spawned (pid={}): {}",
+    let label = exe
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "game".to_string());
+    let pid = spawn_and_watch(cmd, log_dir, &label, window).map_err(|e| match e {
+        LauncherError::EarlyExit { code, log_path, tail } => {
+            let mut tail = tail;
+            let lower = tail.to_ascii_lowercase();
+            if bottle.source == "CrossOver"
+                && (lower.contains("version mismatch") || lower.contains("wineserver"))
+            {
+                tail.push_str(
+                    "\n\nThis bottle's wineserver may belong to a different CrossOver install. \
+                     Quit CrossOver (or choose the matching install in Settings \u{2192} \
+                     Game Maintenance \u{2192} CrossOver install) and try again.",
+                );
+            }
+            LauncherError::EarlyExit { code, log_path, tail }
+        }
+        other => other,
+    })?;
+    info!("Game process running (pid={}): {}", pid, exe.display());
+    Ok(LaunchResult {
+        executable: exe.to_string_lossy().into_owned(),
+        bottle_name: bottle.name.clone(),
+        pid: Some(pid),
+        success: true,
+        warning: None,
+    })
+}
+
+/// Spawn `cmd` with stdout/stderr going to a new per-launch log in
+/// `log_dir`, then watch it for `window`. A non-zero exit inside the window
+/// is returned as [`LauncherError::EarlyExit`] with the log's last lines; a
+/// process still running afterwards is handed to a reaper thread so it never
+/// lingers as a zombie. Returns the child's PID.
+fn spawn_and_watch(mut cmd: Command, log_dir: &Path, label: &str, window: Duration) -> Result<u32> {
+    let log_path = fs::create_dir_all(log_dir)
+        .ok()
+        .map(|_| new_launch_log_path(log_dir, label));
+    let log_file = log_path.as_ref().and_then(|p| match fs::File::create(p) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            warn!("Could not create launch log {}: {}", p.display(), e);
+            None
+        }
+    });
+    cmd.stdin(Stdio::null());
+    match log_file.as_ref().map(|f| (f.try_clone(), f.try_clone())) {
+        Some((Ok(out), Ok(err))) => {
+            cmd.stdout(out).stderr(err);
+        }
+        _ => {
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+    }
+
+    let mut child = cmd.spawn().map_err(|e| {
+        warn!("Failed to spawn game process: {}", e);
+        LauncherError::ProcessSpawn(e)
+    })?;
+    let pid = child.id();
+    if let Some(p) = &log_path {
+        info!("Game process spawned (pid={}), output: {}", pid, p.display());
+    }
+
+    let started = Instant::now();
+    let exited = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if started.elapsed() >= window => break None,
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => {
+                warn!("Could not poll game process {}: {}", pid, e);
+                break None;
+            }
+        }
+    };
+
+    match exited {
+        Some(status) if !status.success() => {
+            let tail = log_path
+                .as_deref()
+                .map(|p| log_tail(p, EARLY_EXIT_TAIL_LINES))
+                .unwrap_or_default();
+            warn!(
+                "Game process {} exited after {:.1}s with {}",
                 pid,
-                resolved_exe.display()
+                started.elapsed().as_secs_f32(),
+                status
             );
-            Ok(LaunchResult {
-                executable: resolved_exe.to_string_lossy().into_owned(),
-                bottle_name: bottle.name.clone(),
-                pid: Some(pid),
-                success: true,
-                warning: None,
+            Err(LauncherError::EarlyExit {
+                code: status.code(),
+                log_path: log_path.unwrap_or_default(),
+                tail,
             })
         }
-        Err(e) => {
-            warn!("Failed to spawn game process: {}", e);
-            Err(LauncherError::ProcessSpawn(e))
+        Some(_) => {
+            // Some launchers hand off and exit 0 while the game keeps running.
+            info!("Launcher process {} exited cleanly after {:.1}s", pid, started.elapsed().as_secs_f32());
+            Ok(pid)
+        }
+        None => {
+            let spawned = std::thread::Builder::new()
+                .name(format!("game-reaper-{pid}"))
+                .spawn(move || match child.wait() {
+                    Ok(status) => info!("Game process {} exited: {}", pid, status),
+                    Err(e) => warn!("Waiting on game process {} failed: {}", pid, e),
+                });
+            if let Err(e) = spawned {
+                warn!("Could not start reaper thread for pid {}: {}", pid, e);
+            }
+            Ok(pid)
         }
     }
 }
@@ -1049,5 +1205,139 @@ mod tests {
         let result = find_executable_recursive(tmp.path(), "game.exe");
         assert!(result.is_some());
         assert!(result.unwrap().ends_with("game.exe"));
+    }
+
+    // --- Early-exit detection ---
+
+    /// `false`/`true` live in /bin on Linux but only in /usr/bin on macOS.
+    fn system_bin(name: &str) -> &'static str {
+        match (name, Path::new("/bin/false").exists()) {
+            ("false", true) => "/bin/false",
+            ("false", false) => "/usr/bin/false",
+            (_, true) => "/bin/true",
+            _ => "/usr/bin/true",
+        }
+    }
+
+    fn wine_cmd(binary: &str, prefix_args: &[&str]) -> WineCommand {
+        WineCommand {
+            binary: PathBuf::from(binary),
+            prefix_args: prefix_args.iter().map(|s| s.to_string()).collect(),
+            env_vars: Vec::new(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_with_failing_wine_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle = create_fake_bottle(tmp.path(), "B", "CrossOver");
+        let exe = tmp.path().join("game.exe");
+        fs::write(&exe, b"MZ").unwrap();
+        let logs = tmp.path().join("logs");
+
+        let err = run_wine(
+            &bottle,
+            &wine_cmd(system_bin("false"), &[]),
+            &exe,
+            tmp.path(),
+            &logs,
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        match &err {
+            LauncherError::EarlyExit { code, log_path, .. } => {
+                assert_eq!(*code, Some(1));
+                assert!(log_path.starts_with(&logs), "{}", log_path.display());
+            }
+            other => panic!("expected EarlyExit, got {other:?}"),
+        }
+        assert!(err.to_string().contains("exited immediately"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn early_exit_error_quotes_wine_output_and_hints_crossover() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle = create_fake_bottle(tmp.path(), "Steam", "CrossOver");
+        let exe = tmp.path().join("skse64_loader.exe");
+        fs::write(&exe, b"MZ").unwrap();
+        // `sh -c <script> sh <exe>`: the exe lands in $1 like it would for wine.
+        let script = "echo \"starting $1\"; echo 'wine client error:0: version mismatch 812/811.' >&2; exit 3";
+        let err = run_wine(
+            &bottle,
+            &wine_cmd("/bin/sh", &["-c", script, "sh"]),
+            &exe,
+            tmp.path(),
+            &tmp.path().join("logs"),
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("exit code 3"), "{msg}");
+        assert!(msg.contains("version mismatch 812/811"), "{msg}");
+        assert!(msg.contains("starting"), "{msg}");
+        assert!(msg.contains("CrossOver install"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn long_running_game_is_reported_running() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle = create_fake_bottle(tmp.path(), "B", "Wine");
+        let exe = tmp.path().join("game.exe");
+        fs::write(&exe, b"MZ").unwrap();
+        let started = Instant::now();
+        let result = run_wine(
+            &bottle,
+            &wine_cmd("/bin/sh", &["-c", "sleep 2", "sh"]),
+            &exe,
+            tmp.path(),
+            &tmp.path().join("logs"),
+            Duration::from_millis(300),
+        )
+        .unwrap();
+        assert!(result.success);
+        assert!(result.pid.is_some());
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        // A clean exit inside the window is also a success.
+        let ok = run_wine(
+            &bottle,
+            &wine_cmd(system_bin("true"), &[]),
+            &exe,
+            tmp.path(),
+            &tmp.path().join("logs"),
+            Duration::from_secs(5),
+        );
+        assert!(ok.is_ok(), "{ok:?}");
+    }
+
+    #[test]
+    fn launch_logs_are_pruned() {
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 0..MAX_LAUNCH_LOGS + 5 {
+            fs::write(tmp.path().join(format!("launch-20260101-0000{i:02}-x.log")), b"").unwrap();
+        }
+        fs::write(tmp.path().join("other.txt"), b"").unwrap();
+        let next = new_launch_log_path(tmp.path(), "Skyrim SE/../x");
+        let name = next.file_name().unwrap().to_str().unwrap().to_string();
+        assert!(name.starts_with("launch-") && name.ends_with("-Skyrim_SE____x.log"), "{name}");
+        let remaining = fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("launch-"))
+            .count();
+        assert_eq!(remaining, MAX_LAUNCH_LOGS - 1);
+        assert!(tmp.path().join("other.txt").exists());
+    }
+
+    #[test]
+    fn log_tail_returns_last_non_empty_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("l.log");
+        fs::write(&p, "a\n\nb\nc\n\n").unwrap();
+        assert_eq!(log_tail(&p, 2), "b\nc");
+        assert_eq!(log_tail(&tmp.path().join("missing"), 2), "");
     }
 }

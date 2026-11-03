@@ -10,7 +10,7 @@ use crate::preflight;
 use crate::session_tracker;
 use crate::wine_diagnostic;
 use crate::{AppState, resolve_bottle, resolve_game};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tauri::State;
 
 // --- Wine Diagnostic Commands ---
@@ -231,9 +231,15 @@ pub async fn find_crash_logs_cmd(
 }
 
 #[tauri::command]
-pub async fn analyze_crash_log_cmd(log_path: String) -> Result<CrashReport, String> {
+pub async fn analyze_crash_log_cmd(
+    game_id: String,
+    bottle_name: String,
+    filename: String,
+) -> Result<CrashReport, String> {
     tokio::task::spawn_blocking(move || {
-        crashlog::analyze_crash_log(Path::new(&log_path)).map_err(|e| e.to_string())
+        let (bottle, _, _) = resolve_game(&game_id, &bottle_name)?;
+        let path = crashlog::resolve_crash_log_path(&bottle.path, &game_id, &filename)?;
+        crashlog::analyze_crash_log(&path).map_err(|e| e.to_string())
     })
     .await
     .map_err(crate::format_join_error)?

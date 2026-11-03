@@ -12,6 +12,7 @@ pub mod config;
 pub mod conflict_resolver;
 pub mod crashlog;
 pub mod crossover_cxmenu;
+pub mod crossover_install;
 pub mod crossover_shortcuts;
 pub mod cursor_clamp;
 pub mod database;
@@ -1626,6 +1627,8 @@ pub fn run() {
             commands::crossover_cmds::remove_custom_game_cmd,
             commands::crossover_cmds::update_custom_game_paths_cmd,
             commands::crossover_cmds::search_nexus_games_cmd,
+            commands::crossover_cmds::get_bottle_crossover_info,
+            commands::crossover_cmds::set_bottle_crossover_install,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

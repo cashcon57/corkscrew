@@ -57,6 +57,7 @@
   }
 
   async function selectLog(log: CrashLogEntry) {
+    if (!game) return;
     if (selectedLogFilename === log.filename) {
       // Deselect
       selectedLogFilename = null;
@@ -69,9 +70,18 @@
     expandedCallStack = false;
     analyzingLog = true;
     try {
-      selectedReport = await analyzeCrashLog(log.filename);
+      selectedReport = await analyzeCrashLog(
+        game.game_id,
+        wineCtx(game)?.bottle_name ?? "",
+        log.filename
+      );
     } catch (e: unknown) {
       showError(`Failed to analyze crash log: ${e}`);
+      // The file was removed since the list was loaded — drop stale entries.
+      if (String(e).includes("no longer exists")) {
+        selectedLogFilename = null;
+        await loadCrashLogs(game);
+      }
     } finally {
       analyzingLog = false;
     }

@@ -911,9 +911,38 @@ struct SKSEPluginVersionData {
 // Safety: SKSEPluginVersionData is #[repr(C)] with only primitive fields.
 unsafe impl pelite::Pod for SKSEPluginVersionData {}
 
-/// Version independence flags from SKSE64 PluginAPI.h.
+/// `versionIndependence` flags from SKSE64 PluginAPI.h.
 const VERSION_INDEPENDENT_ADDRESS_LIBRARY: u32 = 1 << 0;
 const VERSION_INDEPENDENT_SIGNATURES: u32 = 1 << 1;
+const VERSION_INDEPENDENT_STRUCTS_POST_629: u32 = 1 << 2;
+const KNOWN_VERSION_INDEPENDENT: u32 = VERSION_INDEPENDENT_ADDRESS_LIBRARY
+    | VERSION_INDEPENDENT_SIGNATURES
+    | VERSION_INDEPENDENT_STRUCTS_POST_629;
+
+/// `versionIndependenceEx` flags from SKSE64 PluginAPI.h.
+const VERSION_INDEPENDENT_EX_NO_STRUCT_USE: u32 = 1 << 0;
+const VERSION_INDEPENDENT_EX_ADDRESS_LIBRARY_V5: u32 = 1 << 1;
+
+/// `RUNTIME_VERSION_*` values from skse64_common/skse_version.h.
+const RUNTIME_VERSION_1_6_317: u32 = 0x010613D0;
+const RUNTIME_VERSION_1_6_629: u32 = 0x01062750;
+const RUNTIME_VERSION_1_7_99: u32 = 0x01070630;
+
+/// PE build-time window (Unix seconds) that SKSE 2.3.x treats as "built
+/// against the pre-1.7.99 Address Library encoding": from the founding of
+/// Bethesda to 2025-05-26 GMT (see commonlib-shared 804f07c).
+const OLD_ADDRESS_LIBRARY_BUILD_TIME: std::ops::Range<u32> = 520_128_000..1_748_217_600;
+
+/// SKSE's own rejection messages, verbatim from PluginManager.cpp so the scan
+/// matches what the user later sees in skse64.log.
+const SKSE_MSG_BAD_VERSION_DATA: &str = "disabled, bad version data";
+const SKSE_MSG_NO_NAME: &str = "disabled, no name specified";
+const SKSE_MSG_UNKNOWN_INDEPENDENCE: &str = "disabled, unsupported version independence method";
+const SKSE_MSG_INCOMPATIBLE: &str = "disabled, incompatible with current version of the game";
+const SKSE_MSG_ADDRESS_LIBRARY: &str = "disabled, address library needs to be updated";
+const SKSE_MSG_RECOMPILE: &str = "must be recompiled for new address library";
+const SKSE_MSG_PRE_629_ONLY: &str = "disabled, only compatible with versions earlier than 1.6.629";
+const SKSE_MSG_NEWER_SKSE: &str = "disabled, requires newer script extender";
 
 /// Result of checking an SKSE plugin DLL's compatibility with a game version.
 #[derive(Clone, Debug)]
@@ -922,12 +951,131 @@ pub enum SksePluginCompat {
     Compatible,
     /// DLL does not list this game version. `supports` has human-readable versions it does support.
     Incompatible { supports: Vec<String> },
+    /// SKSE will refuse to load this DLL for another reason (`reason` is
+    /// SKSE's own log message, e.g. "must be recompiled for new address
+    /// library"). `supports` lists any versions the DLL does declare.
+    Rejected { reason: String, supports: Vec<String> },
     /// DLL uses Address Library or signature scanning — works with any game version.
     VersionIndependent,
     /// DLL has no `SKSEPlugin_Version` export (legacy plugin).
     NoVersionData,
     /// Could not parse the DLL.
     ParseError(String),
+}
+
+/// The fields of `SKSEPluginVersionData` that SKSE's load check reads.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PluginVersionFields {
+    pub data_version: u32,
+    pub has_name: bool,
+    pub version_independence_ex: u32,
+    pub version_independence: u32,
+    /// `compatibleVersions` up to (not including) its zero terminator.
+    pub compatible_versions: Vec<u32>,
+    pub se_version_required: u32,
+}
+
+impl From<&SKSEPluginVersionData> for PluginVersionFields {
+    fn from(d: &SKSEPluginVersionData) -> Self {
+        Self {
+            data_version: d.data_version,
+            has_name: d.name[0] != 0,
+            version_independence_ex: d.version_independence_ex,
+            version_independence: d.version_independence,
+            compatible_versions: d
+                .compatible_versions
+                .iter()
+                .copied()
+                .take_while(|&v| v != 0)
+                .collect(),
+            se_version_required: d.se_version_required,
+        }
+    }
+}
+
+/// Outcome of SKSE's plugin load check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PluginLoadVerdict {
+    /// SKSE loads the plugin, either through a version-independence claim or
+    /// because `compatibleVersions` lists the runtime.
+    Loads { version_independent: bool },
+    /// SKSE refuses the plugin with this log message.
+    Rejected(&'static str),
+}
+
+/// Port of `PluginManager::CheckPluginCompatibility` (ianpatt/skse64 v2.3.1,
+/// skse64/PluginManager.cpp) for AE runtimes (1.6.317+), where SKSE loads
+/// plugins through `SKSEPlugin_Version`.
+///
+/// * `build_time` is the DLL's PE `FileHeader.TimeDateStamp`.
+/// * `address_library_present`: `Data/SKSE/Plugins/versionlib-M-m-b-0.bin`
+///   exists for exactly this runtime.
+/// * `skse_packed`: installed SKSE as `PACKED_SKSE_VERSION`; `None` skips the
+///   `seVersionRequired` check.
+///
+/// The 1.7.99 Address Library re-encoding check only exists in SKSE 2.3.x,
+/// which only supports 1.7.x runtimes, so it is applied for runtime >= 1.7.99.
+pub(crate) fn skse_plugin_load_verdict(
+    v: &PluginVersionFields,
+    build_time: u32,
+    runtime: u32,
+    address_library_present: bool,
+    skse_packed: Option<u32>,
+) -> PluginLoadVerdict {
+    use PluginLoadVerdict::{Loads, Rejected};
+
+    if v.data_version == 0 {
+        return Rejected(SKSE_MSG_BAD_VERSION_DATA);
+    }
+    if !v.has_name {
+        return Rejected(SKSE_MSG_NO_NAME);
+    }
+    // Unknown flags: a future breaking API change in the runtime.
+    if v.version_independence & !KNOWN_VERSION_INDEPENDENT != 0 {
+        return Rejected(SKSE_MSG_UNKNOWN_INDEPENDENCE);
+    }
+
+    let mut version_independent = v.version_independence
+        & (VERSION_INDEPENDENT_ADDRESS_LIBRARY | VERSION_INDEPENDENT_SIGNATURES)
+        != 0;
+    let mut error = SKSE_MSG_INCOMPATIBLE;
+
+    if v.version_independence & VERSION_INDEPENDENT_ADDRESS_LIBRARY != 0 {
+        if !address_library_present {
+            return Rejected(SKSE_MSG_ADDRESS_LIBRARY);
+        }
+        // The Address Library changed encoding incompatibly in 1.7.99+.
+        if runtime >= RUNTIME_VERSION_1_7_99
+            && v.version_independence_ex & VERSION_INDEPENDENT_EX_ADDRESS_LIBRARY_V5 == 0
+            && OLD_ADDRESS_LIBRARY_BUILD_TIME.contains(&build_time)
+        {
+            error = SKSE_MSG_RECOMPILE;
+            version_independent = false;
+        }
+    }
+
+    // 1.6.629+ changed structure sizes; the plugin must say which it uses.
+    if version_independent
+        && runtime >= RUNTIME_VERSION_1_6_629
+        && v.version_independence & VERSION_INDEPENDENT_STRUCTS_POST_629 == 0
+        && v.version_independence_ex & VERSION_INDEPENDENT_EX_NO_STRUCT_USE == 0
+    {
+        return Rejected(SKSE_MSG_PRE_629_ONLY);
+    }
+
+    if !version_independent && !v.compatible_versions.contains(&runtime) {
+        return Rejected(error);
+    }
+
+    if let Some(skse) = skse_packed {
+        if v.se_version_required > skse {
+            return Rejected(SKSE_MSG_NEWER_SKSE);
+        }
+    }
+
+    Loads {
+        version_independent,
+    }
 }
 
 /// Encode a game version string like "1.6.1170" into SKSE's runtime version u32.
@@ -963,6 +1111,20 @@ pub fn parse_game_version_to_runtime(version_str: &str) -> Option<u32> {
     }
 }
 
+/// Encode an SKSE64 release version ("2.3.1") as SKSE's `PACKED_SKSE_VERSION`.
+/// Returns `None` for anything that isn't a 2.x SKSE64 version (e.g. a game
+/// runtime string such as "1.7.104").
+fn parse_skse_version_packed(version: &str) -> Option<u32> {
+    let mut parts = version.trim().split('.').map(|p| p.parse::<u32>().ok());
+    let major = parts.next()??;
+    let minor = parts.next()??;
+    let beta = parts.next().unwrap_or(Some(0))?;
+    if major != 2 || minor > 0xFF || beta > 0xFFF {
+        return None;
+    }
+    Some((major << 24) | (minor << 16) | (beta << 4))
+}
+
 /// Decode SKSE runtime version u32 back to human-readable string.
 fn decode_runtime_version(v: u32) -> String {
     let major = (v >> 24) & 0xFF;
@@ -971,104 +1133,152 @@ fn decode_runtime_version(v: u32) -> String {
     format!("{}.{}.{}", major, minor, build)
 }
 
+/// Address Library database filename SKSE (or Address Library itself) loads
+/// for a runtime: `version-1-5-97-0.bin` on SE, `versionlib-M-m-b-0.bin` on AE.
+fn address_library_filenames(runtime: u32) -> Vec<String> {
+    let (major, minor, build) = ((runtime >> 24) & 0xFF, (runtime >> 16) & 0xFF, (runtime >> 4) & 0xFFF);
+    let ae = format!("versionlib-{major}-{minor}-{build}-0.bin");
+    if runtime < RUNTIME_VERSION_1_6_317 {
+        vec![format!("version-{major}-{minor}-{build}-0.bin"), ae]
+    } else {
+        vec![ae]
+    }
+}
+
 /// Check an SKSE plugin DLL's compatibility with a specific game runtime version.
 ///
 /// Parses the PE export table to find the `SKSEPlugin_Version` data export,
-/// reads the `SKSEPluginVersionData` struct, and checks whether the DLL supports
-/// the given game version — the same check SKSE performs at load time.
+/// reads the `SKSEPluginVersionData` struct, and runs SKSE's own load check
+/// (see [`skse_plugin_load_verdict`]). Assumes the Address Library for the
+/// runtime is present and skips the SKSE-version requirement; use
+/// [`scan_skse_plugins`] for the full check.
 pub fn check_skse_dll_compat(dll_path: &Path, game_runtime_version: u32) -> SksePluginCompat {
+    check_skse_dll_compat_with(dll_path, game_runtime_version, true, None)
+}
+
+fn check_skse_dll_compat_with(
+    dll_path: &Path,
+    runtime: u32,
+    address_library_present: bool,
+    skse_packed: Option<u32>,
+) -> SksePluginCompat {
     let bytes = match std::fs::read(dll_path) {
         Ok(b) => b,
         Err(e) => return SksePluginCompat::ParseError(format!("read error: {}", e)),
     };
-
-    // Try PE64 first (most SKSE plugins are 64-bit), fall back to PE32
-    let version_data = read_version_data_pe64(&bytes).or_else(|| read_version_data_pe32(&bytes));
-
-    let data = match version_data {
-        Some(d) => d,
-        None => return SksePluginCompat::NoVersionData,
-    };
-
-    // Check version independence flags
-    if data.version_independence & VERSION_INDEPENDENT_SIGNATURES != 0 {
-        // Signature scanning — truly version-independent, works with any game version
-        return SksePluginCompat::VersionIndependent;
+    match read_plugin_binary_info(&bytes) {
+        Some(info) => classify_plugin(&info, runtime, address_library_present, skse_packed),
+        None => SksePluginCompat::NoVersionData,
     }
+}
 
-    if data.version_independence & VERSION_INDEPENDENT_ADDRESS_LIBRARY != 0 {
-        // "Uses Address Library" — the plugin resolves offsets at runtime via an
-        // Address Library database file. Both SE and AE plugins set this flag with
-        // data_version=1 and empty compatible_versions, so we CANNOT distinguish
-        // SE-only from AE-compatible plugins via PE metadata alone.
-        // Return VersionIndependent here; the fix_skse_plugin_conflicts() function
-        // uses a file-comparison approach to detect and swap mismatched DLLs.
-        return SksePluginCompat::VersionIndependent;
-    }
+/// Map SKSE's verdict onto [`SksePluginCompat`].
+fn classify_plugin(
+    info: &PluginBinaryInfo,
+    runtime: u32,
+    address_library_present: bool,
+    skse_packed: Option<u32>,
+) -> SksePluginCompat {
+    let fields = &info.fields;
+    let supports: Vec<String> = fields
+        .compatible_versions
+        .iter()
+        .map(|&v| decode_runtime_version(v))
+        .collect();
 
-    // Check compatible_versions array (zero-terminated)
-    let mut supported = Vec::new();
-    for &ver in &data.compatible_versions {
-        if ver == 0 {
-            break;
+    // SE (1.5.x) SKSE loads plugins through SKSEPlugin_Query and never runs
+    // the AE version check; keep the simple flag/list reading there.
+    if runtime < RUNTIME_VERSION_1_6_317 {
+        if fields.version_independence
+            & (VERSION_INDEPENDENT_SIGNATURES | VERSION_INDEPENDENT_ADDRESS_LIBRARY)
+            != 0
+        {
+            return SksePluginCompat::VersionIndependent;
         }
-        if ver == game_runtime_version {
+        if fields.compatible_versions.contains(&runtime) {
             return SksePluginCompat::Compatible;
         }
-        supported.push(decode_runtime_version(ver));
+        return if supports.is_empty() {
+            SksePluginCompat::NoVersionData
+        } else {
+            SksePluginCompat::Incompatible { supports }
+        };
     }
 
-    if supported.is_empty() {
-        // No versions listed and not version-independent — treat as unknown
-        SksePluginCompat::NoVersionData
-    } else {
-        SksePluginCompat::Incompatible {
-            supports: supported,
+    match skse_plugin_load_verdict(
+        fields,
+        info.build_time,
+        runtime,
+        address_library_present,
+        skse_packed,
+    ) {
+        PluginLoadVerdict::Loads {
+            version_independent: true,
+        } => SksePluginCompat::VersionIndependent,
+        PluginLoadVerdict::Loads {
+            version_independent: false,
+        } => SksePluginCompat::Compatible,
+        PluginLoadVerdict::Rejected(msg) if msg == SKSE_MSG_INCOMPATIBLE && !supports.is_empty() => {
+            SksePluginCompat::Incompatible { supports }
         }
+        PluginLoadVerdict::Rejected(msg) => SksePluginCompat::Rejected {
+            reason: msg.to_string(),
+            supports,
+        },
     }
 }
 
 /// Extract the plugin name from an SKSE plugin DLL's version data.
 pub fn get_skse_plugin_name(dll_path: &Path) -> Option<String> {
     let bytes = std::fs::read(dll_path).ok()?;
-    let data = read_version_data_pe64(&bytes).or_else(|| read_version_data_pe32(&bytes))?;
-    let name = std::str::from_utf8(&data.name)
-        .ok()?
-        .trim_end_matches('\0')
-        .to_string();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    read_plugin_binary_info(&bytes).and_then(|info| info.name)
 }
 
-/// Try to read SKSEPluginVersionData from a PE64 DLL.
-fn read_version_data_pe64(bytes: &[u8]) -> Option<SKSEPluginVersionData> {
+/// What the scan needs from a plugin DLL.
+struct PluginBinaryInfo {
+    fields: PluginVersionFields,
+    name: Option<String>,
+    /// PE `FileHeader.TimeDateStamp` (what SKSE's `GetBuildTime` reads).
+    build_time: u32,
+}
+
+fn read_plugin_binary_info(bytes: &[u8]) -> Option<PluginBinaryInfo> {
+    let (data, build_time) = read_version_data_pe64(bytes).or_else(|| read_version_data_pe32(bytes))?;
+    let name_len = data.name.iter().position(|&b| b == 0).unwrap_or(data.name.len());
+    let name = String::from_utf8_lossy(&data.name[..name_len]).trim().to_string();
+    Some(PluginBinaryInfo {
+        fields: PluginVersionFields::from(&data),
+        name: (!name.is_empty()).then_some(name),
+        build_time,
+    })
+}
+
+/// Try to read SKSEPluginVersionData and the PE build time from a PE64 DLL.
+fn read_version_data_pe64(bytes: &[u8]) -> Option<(SKSEPluginVersionData, u32)> {
     use pelite::pe64::{Pe, PeFile};
     let pe = PeFile::from_bytes(bytes).ok()?;
     let exports = pe.exports().ok()?.by().ok()?;
     let export = exports.name("SKSEPlugin_Version").ok()?;
     let rva = export.symbol()?;
     let data: &SKSEPluginVersionData = pe.derva(rva).ok()?;
-    if data.data_version == 0 || data.data_version > 2 {
+    if data.data_version > 2 {
         return None;
     }
-    Some(*data)
+    Some((*data, pe.file_header().TimeDateStamp))
 }
 
-/// Try to read SKSEPluginVersionData from a PE32 DLL.
-fn read_version_data_pe32(bytes: &[u8]) -> Option<SKSEPluginVersionData> {
+/// Try to read SKSEPluginVersionData and the PE build time from a PE32 DLL.
+fn read_version_data_pe32(bytes: &[u8]) -> Option<(SKSEPluginVersionData, u32)> {
     use pelite::pe32::{Pe, PeFile};
     let pe = PeFile::from_bytes(bytes).ok()?;
     let exports = pe.exports().ok()?.by().ok()?;
     let export = exports.name("SKSEPlugin_Version").ok()?;
     let rva = export.symbol()?;
     let data: &SKSEPluginVersionData = pe.derva(rva).ok()?;
-    if data.data_version == 0 || data.data_version > 2 {
+    if data.data_version > 2 {
         return None;
     }
-    Some(*data)
+    Some((*data, pe.file_header().TimeDateStamp))
 }
 
 // ---------------------------------------------------------------------------
@@ -1101,92 +1311,87 @@ pub struct SksePluginScanResult {
 ///
 /// Checks:
 /// - Number of DLL plugins present
-/// - Address Library version files (`versionlib-1-5-97-0.bin` for SE, `versionlib-1-6-*.bin` for AE)
-/// - Whether Address Library matches the game version
-/// - Each DLL's PE-exported `SKSEPlugin_Version` data for version compatibility
-pub fn scan_skse_plugins(data_dir: &Path, game_version: &str) -> SksePluginScanResult {
+/// - The Address Library database for exactly this runtime
+///   (`versionlib-M-m-b-0.bin`, or `version-1-5-97-0.bin` on SE)
+/// - Each DLL's PE-exported `SKSEPlugin_Version` data, run through SKSE's own
+///   load check (see [`skse_plugin_load_verdict`])
+///
+/// `skse_version` is the installed SKSE64 release ("2.3.1"); when unknown the
+/// plugins' `seVersionRequired` is not checked.
+pub fn scan_skse_plugins(
+    data_dir: &Path,
+    game_version: &str,
+    skse_version: Option<&str>,
+) -> SksePluginScanResult {
     let plugins_dir = data_dir.join("SKSE").join("Plugins");
-    let mut total_plugins = 0;
     let mut warnings = Vec::new();
     let mut dll_paths: Vec<PathBuf> = Vec::new();
+    let mut bin_names: Vec<String> = Vec::new();
 
-    // Collect DLL plugins
-    if plugins_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&plugins_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_lowercase();
-                if name.ends_with(".dll") {
-                    total_plugins += 1;
-                    dll_paths.push(entry.path());
-                }
+    if let Ok(entries) = fs::read_dir(&plugins_dir) {
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            if name.ends_with(".dll") {
+                dll_paths.push(entry.path());
+            } else if name.ends_with(".bin")
+                && (name.starts_with("versionlib-") || name.starts_with("version-"))
+            {
+                bin_names.push(name);
             }
         }
     }
+    dll_paths.sort();
+    let total_plugins = dll_paths.len();
 
-    // Check Address Library version
-    let is_se = game_version.starts_with("1.5");
-    let se_lib = data_dir
-        .join("SKSE")
-        .join("Plugins")
-        .join("versionlib-1-5-97-0.bin");
-    let has_se_lib = se_lib.exists();
-
-    // Check for any AE address library file
-    let mut has_ae_lib = false;
-    if plugins_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&plugins_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_lowercase();
-                if name.starts_with("versionlib-1-6-") && name.ends_with(".bin") {
-                    has_ae_lib = true;
-                    break;
-                }
-            }
-        }
+    let has_se_lib = bin_names
+        .iter()
+        .any(|n| n == "version-1-5-97-0.bin" || n == "versionlib-1-5-97-0.bin");
+    let has_ae_lib = bin_names
+        .iter()
+        .any(|n| n.starts_with("versionlib-1-6-") || n.starts_with("versionlib-1-7-"));
+    let address_library_version = match (has_se_lib, has_ae_lib) {
+        (true, true) => "both",
+        (true, false) => "SE",
+        (false, true) => "AE",
+        (false, false) => "none",
     }
+    .to_string();
 
-    let address_library_version = if has_se_lib && has_ae_lib {
-        "both".to_string()
-    } else if has_se_lib {
-        "SE".to_string()
-    } else if has_ae_lib {
-        "AE".to_string()
-    } else {
-        "none".to_string()
-    };
+    let runtime = parse_game_version_to_runtime(game_version);
+    let skse_packed = skse_version.and_then(parse_skse_version_packed);
 
-    let address_library_matches = if !has_se_lib && !has_ae_lib {
-        true // No Address Library present — nothing to mismatch
-    } else if is_se {
-        has_se_lib
-    } else {
-        has_ae_lib
-    };
+    // SKSE opens the database for exactly the running game version.
+    let expected_libs = runtime.map(address_library_filenames).unwrap_or_default();
+    let has_exact_lib = expected_libs.iter().any(|f| bin_names.contains(f));
 
-    if !address_library_matches {
-        let expected = if is_se { "SE (1.5.97)" } else { "AE (1.6.x)" };
-        let found = if has_se_lib { "SE" } else { "AE" };
-        warnings.push(SksePluginWarning {
-            dll_name: "Address Library".to_string(),
-            warning: format!(
-                "Address Library is for {} but your game is {}. SKSE plugins may crash.",
-                found, expected
-            ),
-        });
-    }
-
-    // Per-DLL version compatibility check (if we can parse the game version)
-    if let Some(runtime) = parse_game_version_to_runtime(game_version) {
+    let mut address_library_users: Vec<String> = Vec::new();
+    if let Some(runtime) = runtime {
         for dll_path in &dll_paths {
             let dll_name = dll_path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
+            let bytes = match fs::read(dll_path) {
+                Ok(b) => b,
+                Err(e) => {
+                    debug!("Could not read SKSE plugin '{}': {}", dll_name, e);
+                    continue;
+                }
+            };
+            let Some(info) = read_plugin_binary_info(&bytes) else {
+                continue; // No SKSEPlugin_Version export (legacy / helper DLL)
+            };
+            let plugin_name = info.name.clone().unwrap_or_else(|| dll_name.clone());
+            if info.fields.version_independence & VERSION_INDEPENDENT_ADDRESS_LIBRARY != 0 {
+                address_library_users.push(plugin_name.clone());
+            }
 
-            match check_skse_dll_compat(dll_path, runtime) {
+            // A missing Address Library is reported once below, not per plugin.
+            match classify_plugin(&info, runtime, true, skse_packed) {
                 SksePluginCompat::Incompatible { supports } => {
-                    let plugin_name =
-                        get_skse_plugin_name(dll_path).unwrap_or_else(|| dll_name.clone());
                     warnings.push(SksePluginWarning {
                         dll_name: dll_name.clone(),
                         warning: format!(
@@ -1197,12 +1402,66 @@ pub fn scan_skse_plugins(data_dir: &Path, game_version: &str) -> SksePluginScanR
                         ),
                     });
                 }
-                SksePluginCompat::ParseError(e) => {
-                    debug!("Could not parse SKSE plugin '{}': {}", dll_name, e);
+                SksePluginCompat::Rejected { reason, .. } => {
+                    let hint = if reason == SKSE_MSG_RECOMPILE {
+                        format!(
+                            " — this build predates the Skyrim {} Address Library; install an updated version of the mod",
+                            game_version
+                        )
+                    } else {
+                        String::new()
+                    };
+                    warnings.push(SksePluginWarning {
+                        dll_name: dll_name.clone(),
+                        warning: format!(
+                            "{}: SKSE will not load it ({}){}",
+                            plugin_name, reason, hint
+                        ),
+                    });
                 }
-                _ => {} // Compatible, VersionIndependent, NoVersionData — all fine
+                _ => {}
             }
         }
+    }
+
+    let address_library_matches = match runtime {
+        Some(_) => has_exact_lib || (address_library_users.is_empty() && bin_names.is_empty()),
+        // Unknown game version: fall back to the SE/AE family comparison.
+        None => {
+            let is_se = game_version.starts_with("1.5");
+            (!has_se_lib && !has_ae_lib) || if is_se { has_se_lib } else { has_ae_lib }
+        }
+    };
+
+    if !address_library_matches {
+        let expected = expected_libs
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "a matching versionlib-*.bin".to_string());
+        let found = if bin_names.is_empty() {
+            "none installed".to_string()
+        } else {
+            format!("found {}", bin_names.join(", "))
+        };
+        let affected = if address_library_users.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " SKSE will disable {} Address Library plugin(s): {}.",
+                address_library_users.len(),
+                address_library_users.join(", ")
+            )
+        };
+        warnings.insert(
+            0,
+            SksePluginWarning {
+                dll_name: "Address Library".to_string(),
+                warning: format!(
+                    "Address Library for Skyrim {} is missing (needs SKSE/Plugins/{}; {}).{}",
+                    game_version, expected, found, affected
+                ),
+            },
+        );
     }
 
     info!(
@@ -1336,8 +1595,9 @@ pub fn fix_skse_plugin_conflicts(
 
         // Determine if this DLL needs fixing
         let needs_fix = match &compat {
-            // Explicit incompatibility from compatible_versions check
-            SksePluginCompat::Incompatible { .. } => true,
+            // Explicit incompatibility from compatible_versions check, or
+            // SKSE's load check rejects it (e.g. pre-1.7.99 Address Library build)
+            SksePluginCompat::Incompatible { .. } | SksePluginCompat::Rejected { .. } => true,
             // Address Library DLL on AE — might be SE build, check for a BETTER alternative.
             // Uses directional preference to prevent oscillating swaps between launches:
             // prefer mods with "Universal"/"AE" in name, then larger DLLs as fallback.
@@ -1395,6 +1655,7 @@ pub fn fix_skse_plugin_conflicts(
             SksePluginCompat::Incompatible { supports } => {
                 format!("incompatible (supports: {})", supports.join(", "))
             }
+            SksePluginCompat::Rejected { reason, .. } => reason.clone(),
             SksePluginCompat::VersionIndependent => {
                 "Address Library plugin with different-sized alternative available".to_string()
             }
@@ -2872,10 +3133,15 @@ mod tests {
              28438_Behavior_Data_Injector_Universal_Support/SKSE/Plugins/BehaviorDataInjector.dll",
         );
         if se_dll.exists() {
+            // An SE-era build may lack the 1.6.629 struct-layout flag, in
+            // which case SKSE (and so check_skse_dll_compat) rejects it.
             let compat = check_skse_dll_compat(se_dll, ae_runtime);
             assert!(
-                matches!(compat, SksePluginCompat::VersionIndependent),
-                "SE BDI should be VersionIndependent (Address Library), got {:?}",
+                matches!(
+                    compat,
+                    SksePluginCompat::VersionIndependent | SksePluginCompat::Rejected { .. }
+                ),
+                "SE BDI should be VersionIndependent or Rejected, got {:?}",
                 compat
             );
         }
@@ -2905,5 +3171,206 @@ mod tests {
                 }
             }
         }
+    }
+
+    // --- SKSE load-check port (PluginManager.cpp CheckPluginCompatibility) ---
+
+    const RT_1_6_640: u32 = 0x01062800;
+    const RT_1_6_1170: u32 = 0x01064920;
+    const RT_1_7_104: u32 = 0x01070680;
+    const SKSE_2_3_1: u32 = 0x02030010;
+    /// 2024-01-01 — inside SKSE's "old Address Library" build window.
+    const BUILT_2024: u32 = 1_704_067_200;
+    /// 2025-06-01 — after the 2025-05-26 cutoff.
+    const BUILT_2025_06: u32 = 1_748_736_000;
+
+    fn plugin(vi: u32, vix: u32, compat: &[u32]) -> PluginVersionFields {
+        PluginVersionFields {
+            data_version: 1,
+            has_name: true,
+            version_independence_ex: vix,
+            version_independence: vi,
+            compatible_versions: compat.to_vec(),
+            se_version_required: 0,
+        }
+    }
+
+    #[test]
+    fn skse_load_verdict_table() {
+        use PluginLoadVerdict::{Loads, Rejected};
+        const AL: u32 = VERSION_INDEPENDENT_ADDRESS_LIBRARY;
+        const SIG: u32 = VERSION_INDEPENDENT_SIGNATURES;
+        const P629: u32 = VERSION_INDEPENDENT_STRUCTS_POST_629;
+        const NOSTRUCT: u32 = VERSION_INDEPENDENT_EX_NO_STRUCT_USE;
+        const ALV5: u32 = VERSION_INDEPENDENT_EX_ADDRESS_LIBRARY_V5;
+        let loads_vi = Loads { version_independent: true };
+        let loads_list = Loads { version_independent: false };
+
+        // (case, fields, build_time, runtime, address library present, expected)
+        let cases: Vec<(&str, PluginVersionFields, u32, u32, bool, PluginLoadVerdict)> = vec![
+            ("bad version data", PluginVersionFields { data_version: 0, ..plugin(AL | P629, 0, &[]) },
+                BUILT_2024, RT_1_6_1170, true, Rejected(SKSE_MSG_BAD_VERSION_DATA)),
+            ("no name", PluginVersionFields { has_name: false, ..plugin(AL | P629, 0, &[]) },
+                BUILT_2024, RT_1_6_1170, true, Rejected(SKSE_MSG_NO_NAME)),
+            ("unknown independence bit", plugin(AL | P629 | (1 << 3), 0, &[]),
+                BUILT_2024, RT_1_6_1170, true, Rejected(SKSE_MSG_UNKNOWN_INDEPENDENCE)),
+            ("AL plugin on 1.6.1170 loads", plugin(AL | P629, 0, &[]),
+                BUILT_2024, RT_1_6_1170, true, loads_vi.clone()),
+            ("AL plugin without its versionlib", plugin(AL | P629, 0, &[]),
+                BUILT_2024, RT_1_6_1170, false, Rejected(SKSE_MSG_ADDRESS_LIBRARY)),
+            ("signature plugin ignores versionlib", plugin(SIG | P629, 0, &[]),
+                BUILT_2024, RT_1_6_1170, false, loads_vi.clone()),
+            ("pre-2025-05-26 AL build on 1.7.104", plugin(AL | P629, 0, &[]),
+                BUILT_2024, RT_1_7_104, true, Rejected(SKSE_MSG_RECOMPILE)),
+            ("pre-cutoff build that lists 1.7.104", plugin(AL | P629, 0, &[RT_1_7_104]),
+                BUILT_2024, RT_1_7_104, true, loads_list.clone()),
+            ("pre-cutoff build with AddressLibraryV5", plugin(AL | P629, ALV5, &[]),
+                BUILT_2024, RT_1_7_104, true, loads_vi.clone()),
+            ("post-cutoff build without V5 flag", plugin(AL | P629, 0, &[]),
+                BUILT_2025_06, RT_1_7_104, true, loads_vi.clone()),
+            ("zero timestamp is outside the window", plugin(AL | P629, 0, &[]),
+                0, RT_1_7_104, true, loads_vi.clone()),
+            ("pre-cutoff signature-only build is unaffected", plugin(SIG | P629, 0, &[]),
+                BUILT_2024, RT_1_7_104, true, loads_vi.clone()),
+            ("recompile check is 1.7.99+ only", plugin(AL | P629, 0, &[]),
+                BUILT_2024, RT_1_6_1170, true, loads_vi.clone()),
+            ("independent but pre-629 structs", plugin(AL, 0, &[]),
+                BUILT_2025_06, RT_1_6_1170, true, Rejected(SKSE_MSG_PRE_629_ONLY)),
+            ("pre-629 structs ok with NoStructUse", plugin(AL, NOSTRUCT, &[]),
+                BUILT_2025_06, RT_1_6_1170, true, loads_vi.clone()),
+            ("pre-629 structs fine on 1.6.353", plugin(AL, 0, &[]),
+                BUILT_2024, 0x01061610, true, loads_vi.clone()),
+            ("version list match", plugin(0, 0, &[RT_1_6_640, RT_1_6_1170]),
+                BUILT_2024, RT_1_6_1170, true, loads_list.clone()),
+            ("version list miss", plugin(0, 0, &[RT_1_6_640]),
+                BUILT_2024, RT_1_6_1170, true, Rejected(SKSE_MSG_INCOMPATIBLE)),
+            ("no claims at all", plugin(0, 0, &[]),
+                BUILT_2024, RT_1_6_1170, true, Rejected(SKSE_MSG_INCOMPATIBLE)),
+            ("StructsPost629 alone is not independence", plugin(P629, 0, &[]),
+                BUILT_2024, RT_1_6_1170, true, Rejected(SKSE_MSG_INCOMPATIBLE)),
+        ];
+
+        for (name, fields, build_time, runtime, al, expected) in cases {
+            assert_eq!(
+                skse_plugin_load_verdict(&fields, build_time, runtime, al, Some(SKSE_2_3_1)),
+                expected,
+                "case: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn skse_load_verdict_checks_required_skse_version() {
+        let mut p = plugin(
+            VERSION_INDEPENDENT_ADDRESS_LIBRARY | VERSION_INDEPENDENT_STRUCTS_POST_629,
+            0,
+            &[],
+        );
+        p.se_version_required = 0x02030020; // 2.3.2
+        assert_eq!(
+            skse_plugin_load_verdict(&p, BUILT_2025_06, RT_1_6_1170, true, Some(SKSE_2_3_1)),
+            PluginLoadVerdict::Rejected(SKSE_MSG_NEWER_SKSE)
+        );
+        p.se_version_required = SKSE_2_3_1;
+        assert_eq!(
+            skse_plugin_load_verdict(&p, BUILT_2025_06, RT_1_6_1170, true, Some(SKSE_2_3_1)),
+            PluginLoadVerdict::Loads { version_independent: true }
+        );
+        // Unknown SKSE version: the requirement is not checked.
+        p.se_version_required = 0x02050000;
+        assert_eq!(
+            skse_plugin_load_verdict(&p, BUILT_2025_06, RT_1_6_1170, true, None),
+            PluginLoadVerdict::Loads { version_independent: true }
+        );
+    }
+
+    #[test]
+    fn classify_maps_recompile_verdict_to_rejected() {
+        let info = PluginBinaryInfo {
+            fields: plugin(
+                VERSION_INDEPENDENT_ADDRESS_LIBRARY | VERSION_INDEPENDENT_STRUCTS_POST_629,
+                0,
+                &[],
+            ),
+            name: Some("ScrambledBugs".into()),
+            build_time: BUILT_2024,
+        };
+        match classify_plugin(&info, RT_1_7_104, true, None) {
+            SksePluginCompat::Rejected { reason, .. } => assert_eq!(reason, SKSE_MSG_RECOMPILE),
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+        assert!(matches!(
+            classify_plugin(&info, RT_1_6_1170, true, None),
+            SksePluginCompat::VersionIndependent
+        ));
+        // SE keeps the plain flag reading (SKSE 2.0.x loads via SKSEPlugin_Query).
+        assert!(matches!(
+            classify_plugin(&info, 0x01050610, true, None),
+            SksePluginCompat::VersionIndependent
+        ));
+        let listed = PluginBinaryInfo {
+            fields: plugin(0, 0, &[RT_1_6_640]),
+            name: None,
+            build_time: 0,
+        };
+        match classify_plugin(&listed, RT_1_6_1170, true, None) {
+            SksePluginCompat::Incompatible { supports } => assert_eq!(supports, vec!["1.6.640"]),
+            other => panic!("expected Incompatible, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skse_version_packing() {
+        assert_eq!(parse_skse_version_packed("2.3.1"), Some(SKSE_2_3_1));
+        assert_eq!(parse_skse_version_packed("2.2.6"), Some(0x02020060));
+        assert_eq!(parse_skse_version_packed("2.0.20"), Some(0x02000140));
+        // A game runtime string is not an SKSE version.
+        assert_eq!(parse_skse_version_packed("1.7.104"), None);
+        assert_eq!(parse_skse_version_packed("garbage"), None);
+    }
+
+    #[test]
+    fn address_library_filename_is_exact_runtime() {
+        assert_eq!(address_library_filenames(RT_1_7_104), vec!["versionlib-1-7-104-0.bin"]);
+        assert_eq!(address_library_filenames(RT_1_6_1170), vec!["versionlib-1-6-1170-0.bin"]);
+        assert_eq!(
+            address_library_filenames(0x01050610),
+            vec!["version-1-5-97-0.bin", "versionlib-1-5-97-0.bin"]
+        );
+    }
+
+    #[test]
+    fn scan_requires_exact_address_library_for_runtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("SKSE").join("Plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        fs::write(plugins.join("versionlib-1-6-1170-0.bin"), b"x").unwrap();
+
+        // 1.7.104 game with only the 1.6.1170 database: mismatch.
+        let r = scan_skse_plugins(tmp.path(), "1.7.104", None);
+        assert_eq!(r.address_library_version, "AE");
+        assert!(!r.address_library_matches);
+        assert_eq!(r.warnings[0].dll_name, "Address Library");
+        assert!(
+            r.warnings[0].warning.contains("versionlib-1-7-104-0.bin"),
+            "{}",
+            r.warnings[0].warning
+        );
+
+        // 1.6.1170 game: exact match.
+        let r = scan_skse_plugins(tmp.path(), "1.6.1170", None);
+        assert!(r.address_library_matches);
+        assert!(r.warnings.is_empty());
+
+        // 1.6.640 game: a different AE database does not count.
+        assert!(!scan_skse_plugins(tmp.path(), "1.6.640", None).address_library_matches);
+
+        // File name match is case-insensitive.
+        fs::write(plugins.join("VersionLib-1-7-104-0.bin"), b"x").unwrap();
+        assert!(scan_skse_plugins(tmp.path(), "1.7.104", None).address_library_matches);
+
+        // No database and no plugins at all: nothing to mismatch.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(scan_skse_plugins(empty.path(), "1.7.104", None).address_library_matches);
     }
 }

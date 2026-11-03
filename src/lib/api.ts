@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Bottle,
+  BottleCrossOverInfo,
   BottleSettings,
   BottleSettingDef,
   DetectedGame,
@@ -346,6 +347,21 @@ export async function setConfigValue(
   value: string
 ): Promise<void> {
   return invoke("set_config_value", { key, value });
+}
+
+/** CrossOver installs on this Mac and the one `bottleName` launches with. */
+export async function getBottleCrossOverInfo(
+  bottleName: string
+): Promise<BottleCrossOverInfo> {
+  return invoke("get_bottle_crossover_info", { bottleName });
+}
+
+/** Pin a CrossOver bottle to an install (`.app` path), or `null` for automatic. */
+export async function setBottleCrossOverInstall(
+  bottleName: string,
+  appPath: string | null
+): Promise<void> {
+  return invoke("set_bottle_crossover_install", { bottleName, appPath });
 }
 
 export async function getNativeMode(): Promise<boolean> {
@@ -1186,10 +1202,14 @@ export async function findCrashLogs(
   return invoke("find_crash_logs_cmd", { gameId, bottleName });
 }
 
+/** Analyze a crash log by the `filename` from `findCrashLogs`; the backend
+ * resolves it inside the game's script-extender log directory. */
 export async function analyzeCrashLog(
-  logPath: string
+  gameId: string,
+  bottleName: string,
+  filename: string
 ): Promise<CrashReport> {
-  return invoke("analyze_crash_log_cmd", { logPath });
+  return invoke("analyze_crash_log_cmd", { gameId, bottleName, filename });
 }
 
 // NexusMods Browse
