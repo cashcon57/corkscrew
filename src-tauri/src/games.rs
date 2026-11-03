@@ -611,6 +611,11 @@ fn game_executables_entry(game_id: &str) -> Option<&'static (&'static str, &'sta
     GAME_EXECUTABLES.iter().find(|(id, ..)| *id == game_id)
 }
 
+/// The game's own executable (e.g. `SkyrimSE.exe`).
+pub fn game_executable(game_id: &str) -> Option<&'static str> {
+    game_executables_entry(game_id).map(|(_, exe, _)| *exe)
+}
+
 /// Script-extender loader executable for a game (e.g. `skse64_loader.exe`).
 pub fn script_extender_loader(game_id: &str) -> Option<&'static str> {
     game_executables_entry(game_id).and_then(|(_, _, se)| se.map(|(loader, _)| loader))
