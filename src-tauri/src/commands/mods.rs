@@ -2247,30 +2247,29 @@ pub async fn launch_game_cmd(
 
     let mut launch_warnings: Vec<String> = Vec::new();
 
-    // Detect game version once for Engine Fixes gating, the SKSE compat
-    // check and the version guard below.
+    // Detect game version once for the SKSE compat check and the version
+    // guard below.
     let detected_version = if game_id == "skyrimse" {
         downgrader::detect_skyrim_version(&game_path).ok()
     } else {
         None
     };
 
-    // SSE Engine Fixes for Wine policy. Runs BEFORE the self-heal so stock
-    // Engine Fixes files that are deliberately withheld (or were renamed in
-    // staging by older versions) aren't reported as "missing".
+    // Undo the retired SSE Engine Fixes for Wine integration. Runs BEFORE
+    // the self-heal so stock Engine Fixes files that older versions withheld
+    // (or renamed in staging) are restored here rather than reported as
+    // "missing".
     if game_id == "skyrimse" {
         let t = Instant::now();
-        let messages = skse::apply_engine_fixes_blocking(
+        let migration = skse::migrate_from_engine_fixes_wine(
             &db,
             &game_id,
             &bottle_name,
             &data_dir_check,
             &game_path,
-            detected_version.as_ref().map(|s| s.current_version.as_str()),
-            "Pre-launch",
         );
-        log::info!("Pre-launch: Engine Fixes policy ({}ms)", t.elapsed().as_millis());
-        launch_warnings.extend(messages);
+        log::info!("Pre-launch: Engine Fixes migration ({}ms)", t.elapsed().as_millis());
+        launch_warnings.extend(migration.into_messages());
     }
 
     // Pre-launch self-heal: restore only managed files that went missing,

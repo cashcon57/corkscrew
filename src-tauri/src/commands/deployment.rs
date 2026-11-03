@@ -292,9 +292,10 @@ pub async fn redeploy_all_mods(
         let plugins_sync_error = crate::sync_plugins_logged(&game, &bottle, "redeploy");
         let mut engine_fixes_messages: Vec<String> = Vec::new();
         if game_id == "skyrimse" {
-            engine_fixes_messages = skse::apply_engine_fixes_blocking(
-                &db, &game_id, &bottle_name, &data_dir, &game.game_path, None, "Redeploy",
-            );
+            engine_fixes_messages = skse::migrate_from_engine_fixes_wine(
+                &db, &game_id, &bottle_name, &data_dir, &game.game_path,
+            )
+            .into_messages();
             // Disable Wine-incompatible SKSE plugins
             let wine_disabled =
                 skse::disable_wine_incompatible_plugins(&data_dir, &db, &game_id, &bottle_name);
@@ -366,8 +367,8 @@ pub async fn deploy_incremental_cmd(
                 .push(format!("plugins.txt sync failed: {}", e));
         }
         if game_id == "skyrimse" {
-            skse::apply_engine_fixes_blocking(
-                &db, &game_id, &bottle_name, &data_dir, &game.game_path, None, "Incremental deploy",
+            skse::migrate_from_engine_fixes_wine(
+                &db, &game_id, &bottle_name, &data_dir, &game.game_path,
             );
             // Disable Wine-incompatible SKSE plugins
             let wine_disabled =
@@ -588,36 +589,6 @@ pub async fn get_verification_level() -> Result<String, String> {
 pub async fn set_verification_level(level: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         config::set_config_value("verification_level", &level).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(crate::format_join_error)?
-}
-
-/// Legacy: Toggle whether to use the original SSE Engine Fixes instead of the Wine fork.
-/// Kept for backward compatibility — new code should use `set_use_wine_engine_fixes`.
-/// "Use original" is the inverse of "use the Wine fork", so this writes the
-/// canonical `use_wine_engine_fixes` flag (the only one gates read).
-#[tauri::command]
-pub async fn set_use_original_engine_fixes(enabled: bool) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
-        let mut cfg = config::get_config().map_err(|e| e.to_string())?;
-        cfg.use_original_engine_fixes = enabled;
-        cfg.use_wine_engine_fixes = !enabled;
-        config::save_config(&cfg).map_err(|e| e.to_string())?;
-        Ok(())
-    })
-    .await
-    .map_err(crate::format_join_error)?
-}
-
-/// Toggle whether to deploy SSE Engine Fixes for Wine (opt-in).
-#[tauri::command]
-pub async fn set_use_wine_engine_fixes(enabled: bool) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
-        let mut cfg = config::get_config().map_err(|e| e.to_string())?;
-        cfg.use_wine_engine_fixes = enabled;
-        config::save_config(&cfg).map_err(|e| e.to_string())?;
-        Ok(())
     })
     .await
     .map_err(crate::format_join_error)?

@@ -28,7 +28,7 @@ NEXUS_API_BASE = "https://api.nexusmods.com"
 
 # Games with dedicated Rust plugins (beyond generic registry support)
 DEDICATED_PLUGINS = {
-    "skyrimse": "Full — LOOT, SKSE, crash logs, Engine Fixes for Wine, Wabbajack",
+    "skyrimse": "Full — LOOT, SKSE, crash logs, Engine Fixes, Wabbajack",
     "fallout4": "Full — LOOT, dedicated plugin",
     "hogwartslegacy": "Enhanced — UE4SS auto-install, PAK merger, Lua routing, deploy hooks",
 }

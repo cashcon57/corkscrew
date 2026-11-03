@@ -567,7 +567,7 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
         <ul class="cklist">
           <li><span class="ck"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>Native binary for macOS (Apple Silicon & Intel), SteamOS, Ubuntu, Fedora, Arch, and more. No Wine wrapper, no Electron.</li>
           <li><span class="ck"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>One-click Nexus SSO. Download with manager, full API.</li>
-          <li><span class="ck"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>SKSE, Engine Fixes, Address Library auto-deployed.</li>
+          <li><span class="ck"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>SKSE and Address Library auto-deployed; stock Engine Fixes supported.</li>
           <li><span class="ck"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>LOOT plugin sorting and conflict detection built in.</li>
         </ul>
       </div>
@@ -645,8 +645,8 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
     <div class="bg">
       <div class="bc glass rv">
         <div class="bi"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
-        <h3>Engine Fixes, Auto-Deployed</h3>
-        <p>Custom Wine-compatible SSE Engine Fixes patches 60+ crash sites with VEH recovery. Deployed automatically, updated silently.</p>
+        <h3>Stock Engine Fixes, Under Wine</h3>
+        <p>SSE Engine Fixes 7.0.21+ runs under CrossOver and NotProton with every patch on. Corkscrew deploys it exactly as the mod ships.</p>
       </div>
       <div class="bc glass rv rv-d1">
         <div class="bi"><svg viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></div>
@@ -711,7 +711,7 @@ footer{border-top:1px solid var(--glass-border);padding:40px 0}
       <div class="ti"><div class="ti-d">Jan 2026</div><h3>First commit</h3><p>Can a Tauri app install a Skyrim mod into a CrossOver bottle on macOS? Turns out, yes. The prototype handled archive extraction, file deployment, and Wine prefix detection in under a week.</p></div>
       <div class="ti"><div class="ti-d">Jan 2026</div><h3>Nexus Mods integration</h3><p>OAuth 2.0 sign-in with PKCE, NXM deep-link handling, and download-with-manager support. One-click installs from the Nexus website straight into your Wine bottle.</p></div>
       <div class="ti"><div class="ti-d">Feb 2026</div><h3>FOMOD installer</h3><p>Complete XML wizard implementation with conditional flags, image previews, multi-step flows, and nested option groups. Handles the same FOMOD configs that MO2 and Vortex use.</p></div>
-      <div class="ti"><div class="ti-d">Feb 2026</div><h3>SSE Engine Fixes for Wine</h3><p>A custom fork of <a href="https://github.com/cashcon57/SSEEngineFixesForWine" target="_blank" rel="noopener" style="color:var(--orange)">SSEEngineFixesForWine</a>&mdash;a Wine-compatible SKSE plugin that patches 60+ crash sites with vectored exception handling, sentinel page recovery, and code-cave hooks. Auto-deployed by Corkscrew on every launch.</p></div>
+      <div class="ti"><div class="ti-d">Feb 2026</div><h3>SSE Engine Fixes for Wine</h3><p>A custom fork of <a href="https://github.com/cashcon57/SSEEngineFixesForWine" target="_blank" rel="noopener" style="color:var(--orange)">SSEEngineFixesForWine</a>&mdash;a Wine-compatible SKSE plugin that patches 60+ crash sites with vectored exception handling, sentinel page recovery, and code-cave hooks. Retired in November 2026, once stock SSE Engine Fixes ran under Wine.</p></div>
       <div class="ti"><div class="ti-d">Feb 2026</div><h3>LOOT integration</h3><p>Native libloot FFI binding for plugin sorting, master validation, and conflict detection. 3,700+ metadata entries. Sorts your entire load order in milliseconds.</p></div>
       <div class="ti"><div class="ti-d">Mar 2026</div><h3>Nexus Collections & Wabbajack</h3><p>Automated modlist installation with a full 7-phase pipeline: metadata resolution, multi-source archive downloads (Nexus, MEGA, Google Drive), BSA/BA2 packing, DDS texture transforms, binary delta patches, FOMOD evaluation, and hardlink deployment.</p></div>
       <div class="ti"><div class="ti-d">Mar 2026</div><h3>Public beta</h3><p>v0.9 released for macOS (Apple Silicon & Intel) and Linux (SteamOS, Ubuntu, Fedora, Arch via AppImage, .deb, and .rpm). Fully open source under GPL-3.0.</p></div>
