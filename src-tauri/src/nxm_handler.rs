@@ -10,21 +10,74 @@ use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use std::process::Command;
 
-/// The .desktop file content for NXM and corkscrew:// handler registration.
-#[allow(dead_code)]
-const DESKTOP_FILE_CONTENT: &str = r#"[Desktop Entry]
-Type=Application
-Name=Corkscrew URL Handler
-Comment=Handle NexusMods and Corkscrew protocol links
-Exec=corkscrew --url %u
-Terminal=false
-MimeType=x-scheme-handler/nxm;x-scheme-handler/corkscrew;
-NoDisplay=true
-Categories=Game;
-"#;
-
-#[allow(dead_code)]
+/// URL-handler-only desktop entry written by [`register_nxm_handler`]
+/// (Settings → "Register NXM handler").
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const DESKTOP_FILE_NAME: &str = "corkscrew-nxm.desktop";
+
+/// Full launcher desktop entry written by
+/// `steam_integration::create_desktop_entry` (the "Add to Steam" / SteamOS
+/// auto-setup path). It also declares `x-scheme-handler/nxm` and is set as
+/// the xdg-mime default, so it counts as "Corkscrew is the NXM handler" too.
+pub(crate) const MAIN_DESKTOP_FILE_NAME: &str = "corkscrew.desktop";
+
+/// Desktop entries Corkscrew itself writes into `~/.local/share/applications`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const OWN_DESKTOP_FILES: [&str; 2] = [DESKTOP_FILE_NAME, MAIN_DESKTOP_FILE_NAME];
+
+/// Build the .desktop file content for NXM and corkscrew:// handler
+/// registration, launching `exe_path` (the AppImage path when running as
+/// one — `corkscrew` is not on `$PATH` for AppImage installs, the usual
+/// SteamOS setup).
+///
+/// The URL must be the *only* argument: `tauri-plugin-deep-link` on Linux
+/// ignores argv unless it is exactly `[bin, url]`, so any extra flag (the
+/// old `--url %u`) silently drops the link before `onOpenUrl` sees it.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn desktop_file_content(exe_path: &str) -> Result<String, String> {
+    Ok(format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=Corkscrew URL Handler\n\
+         Comment=Handle NexusMods and Corkscrew protocol links\n\
+         Exec={} %u\n\
+         Terminal=false\n\
+         MimeType=x-scheme-handler/nxm;x-scheme-handler/corkscrew;\n\
+         NoDisplay=true\n\
+         Categories=Game;\n",
+        quote_exec_arg(exe_path)?
+    ))
+}
+
+/// Quote one argument for a .desktop `Exec=` key per the Desktop Entry
+/// spec: wrap in double quotes, backslash-escape `"` `` ` `` `$` `\`, then
+/// apply the string-value escaping (each `\` doubled) and escape `%` as `%%`
+/// so field codes can't be injected. Control characters can't be
+/// represented and are rejected.
+pub(crate) fn quote_exec_arg(arg: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    for c in arg.chars() {
+        match c {
+            '"' | '`' | '$' => {
+                out.push_str("\\\\");
+                out.push(c);
+            }
+            '\\' => out.push_str("\\\\\\\\"),
+            '%' => out.push_str("%%"),
+            c if c.is_control() => {
+                return Err(format!(
+                    "Executable path contains a control character and can't be \
+                     written to a .desktop file: {:?}",
+                    arg
+                ));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    Ok(out)
+}
 
 /// Register Corkscrew as the NXM protocol handler on Linux.
 ///
@@ -46,11 +99,14 @@ pub fn register_nxm_handler() -> Result<(), String> {
         }
 
         let desktop_path = get_desktop_file_path()?;
+        let exe_path = crate::steam_integration::get_exe_path()
+            .map_err(|e| format!("Failed to resolve Corkscrew executable: {}", e))?;
+        let content = desktop_file_content(&exe_path)?;
 
         // Write .desktop file
         std::fs::create_dir_all(desktop_path.parent().unwrap())
             .map_err(|e| format!("Failed to create directory: {}", e))?;
-        std::fs::write(&desktop_path, DESKTOP_FILE_CONTENT)
+        std::fs::write(&desktop_path, content)
             .map_err(|e| format!("Failed to write .desktop file: {}", e))?;
 
         info!(
@@ -136,6 +192,12 @@ fn try_refresh_desktop_database(dir: &std::path::Path) {
 }
 
 /// Check if Corkscrew is registered as the NXM handler.
+///
+/// True only when the xdg-mime default for `x-scheme-handler/nxm` is one of
+/// Corkscrew's desktop entries *and* that entry's `Exec=` still launches an
+/// existing program. A handler whose target was moved or renamed (e.g. an
+/// AppImage replaced by a differently named download) silently does nothing
+/// on click, so it is reported as not registered and the UI offers to fix it.
 pub fn is_nxm_handler_registered() -> bool {
     #[cfg(not(target_os = "linux"))]
     {
@@ -144,19 +206,349 @@ pub fn is_nxm_handler_registered() -> bool {
 
     #[cfg(target_os = "linux")]
     {
-        let output = Command::new("xdg-mime")
-            .arg("query")
-            .arg("default")
-            .arg("x-scheme-handler/nxm")
-            .output();
+        current_handler_status()
+            .map(|(_, status)| status.launches_corkscrew())
+            .unwrap_or(false)
+    }
+}
 
-        match output {
-            Ok(o) => {
-                let handler = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                handler == DESKTOP_FILE_NAME
-            }
-            Err(_) => false,
+/// Startup self-heal (Linux): if the registered `nxm://` handler is one of
+/// the desktop entries Corkscrew wrote itself, but its `Exec=` no longer
+/// points at the running executable (AppImage moved/renamed/updated under a
+/// new name), rewrite it to launch the current executable.
+///
+/// Best-effort: never fails, only logs. A handler that belongs to another
+/// app, or whose desktop file was deliberately removed, is left alone.
+#[cfg(target_os = "linux")]
+pub fn self_heal_handler_registration() {
+    let Some((handler, status)) = current_handler_status() else {
+        return;
+    };
+    let Some(file_name) = self_heal_target(&handler, &status) else {
+        return;
+    };
+    let exe_path = match crate::steam_integration::get_exe_path() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("NXM handler self-heal: cannot resolve executable: {}", e);
+            return;
         }
+    };
+    log::info!(
+        "NXM handler self-heal: {} is {:?}; rewriting Exec to {}",
+        file_name,
+        status,
+        exe_path
+    );
+
+    let result = if file_name == MAIN_DESKTOP_FILE_NAME {
+        crate::steam_integration::create_desktop_entry(&exe_path)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    } else {
+        rewrite_nxm_desktop_file(&exe_path)
+    };
+    if let Err(e) = result {
+        log::warn!("NXM handler self-heal failed for {}: {}", file_name, e);
+    }
+}
+
+/// Rewrite `corkscrew-nxm.desktop` in place. The xdg-mime association is by
+/// file name and already points at it, so only the file contents change.
+#[cfg(target_os = "linux")]
+fn rewrite_nxm_desktop_file(exe_path: &str) -> Result<(), String> {
+    let desktop_path = get_desktop_file_path()?;
+    let content = desktop_file_content(exe_path)?;
+    std::fs::write(&desktop_path, content)
+        .map_err(|e| format!("Failed to write {}: {}", desktop_path.display(), e))?;
+    if let Some(app_dir) = desktop_path.parent() {
+        try_refresh_desktop_database(app_dir);
+    }
+    Ok(())
+}
+
+/// How the current `x-scheme-handler/nxm` default relates to Corkscrew.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) enum HandlerStatus {
+    /// The default handler is some other application (or none).
+    NotCorkscrew,
+    /// The default names a Corkscrew desktop entry, but the file doesn't
+    /// exist (e.g. removed by "Unregister", which doesn't reset xdg-mime).
+    Missing,
+    /// The desktop file exists but its `Exec=` is missing/unparseable or
+    /// launches a program that no longer exists. Clicks do nothing.
+    Stale,
+    /// `Exec=` launches an existing program, but not the running executable.
+    Outdated,
+    /// `Exec=` launches the running executable.
+    Current,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl HandlerStatus {
+    /// Clicking an nxm:// link will start *some* Corkscrew binary.
+    pub(crate) fn launches_corkscrew(&self) -> bool {
+        matches!(self, HandlerStatus::Outdated | HandlerStatus::Current)
+    }
+}
+
+/// Is `desktop_id` (as printed by `xdg-mime query default`) one of
+/// Corkscrew's desktop entries? Case-insensitive so a packaged
+/// `Corkscrew.desktop` (deb/rpm bundle) also counts.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn is_corkscrew_desktop_id(desktop_id: &str) -> bool {
+    OWN_DESKTOP_FILES
+        .iter()
+        .any(|own| own.eq_ignore_ascii_case(desktop_id.trim()))
+}
+
+/// Classify the registered NXM handler. Pure: filesystem checks are injected
+/// so this can be unit-tested on any platform.
+///
+/// - `desktop_content`: contents of the handler's desktop file, `None` if
+///   it couldn't be found/read.
+/// - `program_exists(program)`: whether the `Exec=` program can be launched.
+/// - `same_program(a, b)`: whether two paths name the same executable.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn classify_handler(
+    default_handler: &str,
+    desktop_content: Option<&str>,
+    current_exe: &str,
+    program_exists: impl Fn(&str) -> bool,
+    same_program: impl Fn(&str, &str) -> bool,
+) -> HandlerStatus {
+    if !is_corkscrew_desktop_id(default_handler) {
+        return HandlerStatus::NotCorkscrew;
+    }
+    let Some(content) = desktop_content else {
+        return HandlerStatus::Missing;
+    };
+    let args = desktop_entry_exec(content).and_then(parse_exec_args);
+    let Some(program) = args.as_deref().and_then(exec_program) else {
+        return HandlerStatus::Stale;
+    };
+    if !program_exists(program) {
+        return HandlerStatus::Stale;
+    }
+    if same_program(program, current_exe) {
+        HandlerStatus::Current
+    } else {
+        HandlerStatus::Outdated
+    }
+}
+
+/// Which of Corkscrew's own desktop files (if any) the startup self-heal
+/// should rewrite. Only exact names we write into the user's applications
+/// directory qualify, and only when the entry exists but doesn't launch the
+/// running executable.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn self_heal_target(
+    default_handler: &str,
+    status: &HandlerStatus,
+) -> Option<&'static str> {
+    if !matches!(status, HandlerStatus::Stale | HandlerStatus::Outdated) {
+        return None;
+    }
+    OWN_DESKTOP_FILES
+        .iter()
+        .copied()
+        .find(|own| *own == default_handler.trim())
+}
+
+/// Value of the `Exec` key in the `[Desktop Entry]` group, if present.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn desktop_entry_exec(content: &str) -> Option<&str> {
+    let mut in_main_group = false;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_main_group = line == "[Desktop Entry]";
+            continue;
+        }
+        if !in_main_group {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            if key.trim() == "Exec" {
+                return Some(value.trim_start());
+            }
+        }
+    }
+    None
+}
+
+/// Split a desktop-entry `Exec=` value into arguments, undoing the escaping
+/// [`quote_exec_arg`] applies: first the string-value escapes (`\s` `\n`
+/// `\t` `\r` `\\`), then Exec quoting (`"..."` with `\"` `` \` `` `\$` `\\`
+/// inside), then `%%` → `%`. Field codes such as `%u` are kept verbatim.
+/// Returns `None` for an unterminated quote.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn parse_exec_args(value: &str) -> Option<Vec<String>> {
+    let mut unescaped = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            unescaped.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('s') => unescaped.push(' '),
+            Some('n') => unescaped.push('\n'),
+            Some('t') => unescaped.push('\t'),
+            Some('r') => unescaped.push('\r'),
+            Some('\\') => unescaped.push('\\'),
+            Some(other) => {
+                unescaped.push('\\');
+                unescaped.push(other);
+            }
+            None => unescaped.push('\\'),
+        }
+    }
+
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_arg = false;
+    let mut in_quotes = false;
+    let mut chars = unescaped.chars();
+    while let Some(c) = chars.next() {
+        if in_quotes {
+            match c {
+                '"' => in_quotes = false,
+                '\\' => match chars.next() {
+                    Some(e @ ('"' | '`' | '$' | '\\')) => current.push(e),
+                    Some(other) => {
+                        current.push('\\');
+                        current.push(other);
+                    }
+                    None => return None,
+                },
+                c => current.push(c),
+            }
+        } else {
+            match c {
+                ' ' | '\t' => {
+                    if in_arg {
+                        args.push(std::mem::take(&mut current));
+                        in_arg = false;
+                    }
+                }
+                '"' => {
+                    in_quotes = true;
+                    in_arg = true;
+                }
+                c => {
+                    current.push(c);
+                    in_arg = true;
+                }
+            }
+        }
+    }
+    if in_quotes {
+        return None;
+    }
+    if in_arg {
+        args.push(current);
+    }
+    Some(args.into_iter().map(|a| a.replace("%%", "%")).collect())
+}
+
+/// The program an `Exec=` line launches, looking through a leading
+/// `env NAME=VALUE ...` wrapper (which `create_desktop_entry` uses on NVIDIA
+/// systems).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn exec_program(args: &[String]) -> Option<&str> {
+    let mut iter = args.iter().map(String::as_str);
+    let first = iter.next()?;
+    if first != "env" && !first.ends_with("/env") {
+        return Some(first);
+    }
+    iter.find(|arg| !is_env_assignment(arg))
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn is_env_assignment(arg: &str) -> bool {
+    match arg.split_once('=') {
+        Some((name, _)) => !name.is_empty() && !name.contains('/'),
+        None => false,
+    }
+}
+
+/// Query xdg-mime for the nxm:// default and classify it against the running
+/// executable. `None` when xdg-mime isn't available or reports nothing.
+#[cfg(target_os = "linux")]
+fn current_handler_status() -> Option<(String, HandlerStatus)> {
+    let output = Command::new("xdg-mime")
+        .args(["query", "default", "x-scheme-handler/nxm"])
+        .output()
+        .ok()?;
+    let handler = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if handler.is_empty() {
+        return None;
+    }
+    if !is_corkscrew_desktop_id(&handler) {
+        return Some((handler, HandlerStatus::NotCorkscrew));
+    }
+    let content = find_desktop_file(&handler).and_then(|p| std::fs::read_to_string(p).ok());
+    let current_exe = crate::steam_integration::get_exe_path().unwrap_or_default();
+    let status = classify_handler(
+        &handler,
+        content.as_deref(),
+        &current_exe,
+        program_exists,
+        same_program,
+    );
+    Some((handler, status))
+}
+
+/// Locate a desktop file by ID in the XDG application directories, user
+/// directory first (matching how xdg-mime resolves it).
+#[cfg(target_os = "linux")]
+fn find_desktop_file(desktop_id: &str) -> Option<PathBuf> {
+    // A desktop ID is a bare file name; refuse anything path-like.
+    if desktop_id.contains('/') || desktop_id.contains('\0') || desktop_id.starts_with('.') {
+        return None;
+    }
+    let mut data_dirs: Vec<PathBuf> = Vec::new();
+    match std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+        Some(dir) => data_dirs.push(PathBuf::from(dir)),
+        None => {
+            if let Some(home) = dirs::home_dir() {
+                data_dirs.push(home.join(".local/share"));
+            }
+        }
+    }
+    let system_dirs = std::env::var_os("XDG_DATA_DIRS")
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    data_dirs.extend(std::env::split_paths(&system_dirs));
+
+    data_dirs
+        .into_iter()
+        .map(|dir| dir.join("applications").join(desktop_id))
+        .find(|p| p.is_file())
+}
+
+/// Whether an `Exec=` program can be launched: an absolute/relative path
+/// must be an executable file; a bare name must be on `$PATH`.
+#[cfg(target_os = "linux")]
+fn program_exists(program: &str) -> bool {
+    if program.contains('/') {
+        is_executable_file(std::path::Path::new(program))
+    } else {
+        binary_on_path(program)
+    }
+}
+
+/// Compare two executable paths, resolving symlinks when both exist.
+#[cfg(target_os = "linux")]
+fn same_program(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
     }
 }
 
@@ -606,6 +998,143 @@ mod tests {
         let games = known(&[("skyrimse", "skyrimspecialedition")]);
         let r = route_nxm_game("oblivionremastered", &games, Some(""));
         assert!(matches!(r, NxmRoute::NoActiveGame { .. }));
+    }
+
+    fn exec_line(content: &str) -> &str {
+        content
+            .lines()
+            .find_map(|l| l.strip_prefix("Exec="))
+            .expect("Exec= line")
+    }
+
+    #[test]
+    fn desktop_exec_passes_url_as_only_argument() {
+        // tauri-plugin-deep-link on Linux only accepts argv == [bin, url].
+        let content = desktop_file_content("/usr/bin/corkscrew").unwrap();
+        assert_eq!(exec_line(&content), "\"/usr/bin/corkscrew\" %u");
+        assert!(!content.contains("--url"));
+        assert!(content.contains("MimeType=x-scheme-handler/nxm;x-scheme-handler/corkscrew;"));
+    }
+
+    #[test]
+    fn desktop_exec_uses_appimage_path_with_spaces() {
+        let content =
+            desktop_file_content("/home/deck/Applications/Corkscrew 0.14.AppImage").unwrap();
+        assert_eq!(
+            exec_line(&content),
+            "\"/home/deck/Applications/Corkscrew 0.14.AppImage\" %u"
+        );
+    }
+
+    #[test]
+    fn desktop_exec_escapes_reserved_characters() {
+        assert_eq!(quote_exec_arg("/a/100%/b").unwrap(), "\"/a/100%%/b\"");
+        assert_eq!(quote_exec_arg("/a/$x`y\"z").unwrap(), r#""/a/\\$x\\`y\\"z""#);
+        assert_eq!(quote_exec_arg(r"/a\b").unwrap(), r#""/a\\\\b""#);
+        assert!(quote_exec_arg("/a\nExec=evil").is_err());
+    }
+
+    #[test]
+    fn exec_args_round_trip_quote_exec_arg() {
+        for path in [
+            "/usr/bin/corkscrew",
+            "/home/deck/Applications/Corkscrew 0.14.AppImage",
+            "/a/100%/b",
+            "/a/$x`y\"z",
+            r"/a\b\\c",
+            "/tmp/ünïcode path/corkscrew",
+        ] {
+            let exec = format!("{} %u", quote_exec_arg(path).unwrap());
+            assert_eq!(
+                parse_exec_args(&exec).unwrap(),
+                vec![path.to_string(), "%u".to_string()],
+                "round trip failed for {path:?} via {exec:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exec_args_handle_unquoted_and_env_prefix() {
+        let args = parse_exec_args("env WEBKIT_DISABLE_DMABUF_RENDERER=1 /opt/corkscrew %u").unwrap();
+        assert_eq!(exec_program(&args), Some("/opt/corkscrew"));
+
+        let quoted = format!(
+            "env WEBKIT_DISABLE_DMABUF_RENDERER=1 {} %u",
+            quote_exec_arg("/home/u/My Apps/Corkscrew.AppImage").unwrap()
+        );
+        let args = parse_exec_args(&quoted).unwrap();
+        assert_eq!(exec_program(&args), Some("/home/u/My Apps/Corkscrew.AppImage"));
+
+        let args = parse_exec_args("corkscrew --url %u").unwrap();
+        assert_eq!(exec_program(&args), Some("corkscrew"));
+
+        assert!(parse_exec_args("\"/unterminated %u").is_none());
+        assert_eq!(exec_program(&[]), None);
+    }
+
+    #[test]
+    fn desktop_entry_exec_reads_main_group_only() {
+        let content = "[Desktop Action foo]\nExec=/wrong\n[Desktop Entry]\nName=X\nExec = \"/right\" %u\n";
+        assert_eq!(desktop_entry_exec(content), Some("\"/right\" %u"));
+        assert_eq!(desktop_entry_exec("[Desktop Entry]\nName=X\n"), None);
+    }
+
+    fn classify(handler: &str, content: Option<&str>, existing: &[&str]) -> HandlerStatus {
+        classify_handler(
+            handler,
+            content,
+            "/home/deck/Corkscrew.AppImage",
+            |p| existing.contains(&p),
+            |a, b| a == b,
+        )
+    }
+
+    #[test]
+    fn classify_handler_cases() {
+        let current = desktop_file_content("/home/deck/Corkscrew.AppImage").unwrap();
+        let moved = desktop_file_content("/home/deck/Downloads/Corkscrew-0.14.1.AppImage").unwrap();
+        let existing = ["/home/deck/Corkscrew.AppImage"];
+
+        // Someone else's handler (or none).
+        assert_eq!(classify("org.nexusmods.app.desktop", Some(&current), &existing), HandlerStatus::NotCorkscrew);
+        assert_eq!(classify("", None, &existing), HandlerStatus::NotCorkscrew);
+
+        // Ours by name, but the file is gone (user unregistered).
+        assert_eq!(classify("corkscrew-nxm.desktop", None, &existing), HandlerStatus::Missing);
+
+        // Points at the running executable — via either of our files, and a
+        // case-variant packaged name.
+        assert_eq!(classify("corkscrew-nxm.desktop", Some(&current), &existing), HandlerStatus::Current);
+        assert_eq!(classify("corkscrew.desktop", Some(&current), &existing), HandlerStatus::Current);
+        assert_eq!(classify("Corkscrew.desktop", Some(&current), &existing), HandlerStatus::Current);
+
+        // AppImage moved/renamed: Exec target no longer exists.
+        assert_eq!(classify("corkscrew-nxm.desktop", Some(&moved), &existing), HandlerStatus::Stale);
+
+        // Exec target exists but isn't the running binary.
+        let both = ["/home/deck/Corkscrew.AppImage", "/home/deck/Downloads/Corkscrew-0.14.1.AppImage"];
+        assert_eq!(classify("corkscrew.desktop", Some(&moved), &both), HandlerStatus::Outdated);
+
+        // Unparseable / missing Exec.
+        assert_eq!(classify("corkscrew.desktop", Some("[Desktop Entry]\nName=X\n"), &existing), HandlerStatus::Stale);
+
+        assert!(HandlerStatus::Current.launches_corkscrew());
+        assert!(HandlerStatus::Outdated.launches_corkscrew());
+        assert!(!HandlerStatus::Stale.launches_corkscrew());
+        assert!(!HandlerStatus::Missing.launches_corkscrew());
+        assert!(!HandlerStatus::NotCorkscrew.launches_corkscrew());
+    }
+
+    #[test]
+    fn self_heal_only_rewrites_own_stale_or_outdated_files() {
+        assert_eq!(self_heal_target("corkscrew-nxm.desktop", &HandlerStatus::Stale), Some("corkscrew-nxm.desktop"));
+        assert_eq!(self_heal_target("corkscrew.desktop", &HandlerStatus::Outdated), Some("corkscrew.desktop"));
+        // Already correct, deliberately removed, or not ours: leave alone.
+        assert_eq!(self_heal_target("corkscrew-nxm.desktop", &HandlerStatus::Current), None);
+        assert_eq!(self_heal_target("corkscrew-nxm.desktop", &HandlerStatus::Missing), None);
+        assert_eq!(self_heal_target("other.desktop", &HandlerStatus::NotCorkscrew), None);
+        // A packaged Corkscrew.desktop isn't a file we write — don't touch it.
+        assert_eq!(self_heal_target("Corkscrew.desktop", &HandlerStatus::Stale), None);
     }
 
     #[cfg(target_os = "linux")]
