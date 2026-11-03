@@ -420,6 +420,7 @@ fn deploy_mod_inner(
     if !staging_path.exists() {
         return Err(DeployerError::StagingNotFound(staging_path.to_path_buf()));
     }
+    let vanilla_set = build_vanilla_set(game_id);
 
     // Persist the target on the mod itself: manifest rows (the only other
     // place it lived) are dropped on undeploy/purge, which used to reset
@@ -541,7 +542,15 @@ fn deploy_mod_inner(
             }
 
             let method =
-                match deploy_single_file(rel_path, &src, &dst, manifest_owned, can_hardlink, copy_method) {
+                match deploy_single_file(
+                    rel_path,
+                    &src,
+                    &dst,
+                    manifest_owned,
+                    classify_stock(game_id, rel_path, vanilla_set.as_ref()) == StockClass::NotStock,
+                    can_hardlink,
+                    copy_method,
+                ) {
                     Some(m) => {
                         if m == "copy" {
                             fallback_used.store(true, Ordering::Relaxed);
@@ -1303,6 +1312,7 @@ fn deploy_single_file(
     src: &Path,
     dst: &Path,
     manifest_owned: bool,
+    allow_content_adoption: bool,
     can_hardlink: bool,
     copy_method: platform::FsCopyMethod,
 ) -> Option<&'static str> {
@@ -1321,7 +1331,12 @@ fn deploy_single_file(
                 // leftover from an earlier undeploy that dropped its record
                 // without deleting it. Adopt it instead of skipping, so users
                 // already hit by that bug heal on their next deploy.
-                if let Some(method) = deployed_copy_kind(src, dst) {
+                // Same inode proves Corkscrew put it there. Identical bytes
+                // only do for non-stock paths: a mod can ship an exact copy
+                // of a base-game file, which must never become ours to delete.
+                if let Some(method) = deployed_copy_kind(src, dst)
+                    .filter(|m| *m == "hardlink" || allow_content_adoption)
+                {
                     info!(
                         "Deploy: adopting untracked {} — identical to the mod's staging copy ({})",
                         rel_path, method
@@ -1589,6 +1604,7 @@ pub fn deploy_incremental(
                 &src,
                 &dst,
                 true, // path is in the manifest (owned by old_entry's mod)
+                false,
                 can_hardlink,
                 copy_method,
             ) {
@@ -1657,6 +1673,8 @@ pub fn deploy_incremental(
                     &src,
                     &dst,
                     false, // not in manifest — vanilla protection applies
+                    classify_stock(game_id, &desired_file.relative_path, vanilla_set.as_ref())
+                        == StockClass::NotStock,
                     can_hardlink,
                     copy_method,
                 ) {
@@ -1900,7 +1918,7 @@ pub fn ensure_paths_deployed(
         let can_hardlink = same_filesystem(&staging, base);
         let copy_method = platform::detect_copy_method(&staging, base);
         let Some(method) =
-            deploy_single_file(&rel_path, &src, &dst, true, can_hardlink, copy_method)
+            deploy_single_file(&rel_path, &src, &dst, true, false, can_hardlink, copy_method)
         else {
             warn!("Restore: failed to deploy {} from '{}'", rel_path, winner.name);
             continue;
@@ -2024,7 +2042,7 @@ pub fn restore_missing_files(
             report.unrecoverable.push(entry.relative_path.clone());
             continue;
         }
-        match deploy_single_file(&entry.relative_path, &src, &dst, true, can_hardlink, copy_method) {
+        match deploy_single_file(&entry.relative_path, &src, &dst, true, false, can_hardlink, copy_method) {
             Some(method) => {
                 report.restored.push(entry.relative_path.clone());
                 if method != entry.deploy_method {
@@ -2980,6 +2998,34 @@ mod tests {
             .unwrap();
         assert_eq!(r.deployed_count, 1);
         assert_eq!(r.skipped_count, 0);
+    }
+
+    #[test]
+    fn identical_copy_of_a_stock_file_is_never_adopted() {
+        // A mod that ships a byte-identical copy of a base-game file must
+        // not take ownership of the real one (and later delete it).
+        let (db, tmp, _, data_dir) = setup();
+        for name in ["Skyrim - Misc.bsa", "ccBGSSSE001-Fish.esm"] {
+            fs::write(data_dir.join(name), b"vanilla bytes").unwrap();
+        }
+        let (mod_id, staging) = add_test_mod(
+            &db,
+            &staging_root(&tmp),
+            "VanillaCopies",
+            0,
+            &[("Skyrim - Misc.bsa", b"vanilla bytes"), ("ccBGSSSE001-Fish.esm", b"vanilla bytes")],
+        );
+        let files = crate::staging::list_staging_files(&staging).unwrap();
+        let r = deploy_mod(&db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, "data")
+            .unwrap();
+        assert_eq!(r.deployed_count, 0, "stock files are not adopted by content");
+        assert_eq!(r.skipped_count, 2);
+        assert!(db.get_deployment_paths_for_mod(mod_id).unwrap().is_empty());
+
+        // Disabling the mod therefore leaves the base-game files alone.
+        undeploy_mod(&db, "skyrimse", "Gaming", mod_id, &data_dir, &data_dir).unwrap();
+        assert!(data_dir.join("Skyrim - Misc.bsa").exists());
+        assert!(data_dir.join("ccBGSSSE001-Fish.esm").exists());
     }
 
     #[test]
