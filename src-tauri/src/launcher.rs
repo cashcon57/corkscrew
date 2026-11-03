@@ -411,22 +411,74 @@ fn resolve_wine_binary(bottle: &Bottle) -> Result<WineCommand> {
 /// GameHub only starts the games it manages, so this refuses anything that
 /// isn't the game's own executable (script extender loaders, modding tools)
 /// instead of silently starting the vanilla game.
-fn launch_via_gamehub(bottle: &Bottle, exe: &Path, game_id: Option<&str>) -> Result<LaunchResult> {
+/// Run a modding tool for a GameHub game with GameHub's bundled Wine in a
+/// prefix Corkscrew owns. GameHub assembles a game's container only when it
+/// starts the game, so Wine must never run on the container itself. Tools
+/// that only need the game's files (ModImporter, BodySlide, …) work here;
+/// tools for games with a launcher run inside the container instead, via
+/// the launch trampoline (see `commands::tools::launch_mod_tool`).
+fn launch_gamehub_tool(bottle: &Bottle, exe: &Path) -> Result<LaunchResult> {
+    let home = dirs::home_dir().unwrap_or_default();
+    let wine = crate::gamehub::bundled_wine(&home).ok_or_else(|| LauncherError::WineNotFound {
+        bottle_source: bottle.source.clone(),
+        tried: "GameHub's bundled Wine (wine-engine/containers/wine_installations)".to_string(),
+    })?;
+    let prefix = crate::config::data_dir().join("tool_prefixes").join("gamehub");
+    if !prefix.join("drive_c").is_dir() {
+        info!("Creating Corkscrew's GameHub tools prefix at {}", prefix.display());
+        std::fs::create_dir_all(&prefix)?;
+        let status = Command::new(&wine)
+            .arg("wineboot")
+            .arg("-i")
+            .env("WINEPREFIX", &prefix)
+            .env("WINEDEBUG", "-all")
+            .status()?;
+        if !status.success() {
+            return Err(LauncherError::Other(format!(
+                "Couldn't create the tools prefix with GameHub's Wine ({status})"
+            )));
+        }
+    }
+    info!("Running {} for {} with GameHub's Wine in {}", exe.display(), bottle.name, prefix.display());
+    let mut child = Command::new(&wine)
+        .arg(exe)
+        .current_dir(exe.parent().unwrap_or(Path::new("/")))
+        .env("WINEPREFIX", &prefix)
+        .env("WINEDEBUG", "-all")
+        .spawn()?;
+    let pid = child.id();
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(LaunchResult {
+        executable: exe.display().to_string(),
+        bottle_name: bottle.name.clone(),
+        pid: Some(pid),
+        success: true,
+        warning: Some(
+            "This tool runs with GameHub's Wine in Corkscrew's own tools prefix: it sees the game's files, \
+             not GameHub's per-game settings."
+                .to_string(),
+        ),
+    })
+}
+
+/// Whether GameHub should start `exe` as the game (GameHub starts only the
+/// games it manages); anything else is a tool.
+fn is_gamehub_game_exe(exe: &Path, game_id: Option<&str>) -> bool {
     let exe_name = exe.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-    let is_game_exe = game_id
+    game_id
         .and_then(|gid| {
             crate::games::with_plugin(gid, |p| {
                 p.executables().iter().any(|e| e.eq_ignore_ascii_case(exe_name))
             })
         })
-        .unwrap_or(false);
-    if !is_game_exe {
-        return Err(LauncherError::Other(format!(
-            "GameHub only starts the game itself, so Corkscrew can't run {} in {}. \
-             Script extenders (like SKSE) and modding tools aren't supported for GameHub games yet. \
-             Your deployed mods are in place; start the game from GameHub.",
-            exe_name, bottle.name
-        )));
+        .unwrap_or(false)
+}
+
+fn launch_via_gamehub(bottle: &Bottle, exe: &Path, game_id: Option<&str>) -> Result<LaunchResult> {
+    if !is_gamehub_game_exe(exe, game_id) {
+        return launch_gamehub_tool(bottle, exe);
     }
 
     let app_id = crate::gamehub::bound_steam_app_id(bottle).or_else(|| {
@@ -1079,22 +1131,16 @@ mod tests {
     }
 
     #[test]
-    fn gamehub_refuses_non_game_executables() {
-        let tmp = tempfile::tempdir().unwrap();
-        let bottle = create_fake_bottle(tmp.path(), "1", crate::gamehub::SOURCE);
-        let tool = tmp.path().join("skse64_loader.exe");
-        fs::write(&tool, b"MZ").unwrap();
-
-        // A script extender loader and an unknown tool (no game id) are both
-        // refused before anything is spawned.
-        for game_id in [Some("skyrimse"), None] {
-            let err = launch_game(&bottle, &tool, None, game_id, None).unwrap_err();
-            assert!(
-                matches!(&err, LauncherError::Other(msg) if msg.contains("GameHub only starts the game itself")),
-                "unexpected error: {err}"
-            );
-        }
+    fn gamehub_starts_only_game_exes_and_treats_the_rest_as_tools() {
+        crate::plugins::skyrim_se::register();
+        assert!(is_gamehub_game_exe(Path::new("/g/SkyrimSE.exe"), Some("skyrimse")));
+        assert!(is_gamehub_game_exe(Path::new("/g/skyrimse.EXE"), Some("skyrimse")));
+        // Loaders and tools are never handed to GameHub as the game: they
+        // run via the trampoline or Corkscrew's own tools prefix.
+        assert!(!is_gamehub_game_exe(Path::new("/g/skse64_loader.exe"), Some("skyrimse")));
+        assert!(!is_gamehub_game_exe(Path::new("/g/SSEEdit.exe"), None));
     }
+
 
     /// Create a minimal fake bottle with drive_c.
     fn create_fake_bottle(parent: &Path, name: &str, source: &str) -> Bottle {

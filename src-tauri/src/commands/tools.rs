@@ -53,6 +53,43 @@ pub async fn uninstall_mod_tool(
     .map_err(crate::format_join_error)?
 }
 
+/// Run a tool inside a GameHub game's container: the trampoline in the
+/// launcher's place reads a one-shot request, and GameHub is asked to start
+/// the game.
+fn launch_tool_in_gamehub_container(
+    bottle: &crate::bottles::Bottle,
+    game: &crate::games::DetectedGame,
+    game_id: &str,
+    swap: crate::launcher_swap::LauncherSwap,
+    tool_exe: &Path,
+    tool_name: &str,
+    db: &crate::database::ModDatabase,
+) -> Result<LaunchResult, String> {
+    let game_path = Path::new(&game.game_path);
+    let program = crate::launcher_swap::windows_path_for(game_path, tool_exe);
+    let workdir = tool_exe
+        .parent()
+        .map(|d| crate::launcher_swap::windows_path_for(game_path, d));
+    crate::launcher_swap::run_once(game_path, swap, &program, "", workdir.as_deref())
+        .map_err(|e| format!("Couldn't prepare {tool_name} for GameHub: {e}"))?;
+    let game_exe = crate::games::with_plugin(game_id, |p| {
+        p.executables()
+            .first()
+            .and_then(|n| crate::launcher::find_executable(game_path, n))
+    })
+    .flatten()
+    .ok_or_else(|| format!("Couldn't find {}'s executable", game.display_name))?;
+    let mut result = crate::launcher::launch_game(bottle, &game_exe, Some(game_path), Some(game_id), None)
+        .map_err(|e| e.to_string())?;
+    result.executable = tool_exe.display().to_string();
+    result.warning = Some(format!(
+        "{tool_name} starts through GameHub inside {}'s container, so GameHub shows the game as running while it's open.",
+        game.display_name
+    ));
+    let _ = db.log_notification("info", &format!("Launched {tool_name}"), Some(&format!("GameHub container: {}", bottle.name)));
+    Ok(result)
+}
+
 #[tauri::command]
 pub async fn launch_mod_tool(
     tool_id: String,
@@ -62,7 +99,7 @@ pub async fn launch_mod_tool(
 ) -> Result<LaunchResult, String> {
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
-        let (bottle, _, data_dir) = resolve_game(&game_id, &bottle_name)?;
+        let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
         let tools = mod_tools::detect_tools_for_game(&data_dir, &game_id);
         let tool = tools
             .iter()
@@ -72,6 +109,15 @@ pub async fn launch_mod_tool(
             .detected_path
             .as_ref()
             .ok_or_else(|| format!("Tool '{}' is not installed", tool_id))?;
+
+        // GameHub only assembles a game's container when it starts the game.
+        // For games with a launcher, the launch trampoline runs the tool in
+        // that container (with the game's AppData and settings).
+        if bottle.source == crate::gamehub::SOURCE {
+            if let Some(swap) = crate::launcher_swap::for_game(&game_id) {
+                return launch_tool_in_gamehub_container(&bottle, &game, &game_id, swap, Path::new(exe_path), &tool.name, &db);
+            }
+        }
 
         // Apply DLL overrides for this tool
         let overrides = crate::wine_dll_overrides::detect_and_get_overrides(Path::new(exe_path));
