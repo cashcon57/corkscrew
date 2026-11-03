@@ -4,6 +4,10 @@ All notable changes to Corkscrew are documented here. This project follows [Sema
 
 ## [0.14.25] - 2026-11-03
 
+### Added
+
+- **NotProton support on macOS** (Steam Play for macOS, [NotProtonNot/NotProton](https://github.com/NotProtonNot/NotProton)): Corkscrew finds NotProton game prefixes in every Mac Steam library, detects the games in them, deploys mods, and launches the games through Steam. Mod tools such as xEdit run with NotProton's bundled Wine. Script extenders (SKSE and others), custom executables and DLL-loader mods aren't supported under NotProton yet. (#212)
+
 ### Fixed
 
 - **Nexus Mods sign-in could hang on "Opening browser..." forever**: Chrome opens extra "preconnect" connections to the local sign-in callback that never send anything. Corkscrew waited on the first one with no time limit, so the real callback from Nexus sat unread and sign-in never finished. Each connection now gets a few seconds to send its request, idle ones are dropped, and the sign-in keeps listening. The Google Drive sign-in had the same bug and gets the same fix. (#211)
