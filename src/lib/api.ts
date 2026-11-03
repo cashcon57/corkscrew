@@ -526,31 +526,65 @@ export async function downgradeSkyrim(
   return invoke("downgrade_skyrim", { gameId, bottleName, mode });
 }
 
+/** `target` is a Skyrim build such as "1.6.1170"; omitted means 1.5.97. */
 export async function getDepotDownloadCommand(
   gameId: string,
-  bottleName: string
+  bottleName: string,
+  target?: string
 ): Promise<DepotDownloadInfo> {
-  return invoke("get_depot_download_command", { gameId, bottleName });
+  return invoke("get_depot_download_command", { gameId, bottleName, target: target ?? null });
 }
 
 export async function startDepotDownload(
-  gameId: string
+  gameId: string,
+  target?: string
 ): Promise<boolean> {
-  return invoke("start_depot_download", { gameId });
+  return invoke("start_depot_download", { gameId, target: target ?? null });
 }
 
+/** Non-null once every depot of the target build is downloaded. */
 export async function checkDepotReady(
   gameId: string,
-  bottleName: string
+  bottleName: string,
+  target?: string
 ): Promise<string | null> {
-  return invoke("check_depot_ready", { gameId, bottleName });
+  return invoke("check_depot_ready", { gameId, bottleName, target: target ?? null });
 }
 
 export async function applyDowngrade(
   gameId: string,
+  bottleName: string,
+  target?: string
+): Promise<DowngradeStatus> {
+  return invoke("apply_downgrade_cmd", { gameId, bottleName, target: target ?? null });
+}
+
+/** Undo a full downgrade, restoring every file it replaced. */
+export async function restoreDowngrade(
+  gameId: string,
   bottleName: string
 ): Promise<DowngradeStatus> {
-  return invoke("apply_downgrade_cmd", { gameId, bottleName });
+  return invoke("restore_downgrade_cmd", { gameId, bottleName });
+}
+
+export interface SkyrimBuildInfo {
+  game_version: string;
+  app_id: number;
+  /** [depot_id, manifest_id] for each of the build's three depots. */
+  depots: [number, string][];
+}
+
+export async function ddSkyrimBuilds(): Promise<SkyrimBuildInfo[]> {
+  return invoke("dd_skyrim_builds");
+}
+
+/** Apply a Skyrim build whose three depots were downloaded with DepotDownloader. */
+export async function ddApplySkyrimBuild(
+  gameId: string,
+  bottleName: string,
+  target: string
+): Promise<DowngradeStatus> {
+  return invoke("dd_apply_skyrim_build", { gameId, bottleName, target });
 }
 
 export async function listGameVersions(

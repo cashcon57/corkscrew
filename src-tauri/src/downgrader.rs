@@ -260,8 +260,14 @@ pub struct CachedVersion {
 /// Information needed to run the Steam depot download command.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DepotDownloadInfo {
-    /// The console command to paste (e.g. "download_depot 489830 489833 ...").
+    /// The console commands to paste, one per line.
     pub command: String,
+    /// Each `download_depot` command (one per depot).
+    #[serde(default)]
+    pub commands: Vec<String>,
+    /// The Skyrim version these depots install.
+    #[serde(default)]
+    pub target_version: String,
     /// Steam URI to open the console.
     pub steam_uri: String,
     /// The expected download path after completion.
@@ -456,10 +462,17 @@ pub fn find_steam_dir(bottle_path: &Path) -> Option<PathBuf> {
 /// its `download_depot` output lands in the native Steam directory — while a
 /// user pasting the command into the bottle's Windows Steam produces files
 /// inside the bottle. Both must be searched.
-pub fn depot_search_dirs(bottle_path: &Path) -> Vec<PathBuf> {
+///
+/// Steam Play prefixes (Proton, NotProton) and GameHub containers hold only
+/// a Steam bridge or GameHub's own client, which Corkscrew can't drive, so
+/// for those only the host Steam is searched.
+pub fn depot_search_dirs(bottle: &crate::bottles::Bottle) -> Vec<PathBuf> {
     let mut dirs_found = Vec::new();
-    if let Some(dir) = find_steam_dir(bottle_path) {
-        dirs_found.push(dir);
+    let own_windows_steam = !bottle.is_steam_compat_prefix() && bottle.source != "GameHub";
+    if own_windows_steam {
+        if let Some(dir) = find_steam_dir(&bottle.path) {
+            dirs_found.push(dir);
+        }
     }
     if let Some(home) = dirs::home_dir() {
         let xdg_data_home = crate::proton::xdg_data_home_env();
@@ -539,54 +552,39 @@ pub fn check_depot_downloaded(steam_dir: &Path, app_id: u32, depot_id: u32) -> O
     None
 }
 
-/// Get the depot download command and info for the frontend wizard.
-pub fn get_depot_download_info(game_id: &str, bottle_path: &Path) -> Result<DepotDownloadInfo> {
+/// Get the depot download commands and info for the frontend wizard.
+pub fn get_depot_download_info(
+    game_id: &str,
+    bottle: &crate::bottles::Bottle,
+    target: Option<&str>,
+) -> Result<DepotDownloadInfo> {
     if game_id != "skyrimse" {
         return Err(DowngraderError::Other(
             "Depot download is only supported for Skyrim SE".to_string(),
         ));
     }
 
-    let steam_dir = depot_search_dirs(bottle_path).into_iter().next().ok_or_else(|| {
+    let steam_dir = depot_search_dirs(bottle).into_iter().next().ok_or_else(|| {
         DowngraderError::Other(
             "No Steam installation found (checked the bottle and the native Steam client)"
                 .to_string(),
         )
     })?;
 
-    let expected_path = get_depot_download_path(&steam_dir, SKYRIM_APP_ID, SKYRIM_DEPOT_ID);
+    let build = downgrade_target(target);
+    let commands = download_depot_commands(build);
+    let expected_path = get_depot_download_path(&steam_dir, SKYRIM_APP_ID, SKYRIM_DEPOT_ID)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
 
     Ok(DepotDownloadInfo {
-        command: format!(
-            "download_depot {} {} {}",
-            SKYRIM_APP_ID, SKYRIM_DEPOT_ID, SKYRIM_SE_MANIFEST
-        ),
+        command: commands.join("\n"),
+        commands,
+        target_version: build.version.to_string(),
         steam_uri: "steam://open/console".to_string(),
         expected_path: expected_path.to_string_lossy().into_owned(),
     })
-}
-
-/// Full downgrade flow: cache current AE exe → import depot SE exe → swap.
-pub fn apply_depot_downgrade(
-    game_path: &Path,
-    depot_exe: &Path,
-    game_id: &str,
-) -> Result<DowngradeStatus> {
-    // Step 1: Cache current version before overwriting
-    info!("Caching current game version before downgrade...");
-    match cache_current_version(game_path, game_id) {
-        Ok(cached) => info!("Cached current version: {}", cached.version),
-        Err(e) => warn!("Failed to cache current version (continuing anyway): {}", e),
-    }
-
-    // Step 2: Import the depot exe into cache
-    info!("Importing depot exe into version cache...");
-    let imported = import_depot_exe(depot_exe, game_id)?;
-    info!("Imported depot version: {}", imported.version);
-
-    // Step 3: Swap to the imported version
-    info!("Swapping game to downgraded version...");
-    swap_to_version(game_path, game_id, &imported.version)
 }
 
 /// Apply a depot download to a game installation.
@@ -664,7 +662,8 @@ pub fn apply_depot_to_game(
 /// keystroke automation). Instead of silently returning Ok(false), we surface
 /// a clear error pointing the user at the existing DepotDownloader integration
 /// and giving them the exact Steam console command they can paste manually.
-pub fn send_depot_command_to_steam() -> std::result::Result<bool, String> {
+pub fn send_depot_command_to_steam(target: Option<&str>) -> std::result::Result<bool, String> {
+    let commands = download_depot_commands(downgrade_target(target));
     #[cfg(target_os = "macos")]
     {
         use std::process::Command as ProcessCommand;
@@ -678,20 +677,16 @@ pub fn send_depot_command_to_steam() -> std::result::Result<bool, String> {
         // Wait for console to open
         std::thread::sleep(std::time::Duration::from_secs(3));
 
-        // Type the depot command via AppleScript keystroke
-        let depot_command = format!(
-            "download_depot {} {} {}",
-            SKYRIM_APP_ID, SKYRIM_DEPOT_ID, SKYRIM_SE_MANIFEST
-        );
+        // Type each depot command via AppleScript keystrokes. Steam queues
+        // the downloads and runs them one after another.
+        let typed: String = commands
+            .iter()
+            .map(|c| format!("keystroke \"{c}\"\n    delay 0.3\n    keystroke return\n    delay 1\n"))
+            .collect();
         let script = format!(
             "tell application \"Steam\" to activate\n\
              delay 1\n\
-             tell application \"System Events\"\n\
-                 keystroke \"{}\"\n\
-                 delay 0.3\n\
-                 keystroke return\n\
-             end tell",
-            depot_command
+             tell application \"System Events\"\n    {typed}end tell"
         );
 
         let output = ProcessCommand::new("osascript")
@@ -701,7 +696,7 @@ pub fn send_depot_command_to_steam() -> std::result::Result<bool, String> {
             .map_err(|e| format!("AppleScript execution failed: {}", e))?;
 
         if output.status.success() {
-            info!("Depot download command sent to Steam console via AppleScript");
+            info!("Sent {} depot download commands to the Steam console", commands.len());
             Ok(true)
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -711,20 +706,389 @@ pub fn send_depot_command_to_steam() -> std::result::Result<bool, String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let depot_command = format!(
-            "download_depot {} {} {}",
-            SKYRIM_APP_ID, SKYRIM_DEPOT_ID, SKYRIM_SE_MANIFEST
-        );
         let message = format!(
             "Steam console automation is not supported on this platform. \
-             Use the DepotDownloader integration (Settings → DepotDownloader) \
-             for offline downgrades, or paste this command into your Steam \
-             console manually: `{}`",
-            depot_command
+             Open the Steam console (steam://open/console) and run these commands: {}",
+            commands.join(" ; ")
         );
         warn!("{}", message);
         Err(message)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Full (three-depot) downgrade
+// ---------------------------------------------------------------------------
+
+/// Depot 489831: core BSAs and the free Creation Club content.
+pub const SKYRIM_DEPOT_CORE: u32 = 489831;
+/// Depot 489832: master files, the remaining BSAs, launcher and default INIs.
+pub const SKYRIM_DEPOT_DATA: u32 = 489832;
+
+/// One Steam build of Skyrim SE: the manifest of each content depot.
+///
+/// Since 1.6.1130 Bethesda patches change the master files and BSAs as well
+/// as `SkyrimSE.exe` (1.7.x also changed the Address Library format), so
+/// swapping only the exe leaves the old exe running newer data. A correct
+/// downgrade replaces all three depots.
+#[derive(Clone, Copy, Debug)]
+pub struct SkyrimBuild {
+    pub version: &'static str,
+    /// `(depot, manifest)` for the core, data and exe depots.
+    pub manifests: [(u32, &'static str); 3],
+}
+
+/// Known Skyrim SE Steam builds (manifest IDs from the community manifest
+/// list, Nexus article 6536, cross-checked with Wabbajack's indexed game
+/// files and this Mac's Steam depotcache).
+pub const SKYRIM_BUILDS: &[SkyrimBuild] = &[
+    SkyrimBuild {
+        version: "1.7.104",
+        manifests: [
+            (SKYRIM_DEPOT_CORE, "4940892828028256588"),
+            (SKYRIM_DEPOT_DATA, "5728778377666085157"),
+            (SKYRIM_DEPOT_ID, "4886117324142477814"),
+        ],
+    },
+    SkyrimBuild {
+        version: "1.6.1170",
+        manifests: [
+            (SKYRIM_DEPOT_CORE, "8442952117333549665"),
+            (SKYRIM_DEPOT_DATA, "8042843504692938467"),
+            (SKYRIM_DEPOT_ID, "1914580699073641964"),
+        ],
+    },
+    SkyrimBuild {
+        version: "1.5.97",
+        manifests: [
+            (SKYRIM_DEPOT_CORE, "7848722008564294070"),
+            (SKYRIM_DEPOT_DATA, "8702665189575304780"),
+            (SKYRIM_DEPOT_ID, SKYRIM_SE_MANIFEST),
+        ],
+    },
+];
+
+/// The known build for a version string such as "1.6.1170" or
+/// "1.5.97 (Special Edition)".
+pub fn skyrim_build(version: &str) -> Option<&'static SkyrimBuild> {
+    let wanted = version.split_whitespace().next().unwrap_or(version);
+    SKYRIM_BUILDS.iter().find(|b| b.version == wanted)
+}
+
+/// The downgrade target for a request: a known build version, or the
+/// classic SE build (1.5.97) by default.
+pub fn downgrade_target(requested: Option<&str>) -> &'static SkyrimBuild {
+    requested
+        .and_then(skyrim_build)
+        .or_else(|| skyrim_build(TARGET_VERSION))
+        .expect("1.5.97 is in SKYRIM_BUILDS")
+}
+
+/// Steam console commands that download every depot of `build`.
+pub fn download_depot_commands(build: &SkyrimBuild) -> Vec<String> {
+    build
+        .manifests
+        .iter()
+        .map(|(depot, manifest)| format!("download_depot {SKYRIM_APP_ID} {depot} {manifest}"))
+        .collect()
+}
+
+/// Seconds a depot folder must go without writes before it counts as
+/// finished; Steam writes files in place while `download_depot` runs.
+const DEPOT_SETTLE_SECS: u64 = 60;
+
+/// Whether every depot of `build` has been downloaded by `download_depot`
+/// into one of `steam_dirs`. Returns the three depot directories (core, data,
+/// exe) or a reason the set isn't ready.
+///
+/// Checks: Steam fetched the exact manifests (`depotcache/<depot>_<manifest>.manifest`),
+/// the exe depot's `SkyrimSE.exe` is the target version, the data depot has
+/// `Data/Skyrim.esm`, the core depot has BSAs, and nothing changed in the
+/// last minute.
+pub fn full_depot_set_ready(
+    steam_dirs: &[PathBuf],
+    build: &SkyrimBuild,
+) -> std::result::Result<Vec<PathBuf>, String> {
+    let mut dirs = Vec::with_capacity(3);
+    for (depot, manifest) in build.manifests {
+        let found = steam_dirs.iter().find_map(|steam| {
+            let dir = get_depot_download_path(steam, SKYRIM_APP_ID, depot);
+            let fetched = steam
+                .join("depotcache")
+                .join(format!("{depot}_{manifest}.manifest"))
+                .is_file();
+            (dir.is_dir() && fetched).then_some(dir)
+        });
+        dirs.push(found.ok_or_else(|| {
+            format!("depot {depot} (manifest {manifest}) hasn't been downloaded yet")
+        })?);
+    }
+
+    let exe = find_skyrim_exe(&dirs[2]).map_err(|_| "SkyrimSE.exe isn't in the exe depot yet".to_string())?;
+    let (version, _) = classify_exe(&exe).map_err(|e| e.to_string())?;
+    if version.split_whitespace().next() != Some(build.version) {
+        return Err(format!(
+            "the downloaded SkyrimSE.exe is {version}, not {}",
+            build.version
+        ));
+    }
+    if !dirs[1].join("Data").join("Skyrim.esm").is_file() {
+        return Err("Data/Skyrim.esm isn't in the data depot yet".to_string());
+    }
+    let has_bsa = fs::read_dir(dirs[0].join("Data"))
+        .map(|rd| {
+            rd.flatten().any(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|x| x.eq_ignore_ascii_case("bsa"))
+            })
+        })
+        .unwrap_or(false);
+    if !has_bsa {
+        return Err("the core depot has no BSAs yet".to_string());
+    }
+
+    let settle = std::time::Duration::from_secs(DEPOT_SETTLE_SECS);
+    for dir in &dirs {
+        if let Some(age) = newest_file_age(dir) {
+            if age < settle {
+                return Err(format!("{} is still being written", dir.display()));
+            }
+        }
+    }
+    Ok(dirs)
+}
+
+/// Time since the most recent file modification under `dir`.
+fn newest_file_age(dir: &Path) -> Option<std::time::Duration> {
+    let now = std::time::SystemTime::now();
+    WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| e.metadata().ok()?.modified().ok())
+        .filter_map(|t| now.duration_since(t).ok())
+        .min()
+}
+
+/// What a full downgrade changed, saved next to the backup so it can be undone.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct FullDowngradeRecord {
+    pub game_path: String,
+    pub from_version: String,
+    pub to_version: String,
+    pub created_at: String,
+    /// Game-relative paths whose originals were moved into the backup.
+    pub replaced: Vec<String>,
+    /// Game-relative paths that didn't exist before the downgrade.
+    pub added: Vec<String>,
+    /// Files outside the game folder moved aside (absolute path, backup-relative path).
+    pub moved_aside: Vec<(String, String)>,
+}
+
+const DOWNGRADE_RECORD: &str = "downgrade.json";
+
+/// Directory for backups of one game install, keyed by its canonical path.
+fn install_backup_dir(game_path: &Path, game_id: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let canonical = game_path.canonicalize().unwrap_or_else(|_| game_path.to_path_buf());
+    let key = Sha256::digest(canonical.to_string_lossy().as_bytes());
+    let key: String = key.iter().take(6).map(|b| format!("{b:02x}")).collect();
+    version_cache_dir(game_id).join("full-backups").join(key)
+}
+
+/// Move `from` to `to`, falling back to copy + delete across filesystems.
+fn move_file(from: &Path, to: &Path) -> io::Result<()> {
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            fs::copy(from, to)?;
+            fs::remove_file(from)
+        }
+    }
+}
+
+/// Whether two files have identical contents (size first, then hash).
+fn same_contents(a: &Path, b: &Path) -> bool {
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(ma), Ok(mb)) if ma.len() == mb.len() => {
+            matches!((compute_sha256(a), compute_sha256(b)), (Ok(x), Ok(y)) if x == y)
+        }
+        _ => false,
+    }
+}
+
+/// Replace a game install with the files of three downloaded depots.
+///
+/// Every game file the depots overwrite is first moved (not copied) into
+/// `backup_root`, so the downgrade can be undone with
+/// [`restore_full_downgrade`] and costs no extra disk space on the same
+/// volume. Identical files are left alone. `aside` lists files outside the
+/// game folder to move into the backup too (a 1.7.x `ContentCatalog.txt`
+/// crashes older builds). Symlinks in the game folder are never followed or
+/// overwritten.
+pub fn apply_full_downgrade(
+    game_path: &Path,
+    depot_dirs: &[PathBuf],
+    backup_root: &Path,
+    from_version: &str,
+    to_version: &str,
+    aside: &[PathBuf],
+) -> Result<FullDowngradeRecord> {
+    if backup_root.join(DOWNGRADE_RECORD).exists() {
+        return Err(DowngraderError::Other(format!(
+            "a downgrade backup already exists at {}; restore it first",
+            backup_root.display()
+        )));
+    }
+    let game_files = backup_root.join("game");
+    let mut record = FullDowngradeRecord {
+        game_path: game_path.to_string_lossy().into_owned(),
+        from_version: from_version.to_string(),
+        to_version: to_version.to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        ..Default::default()
+    };
+
+    // Save the record even when a step fails part way, so whatever was
+    // already moved into the backup can still be restored.
+    let outcome = (|| -> Result<()> {
+        for depot in depot_dirs {
+            for entry in WalkDir::new(depot).into_iter().filter_map(|e| e.ok()) {
+                // Depot contents come from Steam, but never follow links out of it.
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let Ok(rel) = entry.path().strip_prefix(depot) else {
+                    continue;
+                };
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                if !crate::staging::is_safe_relative_path(&rel_str) {
+                    warn!("Skipping unsafe depot path {}", rel_str);
+                    continue;
+                }
+                let dest = game_path.join(rel);
+                let dest_meta = fs::symlink_metadata(&dest);
+                if dest_meta.as_ref().is_ok_and(|m| m.file_type().is_symlink()) {
+                    warn!("Not overwriting symlink {}", dest.display());
+                    continue;
+                }
+                if dest_meta.is_ok() {
+                    if same_contents(entry.path(), &dest) {
+                        continue;
+                    }
+                    move_file(&dest, &game_files.join(rel))?;
+                    record.replaced.push(rel_str);
+                } else {
+                    record.added.push(rel_str);
+                }
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::copy(entry.path(), &dest)?;
+            }
+        }
+
+        for (i, path) in aside.iter().enumerate() {
+            if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file()) {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let rel = format!("aside/{i}-{name}");
+                move_file(path, &backup_root.join(&rel))?;
+                record.moved_aside.push((path.to_string_lossy().into_owned(), rel));
+            }
+        }
+        Ok(())
+    })();
+    let changed = !(record.replaced.is_empty() && record.added.is_empty() && record.moved_aside.is_empty());
+    if changed || outcome.is_ok() {
+        fs::create_dir_all(backup_root)?;
+        fs::write(
+            backup_root.join(DOWNGRADE_RECORD),
+            serde_json::to_vec_pretty(&record).map_err(|e| DowngraderError::Other(e.to_string()))?,
+        )?;
+    }
+    outcome?;
+    info!(
+        "Full downgrade {} -> {}: {} files replaced, {} added, {} moved aside (backup {})",
+        from_version,
+        to_version,
+        record.replaced.len(),
+        record.added.len(),
+        record.moved_aside.len(),
+        backup_root.display()
+    );
+    Ok(record)
+}
+
+/// Undo [`apply_full_downgrade`]: remove files it added and move the
+/// originals back. The backup is deleted once everything is restored.
+pub fn restore_full_downgrade(backup_root: &Path) -> Result<FullDowngradeRecord> {
+    let record: FullDowngradeRecord = serde_json::from_slice(&fs::read(
+        backup_root.join(DOWNGRADE_RECORD),
+    )?)
+    .map_err(|e| DowngraderError::Other(format!("unreadable downgrade record: {e}")))?;
+    let game_path = PathBuf::from(&record.game_path);
+
+    for rel in record.added.iter().chain(record.replaced.iter()) {
+        if !crate::staging::is_safe_relative_path(rel) {
+            return Err(DowngraderError::Other(format!("unsafe path in record: {rel}")));
+        }
+    }
+    for rel in &record.added {
+        let path = game_path.join(rel);
+        if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file()) {
+            fs::remove_file(&path)?;
+        }
+    }
+    for rel in &record.replaced {
+        let backup = backup_root.join("game").join(rel);
+        let dest = game_path.join(rel);
+        if fs::symlink_metadata(&dest).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(DowngraderError::Other(format!("{} is now a symlink", dest.display())));
+        }
+        if backup.is_file() {
+            if dest.exists() {
+                fs::remove_file(&dest)?;
+            }
+            move_file(&backup, &dest)?;
+        }
+    }
+    for (original, rel) in &record.moved_aside {
+        let backup = backup_root.join(rel);
+        if backup.is_file() && !Path::new(original).exists() {
+            move_file(&backup, Path::new(original))?;
+        }
+    }
+    fs::remove_dir_all(backup_root)?;
+    info!(
+        "Restored Skyrim {} from downgrade backup ({} files)",
+        record.from_version,
+        record.replaced.len()
+    );
+    Ok(record)
+}
+
+/// The backup directory for this install, if a full downgrade can be undone.
+pub fn full_downgrade_backup(game_path: &Path, game_id: &str) -> Option<PathBuf> {
+    let dir = install_backup_dir(game_path, game_id);
+    dir.join(DOWNGRADE_RECORD).is_file().then_some(dir)
+}
+
+/// Backup location for a new full downgrade of this install.
+pub fn new_full_downgrade_backup(game_path: &Path, game_id: &str) -> PathBuf {
+    install_backup_dir(game_path, game_id)
+}
+
+/// Creations catalog files written by Skyrim 1.6.1130+ that older builds
+/// can't read: next to the game and in the prefix's `AppData/Local`.
+pub fn content_catalog_candidates(game_path: &Path, appdata_local: &Path) -> Vec<PathBuf> {
+    vec![
+        game_path.join("ContentCatalog.txt"),
+        appdata_local.join("Skyrim Special Edition").join("ContentCatalog.txt"),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -863,6 +1227,160 @@ fn downgrade_config_key(game_path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Full (three-depot) downgrade ----
+
+    fn write(path: &Path, contents: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    fn read(path: &Path) -> String {
+        fs::read_to_string(path).unwrap()
+    }
+
+    #[test]
+    fn builds_cover_all_three_depots_and_default_to_1_5_97() {
+        for build in SKYRIM_BUILDS {
+            let depots: Vec<u32> = build.manifests.iter().map(|(d, _)| *d).collect();
+            assert_eq!(depots, vec![SKYRIM_DEPOT_CORE, SKYRIM_DEPOT_DATA, SKYRIM_DEPOT_ID]);
+        }
+        assert_eq!(downgrade_target(None).version, "1.5.97");
+        assert_eq!(downgrade_target(Some("full")).version, "1.5.97");
+        assert_eq!(downgrade_target(Some("1.6.1170")).version, "1.6.1170");
+        assert_eq!(skyrim_build("1.5.97 (Special Edition)").unwrap().version, "1.5.97");
+        assert_eq!(
+            download_depot_commands(skyrim_build("1.6.1170").unwrap()),
+            vec![
+                "download_depot 489830 489831 8442952117333549665",
+                "download_depot 489830 489832 8042843504692938467",
+                "download_depot 489830 489833 1914580699073641964",
+            ]
+        );
+    }
+
+    #[test]
+    fn depot_set_not_ready_until_steam_fetched_every_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let steam = tmp.path().join("Steam");
+        let build = skyrim_build("1.6.1170").unwrap();
+        for (depot, _) in build.manifests {
+            fs::create_dir_all(get_depot_download_path(&steam, SKYRIM_APP_ID, depot)).unwrap();
+        }
+        // Content folders alone (e.g. left over from another manifest) don't count.
+        let err = full_depot_set_ready(&[steam.clone()], build).unwrap_err();
+        assert!(err.contains("489831"), "{err}");
+
+        for (depot, manifest) in build.manifests {
+            write(&steam.join(format!("depotcache/{depot}_{manifest}.manifest")), "x");
+        }
+        // Manifests fetched, but the exe depot has no SkyrimSE.exe yet.
+        let err = full_depot_set_ready(&[steam.clone()], build).unwrap_err();
+        assert!(err.contains("SkyrimSE.exe"), "{err}");
+
+        // A non-PE exe can't be the target build.
+        write(
+            &get_depot_download_path(&steam, SKYRIM_APP_ID, SKYRIM_DEPOT_ID).join("SkyrimSE.exe"),
+            "not a pe",
+        );
+        let err = full_depot_set_ready(&[steam], build).unwrap_err();
+        assert!(err.contains("not 1.6.1170"), "{err}");
+    }
+
+    fn fake_install(root: &Path) -> (PathBuf, Vec<PathBuf>, PathBuf) {
+        let game = root.join("Skyrim Special Edition");
+        write(&game.join("SkyrimSE.exe"), "exe 1.7.104");
+        write(&game.join("Data/Skyrim.esm"), "esm 1.7.104");
+        write(&game.join("Data/Skyrim - Misc.bsa"), "same in both");
+        write(&game.join("Data/MyMod.esp"), "a mod file, not in any depot");
+
+        let core = root.join("depot_489831");
+        write(&core.join("Data/Skyrim - Misc.bsa"), "same in both");
+        write(&core.join("Data/Skyrim - Old.bsa"), "only in old build");
+        let data = root.join("depot_489832");
+        write(&data.join("Data/Skyrim.esm"), "esm 1.6.1170");
+        let exe = root.join("depot_489833");
+        write(&exe.join("SkyrimSE.exe"), "exe 1.6.1170");
+
+        let catalog = root.join("AppData/Local/Skyrim Special Edition/ContentCatalog.txt");
+        write(&catalog, "1.7 creations catalog");
+        (game, vec![core, data, exe], catalog)
+    }
+
+    #[test]
+    fn full_downgrade_applies_every_depot_and_restores_exactly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (game, depots, catalog) = fake_install(tmp.path());
+        let backup = tmp.path().join("backup");
+
+        let record = apply_full_downgrade(
+            &game, &depots, &backup, "1.7.104", "1.6.1170", &[catalog.clone()],
+        )
+        .unwrap();
+
+        assert_eq!(read(&game.join("SkyrimSE.exe")), "exe 1.6.1170");
+        assert_eq!(read(&game.join("Data/Skyrim.esm")), "esm 1.6.1170");
+        assert_eq!(read(&game.join("Data/Skyrim - Old.bsa")), "only in old build");
+        assert_eq!(read(&game.join("Data/MyMod.esp")), "a mod file, not in any depot");
+        assert!(!catalog.exists(), "1.7 ContentCatalog.txt moved aside");
+        let mut replaced = record.replaced.clone();
+        replaced.sort();
+        assert_eq!(replaced, vec!["Data/Skyrim.esm", "SkyrimSE.exe"], "identical files untouched");
+        assert_eq!(record.added, vec!["Data/Skyrim - Old.bsa"]);
+        assert_eq!(read(&backup.join("game/SkyrimSE.exe")), "exe 1.7.104");
+
+        // A second downgrade can't overwrite the only backup.
+        assert!(apply_full_downgrade(&game, &depots, &backup, "1.6.1170", "1.5.97", &[]).is_err());
+
+        restore_full_downgrade(&backup).unwrap();
+        assert_eq!(read(&game.join("SkyrimSE.exe")), "exe 1.7.104");
+        assert_eq!(read(&game.join("Data/Skyrim.esm")), "esm 1.7.104");
+        assert!(!game.join("Data/Skyrim - Old.bsa").exists());
+        assert_eq!(read(&game.join("Data/MyMod.esp")), "a mod file, not in any depot");
+        assert_eq!(read(&catalog), "1.7 creations catalog");
+        assert!(!backup.exists(), "backup removed after a full restore");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_downgrade_never_overwrites_through_a_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (game, depots, _) = fake_install(tmp.path());
+        let outside = tmp.path().join("outside.esm");
+        write(&outside, "outside the game");
+        fs::remove_file(game.join("Data/Skyrim.esm")).unwrap();
+        std::os::unix::fs::symlink(&outside, game.join("Data/Skyrim.esm")).unwrap();
+
+        apply_full_downgrade(&game, &depots, &tmp.path().join("backup"), "1.7.104", "1.6.1170", &[])
+            .unwrap();
+        assert_eq!(read(&outside), "outside the game");
+    }
+
+    #[test]
+    fn steam_play_and_gamehub_prefixes_only_search_host_steam() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pfx = tmp.path().join("steamapps/compatdata/489830/pfx");
+        let bridge = pfx.join("drive_c/Program Files (x86)/Steam");
+        fs::create_dir_all(&bridge).unwrap();
+        for source in ["NotProton", "Proton", "GameHub"] {
+            let bottle = crate::bottles::Bottle {
+                name: "Skyrim".into(),
+                path: pfx.clone(),
+                source: source.into(),
+            };
+            assert!(
+                !depot_search_dirs(&bottle).iter().any(|d| d == &bridge),
+                "{source} must not use the in-prefix Steam"
+            );
+        }
+        let crossover = crate::bottles::Bottle {
+            name: "Steam".into(),
+            path: pfx.clone(),
+            source: "CrossOver".into(),
+        };
+        assert_eq!(depot_search_dirs(&crossover).first(), Some(&bridge));
+    }
+
     use std::fs;
 
     #[test]

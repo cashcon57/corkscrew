@@ -263,7 +263,10 @@ export interface CachedVersion {
 }
 
 export interface DepotDownloadInfo {
+  /** All console commands, one per line. */
   command: string;
+  commands: string[];
+  target_version: string;
   steam_uri: string;
   expected_path: string;
 }
