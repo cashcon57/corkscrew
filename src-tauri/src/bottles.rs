@@ -1,7 +1,6 @@
 //! Wine bottle detection for CrossOver, Whisky, Moonshine, Mythic, Heroic,
 //! and native Wine/Proton managers on macOS and Linux.
 
-#[cfg(target_os = "linux")]
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -233,7 +232,6 @@ pub fn normalize_container_path(path: &Path) -> PathBuf {
 
 /// Compare two paths for identity: equal verbatim, or equal once both
 /// successfully canonicalize (resolving symlinks and `.`/`..` segments).
-#[cfg(target_os = "linux")]
 fn same_dir(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
@@ -337,7 +335,98 @@ fn platform_search_locations_with_xdg(
     let home = home.as_path();
     let xdg_steam =
         crate::proton::xdg_steam_root(xdg_data_home).map(|p| normalize_container_path(&p));
-    let mut locations = vec![
+    let mut locations = default_search_locations(home);
+
+    // Native Lutris and Bottles under a custom $XDG_DATA_HOME, unless the
+    // directory is one of the hard-coded defaults (e.g.
+    // XDG_DATA_HOME=~/.local/share collapsing onto the default).
+    for location in xdg_native_locations(xdg_data_home) {
+        if !locations.iter().any(|l| same_dir(&l.path, &location.path)) {
+            locations.push(location);
+        }
+    }
+
+    // Custom $XDG_DATA_HOME Steam install, unless it's the same directory as
+    // one of the locations collected so far (e.g. XDG_DATA_HOME=~/.local/share
+    // collapsing onto the default).
+    if let Some(ref xdg_root) = xdg_steam {
+        let compatdata = xdg_root.join("steamapps").join("compatdata");
+        let already_present = locations.iter().any(|l| same_dir(&l.path, &compatdata));
+        if !already_present {
+            locations.push(SearchLocation {
+                source: "Proton",
+                path: compatdata,
+            });
+        }
+    }
+
+    // Every known Steam root (native and its ~/.steam symlinks, both Flatpak
+    // layouts, Snap, custom XDG): primary compatdata, then the secondary
+    // libraries its libraryfolders.vdf lists (e.g. an SD card on Steam Deck).
+    // Aliases of locations already collected are skipped.
+    //
+    // Only the custom XDG root is preferred on name collisions (see
+    // `preferred_bottle_roots`). Nothing on the host says whether native,
+    // Flatpak or Snap Steam is the active one (they can coexist, and the Snap
+    // remaps HOME), so same-name prefixes across them use the mtime policy.
+    let steam_dirs: Vec<PathBuf> = crate::proton::steam_roots(home, xdg_data_home)
+        .iter()
+        .map(|p| normalize_container_path(p))
+        .collect();
+    for steam_dir in &steam_dirs {
+        let compatdata = steam_dir.join("steamapps").join("compatdata");
+        if !locations.iter().any(|l| same_dir(&l.path, &compatdata)) {
+            locations.push(SearchLocation {
+                source: "Proton",
+                path: compatdata,
+            });
+        }
+    }
+    for steam_dir in &steam_dirs {
+        for vdf_name in &["steamapps/libraryfolders.vdf", "config/libraryfolders.vdf"] {
+            let vdf_path = steam_dir.join(vdf_name);
+            if let Ok(content) = fs::read_to_string(&vdf_path) {
+                for line in content.lines() {
+                    if let Some(root) = steam_library_root_from_vdf_line(line) {
+                        let lib_path = root.join("steamapps").join("compatdata");
+                        // Avoid duplicates (e.g. the custom XDG root listed as
+                        // entry "0" inside its own libraryfolders.vdf).
+                        if !locations.iter().any(|l| same_dir(&l.path, &lib_path))
+                            && lib_path.is_dir()
+                        {
+                            log::info!(
+                                "Found additional Steam library: {}",
+                                lib_path.display()
+                            );
+                            locations.push(SearchLocation {
+                                source: "Proton",
+                                path: lib_path,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // The hard-coded defaults include both ~/.local/share/Steam and its usual
+    // ~/.steam/steam symlink, so the same compatdata (or any other dir) can
+    // appear twice; scan each real directory once, keeping the first entry.
+    let mut deduped: Vec<SearchLocation> = Vec::with_capacity(locations.len());
+    for location in locations {
+        if !deduped.iter().any(|d| same_dir(&d.path, &location.path)) {
+            deduped.push(location);
+        }
+    }
+    deduped
+}
+
+/// Hard-coded Linux scan locations under an (already normalized) `home`:
+/// the standard, Flatpak and SteamOS-symlink paths, independent of
+/// `$XDG_DATA_HOME` and Steam `libraryfolders.vdf` contents.
+#[cfg(target_os = "linux")]
+fn default_search_locations(home: &Path) -> Vec<SearchLocation> {
+    vec![
         // Native Wine default prefix
         SearchLocation {
             source: "Wine",
@@ -358,6 +447,28 @@ fn platform_search_locations_with_xdg(
                 .join("data")
                 .join("heroic")
                 .join("Prefixes"),
+        },
+        // Heroic's default per-game prefixes are nested one level deeper, at
+        // `Prefixes/default/<Game Title>` (`defaultWinePrefix` +
+        // title), so they're invisible to the flat `Prefixes/*` scan above.
+        SearchLocation {
+            source: "Heroic",
+            path: home
+                .join("Games")
+                .join("Heroic")
+                .join("Prefixes")
+                .join("default"),
+        },
+        SearchLocation {
+            source: "Heroic",
+            path: home
+                .join(".var")
+                .join("app")
+                .join("com.heroicgameslauncher.hgl")
+                .join("data")
+                .join("heroic")
+                .join("Prefixes")
+                .join("default"),
         },
         // Lutris
         SearchLocation {
@@ -422,56 +533,32 @@ fn platform_search_locations_with_xdg(
                 .join("steamapps")
                 .join("compatdata"),
         },
-    ];
-
-    // Custom $XDG_DATA_HOME Steam install, unless it's the same directory as
-    // one of the hard-coded locations above (e.g. XDG_DATA_HOME=~/.local/share
-    // collapsing onto the default).
-    if let Some(ref xdg_root) = xdg_steam {
-        let compatdata = xdg_root.join("steamapps").join("compatdata");
-        let already_present = locations.iter().any(|l| same_dir(&l.path, &compatdata));
-        if !already_present {
-            locations.push(SearchLocation {
-                source: "Proton",
-                path: compatdata,
-            });
-        }
-    }
-
-    // Also scan secondary Steam library folders (e.g. SD card on Steam Deck)
-    let mut steam_dirs = vec![home.join(".local/share/Steam"), home.join(".steam/steam")];
-    steam_dirs.extend(xdg_steam);
-    for steam_dir in &steam_dirs {
-        for vdf_name in &["steamapps/libraryfolders.vdf", "config/libraryfolders.vdf"] {
-            let vdf_path = steam_dir.join(vdf_name);
-            if let Ok(content) = fs::read_to_string(&vdf_path) {
-                for line in content.lines() {
-                    if let Some(root) = steam_library_root_from_vdf_line(line) {
-                        let lib_path = root.join("steamapps").join("compatdata");
-                        // Avoid duplicates (e.g. the custom XDG root listed as
-                        // entry "0" inside its own libraryfolders.vdf).
-                        if !locations.iter().any(|l| same_dir(&l.path, &lib_path))
-                            && lib_path.is_dir()
-                        {
-                            log::info!(
-                                "Found additional Steam library: {}",
-                                lib_path.display()
-                            );
-                            locations.push(SearchLocation {
-                                source: "Proton",
-                                path: lib_path,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    locations
+    ]
 }
 
-/// Compatdata root(s) that should win name-collision deduplication
+/// Native Lutris and Bottles prefix roots under a custom `$XDG_DATA_HOME`
+/// (empty when it is unset or invalid). Callers dedupe against the
+/// hard-coded `~/.local/share` defaults.
+#[cfg(target_os = "linux")]
+fn xdg_native_locations(xdg_data_home: Option<&OsStr>) -> Vec<SearchLocation> {
+    let Some(xdg_data) =
+        crate::proton::xdg_data_root(xdg_data_home).map(|p| normalize_container_path(&p))
+    else {
+        return Vec::new();
+    };
+    vec![
+        SearchLocation {
+            source: "Lutris",
+            path: xdg_data.join("lutris").join("runners").join("wine").join("prefixes"),
+        },
+        SearchLocation {
+            source: "Bottles",
+            path: xdg_data.join("bottles").join("bottles"),
+        },
+    ]
+}
+
+/// Root(s) that should win name-collision deduplication
 /// (`deduplicate_bottles_by_name_preferring`) regardless of mtime: the
 /// directory that the active `$XDG_DATA_HOME` Steam install's compatdata
 /// resolves to among the locations actually scanned, plus the compatdata
@@ -489,6 +576,12 @@ fn platform_search_locations_with_xdg(
 /// root's compatdata is also dropped unless it *is* the XDG primary itself —
 /// otherwise a vdf alias could let the stale default copy be preferred
 /// after all. The result is deduplicated by directory identity.
+///
+/// The custom `$XDG_DATA_HOME` native Bottles and Lutris roots are preferred
+/// too, but only when they were scanned as distinct locations — one that is
+/// the same directory as a hard-coded default (e.g.
+/// `XDG_DATA_HOME=~/.local/share`) was collapsed onto it and adds nothing,
+/// and one that isn't a directory is dropped.
 ///
 /// Empty when `$XDG_DATA_HOME` is unset or invalid.
 #[cfg(target_os = "linux")]
@@ -516,13 +609,10 @@ fn preferred_bottle_roots(home: &Path, xdg_data_home: Option<&OsStr>) -> Vec<Pat
     // aliases one of these (e.g. also happens to be listed by a default
     // root's own vdf) must not smuggle the stale default copy into the
     // preferred set.
-    let default_compatdata: Vec<PathBuf> = [
-        home.join(".local/share/Steam"),
-        home.join(".steam/steam"),
-    ]
-    .iter()
-    .map(|root| root.join("steamapps/compatdata"))
-    .collect();
+    let default_compatdata: Vec<PathBuf> = crate::proton::steam_roots(&home, None)
+        .iter()
+        .map(|root| normalize_container_path(root).join("steamapps/compatdata"))
+        .collect();
 
     for vdf_name in &["steamapps/libraryfolders.vdf", "config/libraryfolders.vdf"] {
         let Ok(content) = fs::read_to_string(xdg_root.join(vdf_name)) else {
@@ -546,6 +636,18 @@ fn preferred_bottle_roots(home: &Path, xdg_data_home: Option<&OsStr>) -> Vec<Pat
             if !roots.iter().any(|r| same_dir(r, &resolved)) {
                 roots.push(resolved);
             }
+        }
+    }
+
+    // Same condition `platform_search_locations_with_xdg` uses to scan the
+    // XDG native roots as their own locations.
+    let defaults = default_search_locations(&home);
+    for native in xdg_native_locations(xdg_data_home) {
+        if !defaults.iter().any(|l| same_dir(&l.path, &native.path))
+            && native.path.is_dir()
+            && !roots.iter().any(|r| same_dir(r, &native.path))
+        {
+            roots.push(native.path);
         }
     }
 
@@ -610,15 +712,21 @@ fn deduplicate_bottles_by_name(bottles: Vec<Bottle>) -> Vec<Bottle> {
 /// deterministic override for `preferred_roots`.
 ///
 /// A bottle is "preferred" when its path starts with one of `preferred_roots`
-/// (used on Linux to mark the active `$XDG_DATA_HOME` Steam compatdata root).
-/// When both same-name duplicates are Proton prefixes and exactly one is
-/// preferred, the preferred one always wins, regardless of mtime — this keeps
-/// a stale default-root Proton prefix from shadowing the active custom-XDG
-/// one. Collisions involving any non-Proton bottle (Heroic, Bottles, Wine,
-/// CrossOver, ...) are never overridden. Otherwise, the existing behavior
-/// applies: the instance with the most
-/// recent `bottle.toml` (or `drive_c`) mtime wins, and the first occurrence
-/// wins on a tie.
+/// (used on Linux to mark the active `$XDG_DATA_HOME` Steam compatdata and
+/// native Bottles/Lutris roots). Resolution happens in two stages so the
+/// outcome does not depend on insertion order:
+///
+/// 1. Within each source (Proton, Bottles, Lutris, ...), a preferred-root
+///    bottle always beats a non-preferred one regardless of mtime — this keeps
+///    a stale default-root prefix from shadowing the active custom-XDG one.
+///    Otherwise the newer `bottle.toml` (or `drive_c`) mtime wins.
+/// 2. The per-source winners are then compared across sources purely by
+///    mtime; preference never overrides a cross-source collision.
+///
+/// Ties at either stage go to the first-seen candidate; across sources this
+/// means the per-source winner that was itself encountered first (not the
+/// source that appeared first). The output keeps the position of each name's
+/// first occurrence.
 fn deduplicate_bottles_by_name_preferring(
     bottles: Vec<Bottle>,
     preferred_roots: &[PathBuf],
@@ -628,47 +736,70 @@ fn deduplicate_bottles_by_name_preferring(
     let is_preferred =
         |bottle: &Bottle| preferred_roots.iter().any(|root| bottle.path.starts_with(root));
 
-    // Preserve insertion order so that the output is deterministic.  We build
-    // a map from lowercase name -> index into `result`, and update the entry
-    // whenever a replacement should win.
-    let mut result: Vec<Bottle> = Vec::with_capacity(bottles.len());
+    // Group by lowercase name (in first-seen order), then by source within
+    // each name (also in first-seen order). Each source slot holds that
+    // source's current winner along with the input index at which that
+    // winner was encountered, so cross-source ties go to the earliest-seen
+    // winner rather than to whichever source happened to appear first.
+    let mut groups: Vec<Vec<(usize, Bottle)>> = Vec::new();
     let mut name_to_idx: HashMap<String, usize> = HashMap::new();
 
-    for bottle in bottles {
+    for (seen_at, bottle) in bottles.into_iter().enumerate() {
         let key = bottle.name.to_lowercase();
-        match name_to_idx.get(&key).copied() {
-            None => {
-                // First time we see this name.
-                name_to_idx.insert(key, result.len());
-                result.push(bottle);
-            }
-            Some(existing_idx) => {
-                let existing = &result[existing_idx];
-                // The preferred-root override only arbitrates Proton-vs-Proton
-                // collisions; any pairing involving a non-Proton bottle keeps
-                // the plain mtime/first-wins policy.
-                let both_proton = bottle.source == "Proton" && existing.source == "Proton";
-                let replace = match (both_proton, is_preferred(&bottle), is_preferred(existing)) {
-                    (true, true, false) => true,
-                    (true, false, true) => false,
-                    // Otherwise fall back to mtime, keep the one with the
-                    // newer bottle.toml (or drive_c) mtime.
-                    _ => bottle_mtime(&bottle) > bottle_mtime(existing),
-                };
-                if replace {
-                    log::debug!(
-                        "CrossOver bottle '{}': preferring path {} over {}",
-                        bottle.name,
-                        bottle.path.display(),
-                        result[existing_idx].path.display()
-                    );
-                    result[existing_idx] = bottle;
-                }
-            }
+        let Some(&group_idx) = name_to_idx.get(&key) else {
+            name_to_idx.insert(key, groups.len());
+            groups.push(vec![(seen_at, bottle)]);
+            continue;
+        };
+        let group = &mut groups[group_idx];
+        let Some(existing) = group.iter_mut().find(|(_, b)| b.source == bottle.source) else {
+            group.push((seen_at, bottle));
+            continue;
+        };
+        let replace = match (is_preferred(&bottle), is_preferred(&existing.1)) {
+            (true, false) => true,
+            (false, true) => false,
+            _ => bottle_mtime(&bottle) > bottle_mtime(&existing.1),
+        };
+        if replace {
+            log::debug!(
+                "Bottle '{}' ({}): preferring path {} over {}",
+                bottle.name,
+                bottle.source,
+                bottle.path.display(),
+                existing.1.path.display()
+            );
+            *existing = (seen_at, bottle);
         }
     }
 
-    result
+    groups
+        .into_iter()
+        .map(|group| {
+            let mut candidates = group.into_iter();
+            let (mut winner_seen_at, first) =
+                candidates.next().expect("name groups are never empty");
+            let mut winner_mtime = bottle_mtime(&first);
+            let mut winner = first;
+            for (seen_at, candidate) in candidates {
+                let mtime = bottle_mtime(&candidate);
+                if mtime > winner_mtime || (mtime == winner_mtime && seen_at < winner_seen_at) {
+                    log::debug!(
+                        "Bottle '{}': preferring {} path {} over {} path {}",
+                        candidate.name,
+                        candidate.source,
+                        candidate.path.display(),
+                        winner.source,
+                        winner.path.display()
+                    );
+                    winner = candidate;
+                    winner_mtime = mtime;
+                    winner_seen_at = seen_at;
+                }
+            }
+            winner
+        })
+        .collect()
 }
 
 /// Return the mtime of a bottle as seconds since the Unix epoch.
@@ -998,53 +1129,92 @@ fn get_heroic_wine_prefix(heroic_config_dir: &Path, app_name: &str) -> Option<Pa
         })
 }
 
-/// Find all Heroic config directories (standard + Flatpak + macOS).
+/// Find all Heroic config directories (standard + custom XDG + Flatpak + macOS).
 fn find_heroic_config_dirs() -> Vec<PathBuf> {
-    let mut config_dirs = Vec::new();
-    if let Some(home) = dirs::home_dir() {
-        // Linux: standard install
-        let standard = home.join(".config").join("heroic");
-        if standard.is_dir() {
-            config_dirs.push(standard);
-        }
-        // Linux: Flatpak install
-        let flatpak = home
-            .join(".var")
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    // Heroic (Electron) resolves its config under `$XDG_CONFIG_HOME` on Linux;
+    // other platforms never honor it.
+    let xdg_config_home = if cfg!(target_os = "linux") {
+        std::env::var_os("XDG_CONFIG_HOME")
+    } else {
+        None
+    };
+    heroic_config_dirs_with_xdg(&home, xdg_config_home.as_deref())
+}
+
+/// Heroic config dir under a custom `$XDG_CONFIG_HOME`. Per the XDG Base
+/// Directory spec, empty or relative values are invalid and must be ignored,
+/// leaving the `~/.config/heroic` default in effect.
+fn xdg_heroic_config_dir(xdg_config_home: Option<&OsStr>) -> Option<PathBuf> {
+    let base = Path::new(xdg_config_home?);
+    if !base.is_absolute() {
+        return None;
+    }
+    Some(base.join("heroic"))
+}
+
+/// Collect existing Heroic config directories, taking `$XDG_CONFIG_HOME` as an
+/// explicit parameter so it can be tested without mutating the environment.
+///
+/// A valid custom `$XDG_CONFIG_HOME/heroic` comes first, but `~/.config/heroic`
+/// is still scanned: Corkscrew and Heroic can run with different environments
+/// (e.g. the variable is exported only in a shell profile, while Heroic starts
+/// from the desktop or Game Mode), and dropping the default would then hide
+/// every Heroic game. Duplicate games resolve to the first dir, so the custom
+/// dir wins (see [`heroic_games_from_config_dirs`]).
+fn heroic_config_dirs_with_xdg(home: &Path, xdg_config_home: Option<&OsStr>) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    // Linux: standard install, custom XDG config home first
+    if let Some(custom) = xdg_heroic_config_dir(xdg_config_home) {
+        candidates.push(custom);
+    }
+    candidates.push(home.join(".config").join("heroic"));
+    // Linux: Flatpak install
+    candidates.push(
+        home.join(".var")
             .join("app")
             .join("com.heroicgameslauncher.hgl")
             .join("config")
-            .join("heroic");
-        if flatpak.is_dir() {
-            config_dirs.push(flatpak);
-        }
-        // macOS
-        let macos = home
-            .join("Library")
+            .join("heroic"),
+    );
+    // macOS
+    candidates.push(
+        home.join("Library")
             .join("Application Support")
-            .join("heroic");
-        if macos.is_dir() {
-            config_dirs.push(macos);
+            .join("heroic"),
+    );
+
+    let mut config_dirs: Vec<PathBuf> = Vec::new();
+    for dir in candidates {
+        if dir.is_dir() && !config_dirs.iter().any(|d| same_dir(d, &dir)) {
+            config_dirs.push(dir);
         }
     }
     config_dirs
 }
 
-/// Detect all Heroic games with enriched metadata.
-pub fn detect_heroic_games() -> Vec<HeroicGameInfo> {
+/// Parse Heroic games from config dirs in priority order. A game listed in more
+/// than one dir keeps the entry from the earliest dir (stable sort + dedup).
+fn heroic_games_from_config_dirs(config_dirs: &[PathBuf]) -> Vec<HeroicGameInfo> {
     let mut all_games = Vec::new();
 
-    for config_dir in find_heroic_config_dirs() {
-        let mut gog = parse_heroic_gog_games(&config_dir);
-        let mut epic = parse_heroic_epic_games(&config_dir);
-        let mut sideload = parse_heroic_sideloaded_games(&config_dir);
-        all_games.append(&mut gog);
-        all_games.append(&mut epic);
-        all_games.append(&mut sideload);
+    for config_dir in config_dirs {
+        all_games.append(&mut parse_heroic_gog_games(config_dir));
+        all_games.append(&mut parse_heroic_epic_games(config_dir));
+        all_games.append(&mut parse_heroic_sideloaded_games(config_dir));
     }
 
-    // Deduplicate by app_name
+    // Deduplicate by app_name; the stable sort keeps the earliest dir's entry.
     all_games.sort_by(|a, b| a.app_name.cmp(&b.app_name));
     all_games.dedup_by(|a, b| a.app_name == b.app_name);
+    all_games
+}
+
+/// Detect all Heroic games with enriched metadata.
+pub fn detect_heroic_games() -> Vec<HeroicGameInfo> {
+    let all_games = heroic_games_from_config_dirs(&find_heroic_config_dirs());
 
     log::info!(
         "Detected {} Heroic games ({} GOG, {} Epic, {} sideload)",
@@ -1342,6 +1512,61 @@ mod tests {
         assert_eq!(bottles[1].source, "Bottles");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn heroic_default_nested_prefixes_are_discovered() {
+        let home = tempfile::tempdir().unwrap();
+        let native_root = home.path().join("Games/Heroic/Prefixes");
+        let flatpak_root = home
+            .path()
+            .join(".var/app/com.heroicgameslauncher.hgl/data/heroic/Prefixes");
+        // Heroic's default layout: Prefixes/default/<Game Title>/drive_c
+        let native = create_fake_bottle(&native_root.join("default"), "Cyberpunk 2077");
+        let flatpak = create_fake_bottle(&flatpak_root.join("default"), "Fallout New Vegas");
+        // A custom flat prefix still works alongside the nested layout.
+        let flat = create_fake_bottle(&native_root, "Skyrim");
+
+        let mut bottles: Vec<Bottle> = collect_fixture_bottles(home.path())
+            .into_iter()
+            .filter(|b| b.source == "Heroic")
+            .collect();
+        bottles.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let found: Vec<(&str, &Path)> = bottles
+            .iter()
+            .map(|b| (b.name.as_str(), b.path.as_path()))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                ("Cyberpunk 2077", native.as_path()),
+                ("Fallout New Vegas", flatpak.as_path()),
+                ("Skyrim", flat.as_path()),
+            ]
+        );
+    }
+
+    /// An old-style shared prefix at `Prefixes/default` (itself containing
+    /// `drive_c`) is still detected once, and its Wine internals are not
+    /// mistaken for nested prefixes.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn heroic_shared_default_prefix_is_not_double_counted() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("Games/Heroic/Prefixes");
+        let shared = create_fake_bottle(&root, "default");
+        fs::create_dir_all(shared.join("dosdevices")).unwrap();
+
+        let bottles: Vec<Bottle> = collect_fixture_bottles(home.path())
+            .into_iter()
+            .filter(|b| b.source == "Heroic")
+            .collect();
+
+        assert_eq!(bottles.len(), 1);
+        assert_eq!(bottles[0].name, "default");
+        assert_eq!(bottles[0].path, shared);
+    }
+
     /// Create `compatdata/{app_id}/pfx/drive_c` plus an appmanifest under
     /// `library/steamapps` and return the expected prefix path.
     #[cfg(target_os = "linux")]
@@ -1536,6 +1761,122 @@ mod tests {
                 .collect();
             assert_eq!(paths, default_paths, "value: {invalid:?}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn custom_xdg_data_home_discovers_native_bottles_and_lutris_prefixes() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let bottles_pfx = create_fake_bottle(&xdg.path().join("bottles/bottles"), "XdgBottle");
+        let lutris_pfx =
+            create_fake_bottle(&xdg.path().join("lutris/runners/wine/prefixes"), "XdgLutris");
+        let default_pfx =
+            create_fake_bottle(&home.path().join(".local/share/bottles/bottles"), "DefaultBottle");
+
+        // Without XDG_DATA_HOME only the default location is discovered.
+        let bottles = collect_fixture_bottles(home.path());
+        assert_eq!(bottles.len(), 1, "bottles: {bottles:?}");
+        assert_eq!(bottles[0].path, default_pfx);
+
+        let mut bottles = collect_fixture_bottles_xdg(home.path(), Some(xdg.path().as_os_str()));
+        bottles.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(bottles.len(), 3, "bottles: {bottles:?}");
+        assert_eq!(bottles[0].name, "DefaultBottle");
+        assert_eq!(bottles[0].path, default_pfx);
+        assert_eq!(bottles[0].source, "Bottles");
+        assert_eq!(bottles[1].name, "XdgBottle");
+        assert_eq!(bottles[1].path, bottles_pfx);
+        assert_eq!(bottles[1].source, "Bottles");
+        assert_eq!(bottles[2].name, "XdgLutris");
+        assert_eq!(bottles[2].path, lutris_pfx);
+        assert_eq!(bottles[2].source, "Lutris");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn custom_xdg_data_home_equal_to_default_does_not_duplicate_bottles_or_lutris() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = home.path().join(".local/share");
+        let bottles_root = xdg.join("bottles/bottles");
+        let lutris_root = xdg.join("lutris/runners/wine/prefixes");
+        create_fake_bottle(&bottles_root, "Game");
+        create_fake_bottle(&lutris_root, "LutrisGame");
+
+        let locations = platform_search_locations_with_xdg(home.path(), Some(xdg.as_os_str()));
+        for root in [&bottles_root, &lutris_root] {
+            let matching = locations.iter().filter(|l| same_dir(&l.path, root)).count();
+            assert_eq!(matching, 1, "root: {}", root.display());
+        }
+
+        // Spelling the same base differently (trailing `.` component) must
+        // still collapse onto the default via canonicalization.
+        let dotted = xdg.join(".");
+        let dotted_paths: Vec<PathBuf> =
+            platform_search_locations_with_xdg(home.path(), Some(dotted.as_os_str()))
+                .into_iter()
+                .map(|l| l.path)
+                .collect();
+        let default_paths: Vec<PathBuf> = platform_search_locations_with_xdg(home.path(), None)
+            .into_iter()
+            .map(|l| l.path)
+            .collect();
+        assert_eq!(dotted_paths, default_paths);
+
+        // Collapsed onto the defaults, the XDG roots add no preference.
+        assert!(preferred_bottle_roots(home.path(), Some(xdg.as_os_str()))
+            .iter()
+            .all(|r| !same_dir(r, &bottles_root) && !same_dir(r, &lutris_root)));
+    }
+
+    /// Regression: a same-name native Bottles/Lutris prefix under a custom
+    /// `$XDG_DATA_HOME` must win over a default-root duplicate even when the
+    /// default copy's mtime is newer, while a cross-source collision still
+    /// falls back to mtime.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn custom_xdg_native_bottles_and_lutris_win_same_name_collisions() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let set_mtime = |pfx: &Path, secs| {
+            filetime::set_file_mtime(pfx.join("drive_c"), filetime::FileTime::from_unix_time(secs, 0))
+                .unwrap();
+        };
+
+        let xdg_bottle = create_fake_bottle(&xdg.path().join("bottles/bottles"), "Game");
+        let default_bottle =
+            create_fake_bottle(&home.path().join(".local/share/bottles/bottles"), "Game");
+        let xdg_lutris =
+            create_fake_bottle(&xdg.path().join("lutris/runners/wine/prefixes"), "LutrisGame");
+        let default_lutris = create_fake_bottle(
+            &home.path().join(".local/share/lutris/runners/wine/prefixes"),
+            "LutrisGame",
+        );
+        set_mtime(&xdg_bottle, 1_000_000);
+        set_mtime(&default_bottle, 2_000_000);
+        set_mtime(&xdg_lutris, 1_000_000);
+        set_mtime(&default_lutris, 2_000_000);
+
+        let mut bottles = collect_fixture_bottles_xdg(home.path(), Some(xdg.path().as_os_str()));
+        bottles.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(bottles.len(), 2, "bottles: {bottles:?}");
+        assert_eq!(bottles[0].name, "Game");
+        assert_eq!(bottles[0].path, xdg_bottle);
+        assert_eq!(bottles[1].name, "LutrisGame");
+        assert_eq!(bottles[1].path, xdg_lutris);
+
+        // Cross-source: an XDG Bottles prefix does not shadow a newer
+        // same-name default Lutris prefix.
+        let lutris_named_game = create_fake_bottle(
+            &home.path().join(".local/share/lutris/runners/wine/prefixes"),
+            "Game",
+        );
+        set_mtime(&lutris_named_game, 3_000_000);
+        let bottles = collect_fixture_bottles_xdg(home.path(), Some(xdg.path().as_os_str()));
+        let game: Vec<_> = bottles.iter().filter(|b| b.name == "Game").collect();
+        assert_eq!(game.len(), 1, "bottles: {bottles:?}");
+        assert_eq!(game[0].path, lutris_named_game);
+        assert_eq!(game[0].source, "Lutris");
     }
 
     #[cfg(target_os = "linux")]
@@ -2145,7 +2486,7 @@ mod tests {
         );
     }
 
-    /// Regression: the preferred-root override is scoped to Proton-vs-Proton
+    /// Regression: the preferred-root override is scoped to same-source
     /// collisions. A custom-XDG Proton prefix must NOT automatically shadow a
     /// newer same-name non-Proton bottle — mtime still decides, in either
     /// insertion order.
@@ -2182,6 +2523,85 @@ mod tests {
                 "newer non-Proton bottle should win over preferred-root Proton prefix"
             );
         }
+    }
+
+    /// Regression: preference is resolved within each source before sources
+    /// are compared, so a newer cross-source bottle is not lost when a
+    /// preferred-root candidate displaces an older same-source one. Default
+    /// Lutris (mtime 2), default Bottles (mtime 3), custom-XDG Bottles
+    /// (mtime 1): Bottles resolves to the XDG copy (mtime 1), which then loses
+    /// to Lutris (mtime 2) — in every insertion order.
+    #[test]
+    fn deduplicate_bottles_by_name_preferring_resolves_preference_per_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let preferred_root = tmp.path().join("xdg");
+
+        let make = |root: &Path, dir: &str, secs: i64| {
+            let path = create_fake_bottle(root, dir);
+            filetime::set_file_mtime(path.join("drive_c"), filetime::FileTime::from_unix_time(secs, 0))
+                .unwrap();
+            path
+        };
+        let path_lutris = make(tmp.path(), "default_lutris", 2_000_000);
+        let path_bottles = make(tmp.path(), "default_bottles", 3_000_000);
+        let path_xdg_bottles = make(&preferred_root, "xdg_bottles", 1_000_000);
+
+        let lutris =
+            Bottle { name: "MySkyrim".into(), path: path_lutris.clone(), source: "Lutris".into() };
+        let bottles =
+            Bottle { name: "MySkyrim".into(), path: path_bottles, source: "Bottles".into() };
+        let xdg_bottles =
+            Bottle { name: "MySkyrim".into(), path: path_xdg_bottles, source: "Bottles".into() };
+
+        let orders = [
+            vec![lutris.clone(), bottles.clone(), xdg_bottles.clone()],
+            vec![lutris.clone(), xdg_bottles.clone(), bottles.clone()],
+            vec![bottles.clone(), lutris.clone(), xdg_bottles.clone()],
+            vec![bottles.clone(), xdg_bottles.clone(), lutris.clone()],
+            vec![xdg_bottles.clone(), lutris.clone(), bottles.clone()],
+            vec![xdg_bottles, bottles, lutris],
+        ];
+        for order in orders {
+            let deduped =
+                deduplicate_bottles_by_name_preferring(order, &[preferred_root.clone()]);
+            assert_eq!(deduped.len(), 1);
+            assert_eq!(
+                deduped[0].path, path_lutris,
+                "newer Lutris should beat the resolved (XDG) Bottles winner"
+            );
+        }
+    }
+
+    /// Regression: a same-source replacement carries its own encounter index,
+    /// so cross-source ties go to the winner seen first. Early Lutris
+    /// (mtime 1), Bottles (mtime 2), later Lutris (mtime 2): Lutris resolves to
+    /// its later copy, which ties Bottles on mtime; Bottles was encountered
+    /// first and must win even though Lutris's slot appeared first.
+    #[test]
+    fn deduplicate_bottles_by_name_preferring_ties_use_winner_encounter_order() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let make = |dir: &str, secs: i64| {
+            let path = create_fake_bottle(tmp.path(), dir);
+            filetime::set_file_mtime(path.join("drive_c"), filetime::FileTime::from_unix_time(secs, 0))
+                .unwrap();
+            path
+        };
+        let path_early_lutris = make("early_lutris", 1_000_000);
+        let path_bottles = make("bottles", 2_000_000);
+        let path_late_lutris = make("late_lutris", 2_000_000);
+
+        let bottles = vec![
+            Bottle { name: "MySkyrim".into(), path: path_early_lutris, source: "Lutris".into() },
+            Bottle { name: "Other".into(), path: create_fake_bottle(tmp.path(), "other"), source: "Lutris".into() },
+            Bottle { name: "MySkyrim".into(), path: path_bottles.clone(), source: "Bottles".into() },
+            Bottle { name: "myskyrim".into(), path: path_late_lutris, source: "Lutris".into() },
+        ];
+        let deduped = deduplicate_bottles_by_name_preferring(bottles, &[]);
+        assert_eq!(deduped.len(), 2);
+        assert_eq!(deduped[0].name, "MySkyrim", "name keeps its first-occurrence position");
+        assert_eq!(deduped[0].path, path_bottles, "earliest-seen per-source winner wins the tie");
+        assert_eq!(deduped[1].name, "Other");
     }
 
     /// Regression: a same-name Proton prefix under the active custom
@@ -2328,5 +2748,341 @@ mod tests {
             bottles[0].path, default_pfx,
             "a secondary library listed only by the default root's vdf must not be preferred; mtime decides"
         );
+    }
+
+    #[test]
+    fn heroic_config_dirs_default_without_xdg() {
+        let home = tempfile::tempdir().unwrap();
+        let standard = home.path().join(".config").join("heroic");
+        let flatpak = home
+            .path()
+            .join(".var")
+            .join("app")
+            .join("com.heroicgameslauncher.hgl")
+            .join("config")
+            .join("heroic");
+        fs::create_dir_all(&standard).unwrap();
+        fs::create_dir_all(&flatpak).unwrap();
+
+        let dirs = heroic_config_dirs_with_xdg(home.path(), None);
+
+        assert_eq!(dirs, vec![standard, flatpak]);
+    }
+
+    #[test]
+    fn heroic_config_dirs_honors_absolute_xdg_config_home() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let xdg_heroic = xdg.path().join("heroic");
+        let standard = home.path().join(".config").join("heroic");
+        fs::create_dir_all(&xdg_heroic).unwrap();
+        fs::create_dir_all(&standard).unwrap();
+
+        let dirs = heroic_config_dirs_with_xdg(home.path(), Some(xdg.path().as_os_str()));
+
+        assert_eq!(dirs, vec![xdg_heroic, standard]);
+    }
+
+    fn write_heroic_gog(config_dir: &Path, games: &[(&str, &str)]) {
+        let gog = config_dir.join("gog_store");
+        fs::create_dir_all(&gog).unwrap();
+        let entries: Vec<String> = games
+            .iter()
+            .map(|(app, path)| {
+                format!(r#"{{"appName":"{app}","install_path":"{path}","platform":"windows"}}"#)
+            })
+            .collect();
+        fs::write(
+            gog.join("installed.json"),
+            format!(r#"{{"installed":[{}]}}"#, entries.join(",")),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn heroic_custom_xdg_wins_duplicates_and_default_games_stay_visible() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let xdg_heroic = xdg.path().join("heroic");
+        let standard = home.path().join(".config").join("heroic");
+        write_heroic_gog(&xdg_heroic, &[("shared", "/games/FromXdg")]);
+        write_heroic_gog(
+            &standard,
+            &[("shared", "/games/FromDefault"), ("default_only", "/games/DefaultOnly")],
+        );
+
+        let dirs = heroic_config_dirs_with_xdg(home.path(), Some(xdg.path().as_os_str()));
+        assert_eq!(dirs, vec![xdg_heroic, standard]);
+
+        let games = heroic_games_from_config_dirs(&dirs);
+        let by_name = |n: &str| games.iter().find(|g| g.app_name == n).cloned();
+        assert_eq!(games.len(), 2, "{games:?}");
+        assert_eq!(
+            by_name("shared").and_then(|g| g.install_path).as_deref(),
+            Some("/games/FromXdg")
+        );
+        assert!(by_name("default_only").is_some(), "default-only game hidden");
+    }
+
+    #[test]
+    fn heroic_config_dirs_ignores_empty_and_relative_xdg() {
+        assert_eq!(xdg_heroic_config_dir(Some(OsStr::new(""))), None);
+        assert_eq!(
+            xdg_heroic_config_dir(Some(OsStr::new("relative/config"))),
+            None
+        );
+        assert_eq!(xdg_heroic_config_dir(None), None);
+
+        let home = tempfile::tempdir().unwrap();
+        let standard = home.path().join(".config").join("heroic");
+        fs::create_dir_all(&standard).unwrap();
+
+        let no_xdg = heroic_config_dirs_with_xdg(home.path(), None);
+        let empty_xdg = heroic_config_dirs_with_xdg(home.path(), Some(OsStr::new("")));
+        let relative_xdg =
+            heroic_config_dirs_with_xdg(home.path(), Some(OsStr::new("relative/config")));
+
+        assert_eq!(empty_xdg, no_xdg);
+        assert_eq!(relative_xdg, no_xdg);
+    }
+
+    #[test]
+    fn heroic_config_dirs_xdg_equal_to_default_collapses() {
+        let home = tempfile::tempdir().unwrap();
+        let standard = home.path().join(".config").join("heroic");
+        fs::create_dir_all(&standard).unwrap();
+
+        let xdg = home.path().join(".config");
+        let dirs = heroic_config_dirs_with_xdg(home.path(), Some(xdg.as_os_str()));
+
+        assert_eq!(dirs, vec![standard]);
+    }
+
+    #[test]
+    fn heroic_missing_custom_xdg_dir_still_scans_default() {
+        let home = tempfile::tempdir().unwrap();
+        // `xdg` exists but `xdg/heroic` doesn't (Heroic never ran with it set).
+        let xdg = tempfile::tempdir().unwrap();
+        let standard = home.path().join(".config").join("heroic");
+        write_heroic_gog(&standard, &[("game1", "/games/One")]);
+
+        let dirs = heroic_config_dirs_with_xdg(home.path(), Some(xdg.path().as_os_str()));
+
+        assert_eq!(dirs, vec![standard]);
+        assert_eq!(heroic_games_from_config_dirs(&dirs).len(), 1);
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn snap_steam_primary_and_secondary_libraries_discover_proton_prefixes() {
+        let home = tempfile::tempdir().unwrap();
+        let snap_steam = home.path().join("snap/steam/common/.local/share/Steam");
+        let primary_pfx =
+            create_fake_proton_prefix(&snap_steam, "489830", "Skyrim Special Edition");
+
+        let secondary_library = tempfile::tempdir().unwrap();
+        let secondary_pfx =
+            create_fake_proton_prefix(secondary_library.path(), "377160", "Fallout 4");
+
+        // Snap Steam's own vdf lists itself as entry "0" plus a secondary
+        // library, and also carries an unsafe relative entry that must be
+        // ignored.
+        fs::write(
+            snap_steam.join("steamapps/libraryfolders.vdf"),
+            format!(
+                "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{primary}\"\n\t}}\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{secondary}\"\n\t}}\n\t\"2\"\n\t{{\n\t\t\"path\"\t\t\"../escape\"\n\t}}\n}}\n",
+                primary = snap_steam.display(),
+                secondary = secondary_library.path().display(),
+            ),
+        )
+        .unwrap();
+
+        let mut bottles = proton_bottles(home.path());
+        bottles.sort_by(|a, b| a.name.cmp(&b.name));
+
+        assert_eq!(bottles.len(), 2, "bottles: {bottles:?}");
+        assert_eq!(bottles[0].name, "Fallout 4");
+        assert_eq!(bottles[0].path, secondary_pfx);
+        assert_eq!(bottles[1].name, "Skyrim Special Edition");
+        assert_eq!(bottles[1].path, primary_pfx);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn snap_steam_libraries_are_deduplicated_against_other_roots() {
+        let home = tempfile::tempdir().unwrap();
+        let snap_steam = home.path().join("snap/steam/common/.local/share/Steam");
+        create_fake_proton_prefix(&snap_steam, "489830", "Skyrim Special Edition");
+        let snap_compatdata = snap_steam.join("steamapps/compatdata");
+
+        let shared_library = tempfile::tempdir().unwrap();
+        create_fake_proton_prefix(shared_library.path(), "377160", "Fallout 4");
+        let shared = shared_library.path().display();
+
+        // The secondary library is declared by both the native and the Snap
+        // Steam roots (in both vdf formats); the Snap vdf also lists the Snap
+        // root itself, which is already a primary location.
+        write_libraryfolders(
+            home.path(),
+            &format!("\"LibraryFolders\"\n{{\n\t\"1\"\t\t\"{shared}\"\n}}\n"),
+        );
+        fs::write(
+            snap_steam.join("steamapps/libraryfolders.vdf"),
+            format!(
+                "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{snap}\"\n\t}}\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{shared}\"\n\t}}\n}}\n",
+                snap = snap_steam.display(),
+            ),
+        )
+        .unwrap();
+
+        let locations = platform_search_locations(home.path());
+        let snap_hits = locations
+            .iter()
+            .filter(|l| same_dir(&l.path, &snap_compatdata))
+            .count();
+        let shared_hits = locations
+            .iter()
+            .filter(|l| l.path.starts_with(shared_library.path()))
+            .count();
+        assert_eq!(snap_hits, 1);
+        assert_eq!(shared_hits, 1);
+        assert_eq!(proton_bottles(home.path()).len(), 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn snap_steam_root_aliasing_default_root_is_not_duplicated() {
+        // Some setups symlink the Snap Steam root onto the native one; the
+        // Snap compatdata must then collapse onto the existing location.
+        let home = tempfile::tempdir().unwrap();
+        let native = home.path().join(".local/share/Steam");
+        create_fake_proton_prefix(&native, "489830", "Skyrim Special Edition");
+        let snap_parent = home.path().join("snap/steam/common/.local/share");
+        fs::create_dir_all(&snap_parent).unwrap();
+        std::os::unix::fs::symlink(&native, snap_parent.join("Steam")).unwrap();
+
+        let native_compatdata = native.join("steamapps/compatdata");
+        let hits = platform_search_locations(home.path())
+            .into_iter()
+            .filter(|l| same_dir(&l.path, &native_compatdata))
+            .count();
+        assert_eq!(hits, 1);
+        assert_eq!(proton_bottles(home.path()).len(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn set_drive_c_mtime(pfx: &Path, secs: i64) {
+        filetime::set_file_mtime(
+            pfx.join("drive_c"),
+            filetime::FileTime::from_unix_time(secs, 0),
+        )
+        .unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_vs_snap_same_name_prefix_uses_mtime_not_snap_priority() {
+        // No host-side signal identifies the active Steam between native and
+        // Snap, so neither root is preferred: the newer prefix wins either way.
+        for snap_is_newer in [true, false] {
+            let home = tempfile::tempdir().unwrap();
+            let native_pfx = create_fake_proton_prefix(
+                &home.path().join(".local/share/Steam"),
+                "489830",
+                "Skyrim Special Edition",
+            );
+            let snap_pfx = create_fake_proton_prefix(
+                &home.path().join("snap/steam/common/.local/share/Steam"),
+                "489830",
+                "Skyrim Special Edition",
+            );
+            let (old, new) = if snap_is_newer {
+                (&native_pfx, &snap_pfx)
+            } else {
+                (&snap_pfx, &native_pfx)
+            };
+            set_drive_c_mtime(old, 1_000_000);
+            set_drive_c_mtime(new, 2_000_000);
+
+            let bottles = proton_bottles(home.path());
+            assert_eq!(bottles.len(), 1, "snap_is_newer={snap_is_newer}");
+            assert_same_path(&bottles[0].path, new);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn custom_xdg_prefix_beats_newer_snap_same_name_prefix() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let xdg_pfx = create_fake_proton_prefix(
+            &xdg.path().join("Steam"),
+            "489830",
+            "Skyrim Special Edition",
+        );
+        let snap_pfx = create_fake_proton_prefix(
+            &home.path().join("snap/steam/common/.local/share/Steam"),
+            "489830",
+            "Skyrim Special Edition",
+        );
+        set_drive_c_mtime(&xdg_pfx, 1_000_000);
+        set_drive_c_mtime(&snap_pfx, 2_000_000);
+
+        let xdg_os = xdg_steam_env(&xdg);
+        let bottles = proton_bottles_xdg(home.path(), Some(&xdg_os));
+        assert_eq!(bottles.len(), 1);
+        assert_same_path(&bottles[0].path, &xdg_pfx);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn flatpak_data_steam_layout_discovers_primary_and_secondary_prefixes() {
+        // Current Flatpak Steam keeps its root at
+        // ~/.var/app/com.valvesoftware.Steam/data/Steam with no
+        // .local/share alias.
+        let home = tempfile::tempdir().unwrap();
+        let flatpak_steam = home
+            .path()
+            .join(".var/app/com.valvesoftware.Steam/data/Steam");
+        let primary_pfx =
+            create_fake_proton_prefix(&flatpak_steam, "489830", "Skyrim Special Edition");
+        let secondary_library = tempfile::tempdir().unwrap();
+        let secondary_pfx =
+            create_fake_proton_prefix(secondary_library.path(), "377160", "Fallout 4");
+        fs::write(
+            flatpak_steam.join("steamapps/libraryfolders.vdf"),
+            format!(
+                "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{primary}\"\n\t}}\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{secondary}\"\n\t}}\n}}\n",
+                primary = flatpak_steam.display(),
+                secondary = secondary_library.path().display(),
+            ),
+        )
+        .unwrap();
+
+        let mut bottles = proton_bottles(home.path());
+        bottles.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(bottles.len(), 2, "bottles: {bottles:?}");
+        assert_same_path(&bottles[0].path, &secondary_pfx);
+        assert_same_path(&bottles[1].path, &primary_pfx);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn steam_root_symlink_alias_is_not_duplicated() {
+        // ~/.steam/root and ~/.steam/steam normally point at the native root.
+        let home = tempfile::tempdir().unwrap();
+        let native = home.path().join(".local/share/Steam");
+        create_fake_proton_prefix(&native, "489830", "Skyrim Special Edition");
+        let dot_steam = home.path().join(".steam");
+        fs::create_dir_all(&dot_steam).unwrap();
+        std::os::unix::fs::symlink(&native, dot_steam.join("root")).unwrap();
+        std::os::unix::fs::symlink(&native, dot_steam.join("steam")).unwrap();
+
+        let native_compatdata = native.join("steamapps/compatdata");
+        let hits = platform_search_locations(home.path())
+            .into_iter()
+            .filter(|l| same_dir(&l.path, &native_compatdata))
+            .count();
+        assert_eq!(hits, 1);
+        assert_eq!(proton_bottles(home.path()).len(), 1);
     }
 }

@@ -13,6 +13,8 @@
     "macOSPrivateApi": true,
     "windows": [
       {
+        "label": "main",
+        "create": false,
         "title": "Corkscrew",
         "width": 1100,
         "height": 750,
