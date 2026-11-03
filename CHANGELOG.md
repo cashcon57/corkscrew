@@ -17,6 +17,9 @@ All notable changes to Corkscrew are documented here. This project follows [Sema
 - **"Add game" for a game in a Proton prefix** now accepts the game's real install folder under `steamapps/common`, not only paths inside the prefix (#209, #210, #194).
 - **Heroic, Bottles and Lutris on Linux**: Heroic's per-game `Prefixes/default/<game>` prefixes are found, and `XDG_CONFIG_HOME`/`XDG_DATA_HOME` are honored for Heroic, Bottles and Lutris (#206). Snap Steam's `compatibilitytools.d` is searched for Proton builds (#203).
 - **Wabbajack installs** use a single install record, so a successful install no longer shows as cancelled (#204).
+- **Mods page froze after activating a profile, finishing a collection or Wabbajack install, or installing from an `nxm://` link**: the page kept reloading the mod list in an endless loop, which tied up the backend so the window stopped responding and the disk widget stayed on "Loading disk info..." forever. The page now reloads once per change. The mod list also no longer clears your selection and search box every time it refreshes. Checking for mod updates no longer blocks other requests while it reads the mod database. (#217)
+- **Mod list went blank in narrower windows**: the notification cards ("Deploy needed", "View Updates") took a column beside the list and squeezed it to nothing. They now sit above the list. In compact mode the Version and Actions columns stay visible, and compact mode now kicks in based on the list's own width, so the Mod Name column no longer disappears when the side panels leave it little room. (#217)
+- **Category column showed a literal `\u2014` escape** for mods without a category instead of a dash. (#217)
 
 ## [0.14.24] - 2026-11-02
 

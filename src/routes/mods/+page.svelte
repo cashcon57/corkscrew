@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, untrack } from "svelte";
   import { get } from "svelte/store";
   import { open } from "@tauri-apps/plugin-dialog";
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -1113,43 +1113,49 @@
       : null
   );
 
-  // Restore search + banners from sessionStorage when game changes
+  // Restore search + banners from sessionStorage when game changes.
+  //
+  // Only `activeGame` is a dependency. Everything else runs untracked:
+  // loadMods()/refreshHealth() read `$installedMods` and `conflicts`
+  // synchronously, and re-running this effect whenever the mod list reloads
+  // would wipe the user's selection and search box on every refresh.
   $effect(() => {
-    if (activeGame) {
-      const saved = sessionStorage.getItem(searchStorageKey(activeGame));
-      filters.searchQuery = saved ?? "";
-      searchRestored = true;
-      // Restore dismissed banners
-      const bannerKey = `corkscrew-banners-${activeGame.game_id}-${(wineCtx(activeGame)?.bottle_name ?? "")}`;
-      const savedBanners = sessionStorage.getItem(bannerKey);
-      dismissedBanners = savedBanners ? new Set(JSON.parse(savedBanners)) : new Set();
-      // Clear selection
-      selectedModIds = new Set();
-      // Only reload if the game changed — skip if returning to the same page
-      const gameKey = `${activeGame.game_id}:${(wineCtx(activeGame)?.bottle_name ?? "")}`;
-      if (cachedGameKey !== gameKey) {
-        const t0 = performance.now();
-        // Try disk cache first for instant display
-        const cached = loadModCache(activeGame);
-        if (cached && cached.length > 0) {
-          installedMods.set(cached);
-          cachedGameKey = gameKey;
-          loadingMods = false;
-          console.log(`[perf] disk cache hit: ${(performance.now() - t0).toFixed(0)}ms (${cached.length} mods)`);
-          // Hot-load fresh data in background without showing spinner
-          loadMods(activeGame, false);
-          refreshHealth(activeGame);
-        } else {
-          console.log(`[perf] disk cache miss — loading from DB`);
-          // Load mods first (fast), health in parallel
-          loadMods(activeGame);
-          refreshHealth(activeGame);
-        }
-      } else {
-        console.log(`[perf] page revisit — using RAM cache`);
-      }
-    }
+    const game = activeGame;
+    if (game) untrack(() => restoreForGame(game));
   });
+
+  function restoreForGame(game: DetectedGame) {
+    const saved = sessionStorage.getItem(searchStorageKey(game));
+    filters.searchQuery = saved ?? "";
+    searchRestored = true;
+    // Restore dismissed banners
+    const bannerKey = `corkscrew-banners-${game.game_id}-${(wineCtx(game)?.bottle_name ?? "")}`;
+    const savedBanners = sessionStorage.getItem(bannerKey);
+    dismissedBanners = savedBanners ? new Set(JSON.parse(savedBanners)) : new Set();
+    // Clear selection
+    selectedModIds = new Set();
+    // Only reload if the game changed — skip if returning to the same page
+    const gameKey = `${game.game_id}:${(wineCtx(game)?.bottle_name ?? "")}`;
+    if (cachedGameKey !== gameKey) {
+      const t0 = performance.now();
+      // Try disk cache first for instant display
+      const cached = loadModCache(game);
+      if (cached && cached.length > 0) {
+        installedMods.set(cached);
+        cachedGameKey = gameKey;
+        loadingMods = false;
+        console.log(`[perf] disk cache hit: ${(performance.now() - t0).toFixed(0)}ms (${cached.length} mods)`);
+        // Hot-load fresh data in background without showing spinner
+        reloadModsAndHealth(game, "disk cache hit", false);
+      } else {
+        console.log(`[perf] disk cache miss — loading from DB`);
+        // Load mods first (fast), health in parallel
+        reloadModsAndHealth(game, "game change");
+      }
+    } else {
+      console.log(`[perf] page revisit — using RAM cache`);
+    }
+  }
 
   // Persist search to sessionStorage
   $effect(() => {
@@ -1158,12 +1164,20 @@
     }
   });
 
+  // The three "reload after X" effects below must depend ONLY on their
+  // trigger store (+ the active game). loadMods() reads `$installedMods.length`
+  // and refreshHealth() reads `conflicts.length` before their first await, so
+  // calling them tracked makes `$installedMods`/`conflicts` dependencies of the
+  // effect; loadMods() then sets them, the effect re-runs, and the page spins
+  // in an endless reload loop that saturates the backend (wedged UI,
+  // "Loading disk info..." forever). Hence the untrack().
+
   // Reload mods when an NXM install completes (triggered from layout)
   $effect(() => {
-    const _count = $nxmInstallComplete;
-    if (_count > 0 && activeGame) {
-      loadMods(activeGame);
-      refreshHealth(activeGame);
+    const count = $nxmInstallComplete;
+    const game = activeGame;
+    if (count > 0 && game) {
+      untrack(() => reloadModsAndHealth(game, "NXM install"));
     }
   });
 
@@ -1172,23 +1186,29 @@
   // Refresh mod list and health when a WJ install completes (CLAUDE.md invariant)
   $effect(() => {
     const gen = $wjInstallGeneration;
-    if (gen > 0 && activeGame) {
-      const game = activeGame;
-      loadMods(game).catch((err: unknown) => console.error("loadMods after WJ install:", err));
-      refreshHealth(game).catch((err: unknown) => console.error("refreshHealth after WJ install:", err));
+    const game = activeGame;
+    if (gen > 0 && game) {
+      untrack(() => reloadModsAndHealth(game, "WJ install"));
     }
   });
 
   // Refresh mod list when profile or collection switch bumps modStateVersion
   $effect(() => {
     const ver = $modStateVersion;
-    if (ver > 0 && activeGame) {
-      const game = activeGame;
-      cachedGameKey = null;
-      loadMods(game).catch((err: unknown) => console.error("loadMods after state change:", err));
-      refreshHealth(game).catch((err: unknown) => console.error("refreshHealth after state change:", err));
+    const game = activeGame;
+    if (ver > 0 && game) {
+      untrack(() => {
+        cachedGameKey = null;
+        reloadModsAndHealth(game, "state change");
+      });
     }
   });
+
+  /** Fire-and-forget reload of the mod list + deploy health (call untracked from effects). */
+  function reloadModsAndHealth(game: DetectedGame, reason: string, showSpinner = true) {
+    loadMods(game, showSpinner).catch((err: unknown) => console.error(`loadMods after ${reason}:`, err));
+    refreshHealth(game).catch((err: unknown) => console.error(`refreshHealth after ${reason}:`, err));
+  }
 
   $effect(() => {
     const _trigger = csCheckTrigger; // depend on re-check trigger
@@ -3111,8 +3131,9 @@
         </div>
       </div>
     {:else}
-      <div class="mod-layout" class:has-detail={detailMod !== null}>
-      <!-- Actionable notification cards -->
+      <!-- Actionable notification cards. Stacked ABOVE the list (not inside
+           .mod-layout's flex row) so they can never squeeze the table to 0px
+           at narrow window widths. -->
       <ActionQueue
         {deployHealth}
         {conflicts}
@@ -3123,6 +3144,7 @@
         onOpenUpdates={() => { filters.filterStatus = "has-updates"; }}
         onSort={() => {}}
       />
+      <div class="mod-layout" class:has-detail={detailMod !== null}>
       <div class="mod-table-container" class:reordering-active={reordering}>
         <div class="mod-table" style="--grid-cols: {gridTemplate}">
           <!-- Sticky Header — click to sort -->
@@ -3489,7 +3511,7 @@
                       <span class="category-label">{mod.auto_category}</span>
                     </span>
                   {:else}
-                    <span class="text-muted">\u2014</span>
+                    <span class="text-muted">&mdash;</span>
                   {/if}
                 </span>
 
@@ -3997,6 +4019,9 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+    /* Grid items default to min-width:auto; without this the 1fr track can't
+       shrink below the content's min-content width. */
+    min-width: 0;
     overflow: hidden;
   }
 
@@ -4498,6 +4523,8 @@
      ============================ */
   .mod-table-container {
     flex: 1;
+    /* Let the list shrink instead of being crushed by siblings' min-content. */
+    min-width: 0;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -4642,10 +4669,24 @@
       opacity var(--duration-fast) var(--ease);
   }
 
-  /* Narrow window: hide Category, Origin, Source, Files, Date columns */
-  @media (max-width: 1200px) {
+  /* Narrow window: hide Category, Origin, Source, Files, Date columns.
+     display:none children are removed from grid auto-placement, so the
+     template must list ONLY the visible columns (check, grip, toggle, name,
+     version, actions). Keeping 0px tracks for the hidden ones shifts
+     Version/Actions into those 0px tracks and they vanish.
+
+     Keyed on the list's own width (container query), not the viewport: the
+     nav sidebar, right-hand panel and detail pane all eat into it, so a
+     1300px window can leave the list narrower than the ~650px of fixed
+     columns and crush Mod Name to 0px. 860px = fixed tracks + row padding +
+     a usable name column. */
+  .mod-table-container {
+    container: mod-list / inline-size;
+  }
+
+  @container mod-list (max-width: 860px) {
     .mod-table {
-      --grid-cols: 24px 28px 48px minmax(0, 1fr) 0px 0px 0px 64px 0px 0px 60px !important;
+      --grid-cols: 24px 28px 48px minmax(0, 1fr) 72px 60px !important;
     }
     .col-category,
     .col-origin,
@@ -4653,6 +4694,22 @@
     .col-files,
     .col-date {
       display: none;
+    }
+  }
+
+  /* Fallback for webviews without container queries (Safari < 16). */
+  @supports not (container-type: inline-size) {
+    @media (max-width: 1200px) {
+      .mod-table {
+        --grid-cols: 24px 28px 48px minmax(0, 1fr) 72px 60px !important;
+      }
+      .col-category,
+      .col-origin,
+      .col-source,
+      .col-files,
+      .col-date {
+        display: none;
+      }
     }
   }
 

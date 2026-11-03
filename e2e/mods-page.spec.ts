@@ -51,6 +51,9 @@ test.describe('Mods Page (functional)', () => {
   });
 
   test('mod categories are displayed', async ({ page }) => {
+    // Category/Origin columns only show when the list is wide enough; at the
+    // default 1280px viewport the side panels leave it in compact mode.
+    await page.setViewportSize({ width: 1600, height: 900 });
     await expect(page.locator('.toggle-switch').first()).toBeVisible({ timeout: 10_000 });
     // Categories from mock data
     await expect(page.locator('.category-label', { hasText: 'UI' })).toBeVisible();
@@ -59,6 +62,9 @@ test.describe('Mods Page (functional)', () => {
   });
 
   test('mod source labels are displayed', async ({ page }) => {
+    // Category/Origin columns only show when the list is wide enough; at the
+    // default 1280px viewport the side panels leave it in compact mode.
+    await page.setViewportSize({ width: 1600, height: 900 });
     await expect(page.locator('.toggle-switch').first()).toBeVisible({ timeout: 10_000 });
     // Most mods are from Nexus
     await expect(page.locator('.origin-nexus').first()).toBeVisible();
