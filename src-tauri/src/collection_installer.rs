@@ -2901,17 +2901,27 @@ pub async fn install_collection(
         }
     }
 
-    // EngineFixes Wine compatibility: disable all patches and deploy Wine-safe replacement
+    // SSE Engine Fixes for Wine policy: withhold the stock files and deploy the
+    // Wine fork when the option is on and the runtime is supported; otherwise
+    // keep/restore the stock files. Same decision as launch and redeploy.
     if game_id == "skyrimse" {
-        // TOML patching and DLL deploy are two halves of the same opt-in
-        // feature — gate both on the same flag so install/launch/redeploy
-        // can never disagree about whether the Wine fork is active.
         let use_wine_ef = crate::config::engine_fixes_wine_enabled();
-        if use_wine_ef {
-            let ef_fixes = skse::fix_engine_fixes_for_wine(&data_dir, db, game_id, bottle_name);
-            if ef_fixes > 0 {
-                log::info!("EngineFixes Wine fix: patched {} TOML file(s)", ef_fixes);
-            }
+        let game_version = if use_wine_ef {
+            skse::skyrim_runtime_version(&game_path)
+        } else {
+            None
+        };
+        let plan = skse::prepare_engine_fixes(
+            db,
+            game_id,
+            bottle_name,
+            &data_dir,
+            &game_path,
+            use_wine_ef,
+            game_version.as_deref(),
+        );
+        for msg in plan.warning.iter().chain(plan.notice.iter()) {
+            log::info!("Engine Fixes: {}", msg);
         }
 
         // Disable Wine-incompatible SKSE plugins (CrashLogger, etc.)
@@ -2922,7 +2932,7 @@ pub async fn install_collection(
         }
 
         // Auto-deploy SSE Engine Fixes for Wine (opt-in via settings)
-        if use_wine_ef {
+        if plan.install_wine_fork {
             match skse::install_engine_fixes_wine(&data_dir).await {
                 Ok(true) => log::info!("Auto-deployed SSE Engine Fixes for Wine"),
                 Ok(false) => log::debug!("SSE Engine Fixes for Wine already deployed"),

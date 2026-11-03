@@ -53,8 +53,15 @@ fn manifest_key(rel_path: &str) -> String {
     rel_path.replace('\\', "/").to_lowercase()
 }
 
-/// Quick check for top-level game files that must never be deleted.
-/// This is a fast path that doesn't require a baseline lookup.
+/// Deploy-time heuristic for *untracked* files: an existing top-level
+/// `.esm`/`.bsa`/`.ba2` that is not in the deployment manifest is assumed to
+/// belong to the game and is never overwritten.
+///
+/// This must NEVER be used to decide whether a *recorded* file may be
+/// removed. Mod archives (`SkyUI_SE.bsa`, `UOSC.bsa`, …) match this pattern
+/// too, and a manifest record is proof Corkscrew placed the file. Treating
+/// recorded mod BSAs as vanilla on undeploy left them in Data untracked, and
+/// re-enabling the mod then refused to overwrite its own leftover (bug #4).
 fn is_protected_extension(rel_path: &str) -> bool {
     let lower = rel_path.to_lowercase();
     if !lower.contains('/')
@@ -65,44 +72,168 @@ fn is_protected_extension(rel_path: &str) -> bool {
     false
 }
 
-/// Build a set of known vanilla file paths for a game (lowercase, for O(1) lookup).
-/// Returns None if no baseline is available for the game.
+/// Build a set of known vanilla file paths for a game (normalized with
+/// [`manifest_key`], for O(1) lookup). Returns None if no baseline is
+/// available for the game.
 fn build_vanilla_set(game_id: &str) -> Option<std::collections::HashSet<String>> {
     baselines::get_builtin_baseline(game_id)
-        .map(|baseline| baseline.into_iter().map(|p| p.to_lowercase()).collect())
+        .map(|baseline| baseline.iter().map(|p| manifest_key(p)).collect())
 }
 
-/// Check if a file is a vanilla/stock game file that should NOT be deleted
-/// during purge or undeploy operations. Uses a pre-built vanilla set for
-/// efficiency when checking many files.
-fn is_vanilla_file_with_set(
+/// How a recorded path relates to the game's stock (vanilla) files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StockClass {
+    /// Not a known stock file — the manifest record alone proves Corkscrew
+    /// owns whatever is on disk at this path.
+    NotStock,
+    /// Exact match in the built-in baseline list (e.g. `Skyrim.esm`). These
+    /// are never deleted, even when recorded.
+    Baseline,
+    /// Matches a broad stock *pattern* (`cc*.bsa`, `video/…`) but is not in
+    /// the explicit baseline. Mods can collide with these patterns (any mod
+    /// archive whose name starts with "cc"), so ownership is decided by
+    /// comparing the on-disk file against the mod's staging copy.
+    StockPattern,
+}
+
+fn classify_stock(
     game_id: &str,
     rel_path: &str,
     vanilla_set: Option<&std::collections::HashSet<String>>,
-) -> bool {
-    // Fast path: top-level .esm/.bsa/.ba2 are always protected
-    if is_protected_extension(rel_path) {
-        return true;
+) -> StockClass {
+    // Case-folded on purpose: Wine targets case-insensitive filesystems.
+    if vanilla_set.is_some_and(|set| set.contains(&manifest_key(rel_path))) {
+        return StockClass::Baseline;
+    }
+    if baselines::is_stock_pattern(game_id, &rel_path.replace('\\', "/")) {
+        return StockClass::StockPattern;
+    }
+    StockClass::NotStock
+}
+
+#[cfg(unix)]
+fn same_inode(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+#[cfg(not(unix))]
+fn same_inode(_a: &fs::Metadata, _b: &fs::Metadata) -> bool {
+    false
+}
+
+/// If `dst` is provably the copy Corkscrew deploys from `src`, return the
+/// deploy method that describes it: `"hardlink"` when both are the same inode,
+/// `"copy"` when they are distinct but byte-identical regular files.
+///
+/// Neither path is followed if it is a symlink.
+fn deployed_copy_kind(src: &Path, dst: &Path) -> Option<&'static str> {
+    let dst_meta = fs::symlink_metadata(dst).ok()?;
+    let src_meta = fs::symlink_metadata(src).ok()?;
+    if !dst_meta.file_type().is_file() || !src_meta.file_type().is_file() {
+        return None;
+    }
+    if same_inode(&src_meta, &dst_meta) {
+        return Some("hardlink");
+    }
+    if src_meta.len() != dst_meta.len() {
+        return None;
+    }
+    let src_hash = platform::fast_hash(src).ok()?;
+    let dst_hash = platform::fast_hash(dst).ok()?;
+    (src_hash == dst_hash).then_some("copy")
+}
+
+/// Outcome of removing one recorded (manifest-tracked) file from disk.
+#[derive(Debug)]
+enum RemoveOutcome {
+    /// The file was deleted.
+    Removed,
+    /// Nothing was on disk at the recorded path.
+    AlreadyGone,
+    /// The path is a genuine stock game file and was left in place.
+    KeptVanilla,
+    /// Deletion failed; the manifest row must be kept so the user can retry.
+    Failed(String),
+}
+
+/// Remove one file that the deployment manifest says Corkscrew placed.
+///
+/// A manifest record is proof of ownership, so the file is removed unless it
+/// is a genuine stock file: an exact built-in baseline match, or a stock
+/// *pattern* match whose on-disk content is not the mod's staging copy.
+/// Root-targeted entries skip the stock check (the baseline describes Data/).
+///
+/// The symlink check happens before any file operation (TOCTOU): a symlink
+/// at the recorded path is unlinked, never followed.
+fn remove_recorded_file(
+    game_id: &str,
+    rel_path: &str,
+    deploy_target: &str,
+    base: &Path,
+    staging_dir: Option<&Path>,
+    vanilla_set: Option<&std::collections::HashSet<String>>,
+) -> RemoveOutcome {
+    if !crate::staging::is_safe_relative_path(rel_path) {
+        return RemoveOutcome::Failed(format!("unsafe manifest path: {}", rel_path));
+    }
+    let file_path = base.join(rel_path);
+
+    let meta = match fs::symlink_metadata(&file_path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return RemoveOutcome::AlreadyGone,
+        Err(e) => return RemoveOutcome::Failed(e.to_string()),
+    };
+    if meta.is_dir() {
+        return RemoveOutcome::Failed(format!("{} is a directory", file_path.display()));
     }
 
-    // Lowercase comparison is intentional: Wine targets use case-insensitive
-    // filesystems (NTFS under Wine, APFS on macOS), so vanilla file lookups
-    // must be case-folded to match regardless of how the path was authored.
-    let lower = rel_path.to_lowercase();
-
-    // Check built-in baseline (pre-computed set)
-    if let Some(set) = vanilla_set {
-        if set.contains(&lower) {
-            return true;
+    if deploy_target != "root" {
+        let keep = match classify_stock(game_id, rel_path, vanilla_set) {
+            StockClass::NotStock => false,
+            StockClass::Baseline => true,
+            StockClass::StockPattern => !staging_dir
+                .is_some_and(|dir| deployed_copy_kind(&dir.join(rel_path), &file_path).is_some()),
+        };
+        if keep {
+            warn!(
+                "SAFETY: leaving stock game file in place: {} (record dropped)",
+                rel_path
+            );
+            return RemoveOutcome::KeptVanilla;
         }
     }
 
-    // Check stock patterns (CC content, video files, etc.)
-    if baselines::is_stock_pattern(game_id, rel_path) {
-        return true;
+    // Some mod files ship read-only; make writable before deleting.
+    if !meta.file_type().is_symlink() && meta.permissions().readonly() {
+        let mut writable = meta.permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        writable.set_readonly(false);
+        if let Err(e) = fs::set_permissions(&file_path, writable) {
+            debug!("Could not clear read-only flag on {}: {}", file_path.display(), e);
+        }
     }
 
-    false
+    match fs::remove_file(&file_path) {
+        Ok(()) => {
+            prune_empty_dirs(&file_path, base);
+            RemoveOutcome::Removed
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => RemoveOutcome::AlreadyGone,
+        Err(e) => RemoveOutcome::Failed(e.to_string()),
+    }
+}
+
+/// Resolve the directory a manifest entry's `relative_path` is relative to.
+/// `custom` targets are recorded relative to a per-mod directory that only
+/// the command layer can recompute; they fall back to `data_dir`, matching
+/// the historical behaviour of undeploy/purge.
+fn deploy_base<'a>(deploy_target: &str, data_dir: &'a Path, game_path: &'a Path) -> &'a Path {
+    if deploy_target == "root" {
+        game_path
+    } else {
+        data_dir
+    }
 }
 
 /// Callback type for reporting deployment progress: (files_done, files_total).
@@ -293,6 +424,17 @@ fn deploy_mod_inner(
     if !staging_path.exists() {
         return Err(DeployerError::StagingNotFound(staging_path.to_path_buf()));
     }
+    let vanilla_set = build_vanilla_set(game_id);
+
+    // Persist the target on the mod itself: manifest rows (the only other
+    // place it lived) are dropped on undeploy/purge, which used to reset
+    // root-deployed mods to `data` on the next re-enable or full redeploy.
+    if let Err(e) = db.remember_deploy_target_for_mod(mod_id, deploy_target) {
+        warn!(
+            "Deploy mod {}: could not persist deploy target '{}': {}",
+            mod_id, deploy_target, e
+        );
+    }
 
     let can_hardlink = same_filesystem(staging_path, data_dir);
     let copy_method = platform::detect_copy_method(staging_path, data_dir);
@@ -404,7 +546,15 @@ fn deploy_mod_inner(
             }
 
             let method =
-                match deploy_single_file(rel_path, &src, &dst, manifest_owned, can_hardlink, copy_method) {
+                match deploy_single_file(
+                    rel_path,
+                    &src,
+                    &dst,
+                    manifest_owned,
+                    classify_stock(game_id, rel_path, vanilla_set.as_ref()) == StockClass::NotStock,
+                    can_hardlink,
+                    copy_method,
+                ) {
                     Some(m) => {
                         if m == "copy" {
                             fallback_used.store(true, Ordering::Relaxed);
@@ -585,15 +735,17 @@ pub fn undeploy_mod(
     data_dir: &Path,
     game_path: &Path,
 ) -> Result<Vec<String>> {
-    // Query manifest paths FIRST without deleting entries.
-    // Entries are only deleted after files are successfully removed,
-    // preventing orphaned files if removal fails partway through.
-    let manifest_paths = db
-        .get_deployment_paths_for_mod(mod_id)
+    // Query manifest rows FIRST without deleting them. Rows are only deleted
+    // for files that are actually gone from disk afterwards (or are genuine
+    // stock files), so a failed removal stays tracked and can be retried.
+    let entries = db
+        .get_deployment_entries_for_mod(mod_id)
         .map_err(|e| DeployerError::Database(e.to_string()))?;
 
     let vanilla_set = build_vanilla_set(game_id);
     let mut actually_removed = Vec::new();
+    let mut clear_ids: Vec<i64> = Vec::with_capacity(entries.len());
+    let mut kept_vanilla = 0usize;
     let mut errors = Vec::new();
     let mut restore_failures = Vec::new();
 
@@ -603,61 +755,47 @@ pub fn undeploy_mod(
         .list_mods(game_id, bottle_name)
         .map_err(|e| DeployerError::Database(e.to_string()))?;
 
-    for (rel_path, deploy_target) in &manifest_paths {
-        // SAFETY: Never delete vanilla game files even if they're in the manifest.
-        if deploy_target != "root"
-            && is_vanilla_file_with_set(game_id, rel_path, vanilla_set.as_ref())
-        {
-            warn!("SAFETY: Refusing to undeploy vanilla file: {}", rel_path);
-            actually_removed.push(rel_path.clone()); // Clean manifest entry
-            continue;
-        }
+    for entry in &entries {
+        let rel_path = &entry.relative_path;
+        let base = deploy_base(&entry.deploy_target, data_dir, game_path);
+        let staging_dir =
+            (!entry.staging_path.is_empty()).then(|| Path::new(entry.staging_path.as_str()));
 
-        let base = if deploy_target == "root" {
-            game_path
-        } else {
-            data_dir
-        };
-        let file_path = base.join(rel_path);
-
-        if file_path.exists() {
-            // Make writable before deleting — some mod files are read-only
-            if let Ok(metadata) = fs::metadata(&file_path) {
-                let perms = metadata.permissions();
-                if perms.readonly() {
-                    let mut writable = perms;
-                    #[allow(clippy::permissions_set_readonly_false)]
-                    writable.set_readonly(false);
-                    let _ = fs::set_permissions(&file_path, writable);
-                }
+        match remove_recorded_file(
+            game_id,
+            rel_path,
+            &entry.deploy_target,
+            base,
+            staging_dir,
+            vanilla_set.as_ref(),
+        ) {
+            RemoveOutcome::Removed | RemoveOutcome::AlreadyGone => {
+                actually_removed.push(rel_path.clone());
+                clear_ids.push(entry.id);
             }
-            match fs::remove_file(&file_path) {
-                Ok(()) => {
-                    actually_removed.push(rel_path.clone());
-                    prune_empty_dirs(&file_path, base);
-                }
-                Err(e) => {
-                    errors.push(format!("{}: {}", rel_path, e));
-                    continue;
-                }
+            RemoveOutcome::KeptVanilla => {
+                // The file on disk is the game's, not ours: the record no
+                // longer describes anything Corkscrew placed.
+                kept_vanilla += 1;
+                clear_ids.push(entry.id);
+                continue;
             }
-        } else {
-            // File already gone — still count as "removed" for manifest cleanup
-            actually_removed.push(rel_path.clone());
+            RemoveOutcome::Failed(e) => {
+                // Keep the record: the file is still on disk and still ours.
+                errors.push(format!("{}: {}", rel_path, e));
+                continue;
+            }
         }
 
         // Restore next-priority mod's version of this file if applicable.
-        // This runs BEFORE manifest deletion so that on failure, the manifest
-        // still tracks the file until cleanup completes.
+        // Its manifest row replaces ours (UNIQUE on path + target), so the
+        // id-based cleanup below never deletes the winner's row.
         if let Err(e) = restore_next_winner_with_mods(db, &all_mods, rel_path, base) {
             warn!("Failed to restore winner for {}: {}", rel_path, e);
             restore_failures.push(rel_path.clone());
         }
     }
 
-    // Delete manifest entries after all file operations are complete.
-    // Even if some restorations failed, we still clean the manifest to avoid
-    // stale entries — but log a warning about potential orphans.
     if !restore_failures.is_empty() {
         warn!(
             "Mod {} undeploy: {} file(s) could not be restored from lower-priority mods, \
@@ -667,19 +805,26 @@ pub fn undeploy_mod(
             restore_failures,
         );
     }
-    let _ = db.remove_deployment_entries_for_mod(mod_id);
+    db.remove_deployment_entries_by_ids(&clear_ids)
+        .map_err(|e| DeployerError::Database(e.to_string()))?;
 
     info!(
-        "Undeployed mod {} ({}/{} files removed, {} errors, {} restore failures)",
+        "Undeployed mod {} ({}/{} files removed, {} stock files left in place, {} errors, {} restore failures)",
         mod_id,
         actually_removed.len(),
-        manifest_paths.len(),
+        entries.len(),
+        kept_vanilla,
         errors.len(),
         restore_failures.len(),
     );
 
     if !errors.is_empty() {
-        warn!("Undeploy errors for mod {}: {:?}", mod_id, errors);
+        warn!(
+            "Undeploy errors for mod {} ({} file(s) still deployed and still tracked): {:?}",
+            mod_id,
+            errors.len(),
+            errors
+        );
     }
 
     Ok(actually_removed)
@@ -834,8 +979,9 @@ pub fn purge_deployment(
 
     let vanilla_set = build_vanilla_set(game_id);
     let mut removed = Vec::new();
-    let mut purged_mod_ids = std::collections::HashSet::new();
-    let mut failed_mod_ids = std::collections::HashSet::new();
+    let mut clear_ids: Vec<i64> = Vec::with_capacity(manifest.len());
+    let mut kept_vanilla = 0usize;
+    let mut failed = 0usize;
 
     for entry in &manifest {
         // Legacy direct-installed files are not ours to purge
@@ -843,59 +989,50 @@ pub fn purge_deployment(
             continue;
         }
 
-        // SAFETY: Never delete vanilla game files even if they're in the manifest.
-        // This can happen if a mod overwrote a vanilla file during deployment.
-        if entry.deploy_target != "root"
-            && is_vanilla_file_with_set(game_id, &entry.relative_path, vanilla_set.as_ref())
-        {
-            warn!(
-                "SAFETY: Refusing to purge vanilla file: {}",
-                entry.relative_path
-            );
-            purged_mod_ids.insert(entry.mod_id); // Still clean manifest entry
-            continue;
-        }
-
-        let base = if entry.deploy_target == "root" {
-            game_path
-        } else {
-            data_dir
-        };
-        let file_path = base.join(&entry.relative_path);
-        if file_path.exists() {
-            if let Err(e) = fs::remove_file(&file_path) {
-                warn!("Failed to purge {}: {}", file_path.display(), e);
-                failed_mod_ids.insert(entry.mod_id);
-            } else {
+        let base = deploy_base(&entry.deploy_target, data_dir, game_path);
+        let staging_dir =
+            (!entry.staging_path.is_empty()).then(|| Path::new(entry.staging_path.as_str()));
+        match remove_recorded_file(
+            game_id,
+            &entry.relative_path,
+            &entry.deploy_target,
+            base,
+            staging_dir,
+            vanilla_set.as_ref(),
+        ) {
+            RemoveOutcome::Removed => {
                 removed.push(entry.relative_path.clone());
-                prune_empty_dirs(&file_path, base);
-                purged_mod_ids.insert(entry.mod_id);
+                clear_ids.push(entry.id);
             }
-        } else {
-            // File already gone from disk — still mark mod for manifest cleanup
-            purged_mod_ids.insert(entry.mod_id);
+            RemoveOutcome::AlreadyGone => clear_ids.push(entry.id),
+            RemoveOutcome::KeptVanilla => {
+                kept_vanilla += 1;
+                clear_ids.push(entry.id);
+            }
+            RemoveOutcome::Failed(e) => {
+                // Keep the record so the file stays managed and a later
+                // purge/undeploy can retry. Dropping it would leave an
+                // untracked mod file that future deploys refuse to replace.
+                warn!(
+                    "Failed to purge {}: {}",
+                    base.join(&entry.relative_path).display(),
+                    e
+                );
+                failed += 1;
+            }
         }
     }
 
-    // Only clean manifest entries for mods whose files were ALL successfully removed.
-    // If any file for a mod failed to delete, keep the manifest so the user can retry.
-    for mod_id in &purged_mod_ids {
-        if failed_mod_ids.contains(mod_id) {
-            warn!(
-                "Skipping manifest cleanup for mod {} — some files could not be removed",
-                mod_id
-            );
-            continue;
-        }
-        db.remove_deployment_entries_for_mod(*mod_id)
-            .map_err(|e| DeployerError::Database(e.to_string()))?;
-    }
+    db.remove_deployment_entries_by_ids(&clear_ids)
+        .map_err(|e| DeployerError::Database(e.to_string()))?;
 
     info!(
-        "Purged deployment for {}/{}: {} files removed",
+        "Purged deployment for {}/{}: {} files removed, {} stock files left in place, {} failed (still tracked)",
         game_id,
         bottle_name,
-        removed.len()
+        removed.len(),
+        kept_vanilla,
+        failed
     );
 
     Ok(removed)
@@ -1183,6 +1320,7 @@ fn deploy_single_file(
     src: &Path,
     dst: &Path,
     manifest_owned: bool,
+    allow_content_adoption: bool,
     can_hardlink: bool,
     copy_method: platform::FsCopyMethod,
 ) -> Option<&'static str> {
@@ -1196,6 +1334,23 @@ fn deploy_single_file(
         }
         Ok(_) => {
             if !manifest_owned && is_protected_extension(rel_path) {
+                // An untracked file that is provably this mod's own copy (the
+                // same inode as the staging file, or byte-identical) is a
+                // leftover from an earlier undeploy that dropped its record
+                // without deleting it. Adopt it instead of skipping, so users
+                // already hit by that bug heal on their next deploy.
+                // Same inode proves Corkscrew put it there. Identical bytes
+                // only do for non-stock paths: a mod can ship an exact copy
+                // of a base-game file, which must never become ours to delete.
+                if let Some(method) = deployed_copy_kind(src, dst)
+                    .filter(|m| *m == "hardlink" || allow_content_adoption)
+                {
+                    info!(
+                        "Deploy: adopting untracked {} — identical to the mod's staging copy ({})",
+                        rel_path, method
+                    );
+                    return Some(method);
+                }
                 // File exists on disk but is NOT in the deployment manifest:
                 // likely a vanilla game file. Overwriting it would make it
                 // unrecoverable on undeploy/purge.
@@ -1386,45 +1541,58 @@ pub fn deploy_incremental(
     let any_fallback = AtomicBool::new(!can_hardlink);
     let verification_failures: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-    // Step 5a: Remove files that should no longer be deployed
-    let remove_paths: Vec<&str> = diff
+    // Step 5a: Remove files that should no longer be deployed. Same ownership
+    // rules as undeploy/purge; rows are only dropped once the file is gone
+    // (or is a genuine stock file), never for a file that failed to delete.
+    let vanilla_set = build_vanilla_set(game_id);
+    let remove_ids: Vec<i64> = diff
         .to_remove
         .par_iter()
         .filter_map(|entry| {
-            let file_path = data_dir.join(&entry.relative_path);
-            if file_path.exists() {
-                match fs::remove_file(&file_path) {
-                    Ok(()) => {
-                        prune_empty_dirs(&file_path, data_dir);
-                        removed_count.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Err(e) => {
-                        warn!("Failed to remove {}: {}", file_path.display(), e);
-                        verification_failures
-                            .lock()
-                            .unwrap()
-                            .push(format!("remove failed: {}: {}", entry.relative_path, e));
-                    }
+            let base = deploy_base(&entry.deploy_target, data_dir, game_path);
+            let staging_dir =
+                (!entry.staging_path.is_empty()).then(|| Path::new(entry.staging_path.as_str()));
+            match remove_recorded_file(
+                game_id,
+                &entry.relative_path,
+                &entry.deploy_target,
+                base,
+                staging_dir,
+                vanilla_set.as_ref(),
+            ) {
+                RemoveOutcome::Removed | RemoveOutcome::AlreadyGone => {
+                    removed_count.fetch_add(1, Ordering::Relaxed);
+                    Some(entry.id)
                 }
-            } else {
-                removed_count.fetch_add(1, Ordering::Relaxed);
+                RemoveOutcome::KeptVanilla => Some(entry.id),
+                RemoveOutcome::Failed(e) => {
+                    warn!(
+                        "Failed to remove {}: {}",
+                        base.join(&entry.relative_path).display(),
+                        e
+                    );
+                    verification_failures
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .push(format!("remove failed: {}: {}", entry.relative_path, e));
+                    None
+                }
             }
-            Some(entry.relative_path.as_str())
         })
         .collect();
 
     // Remove stale manifest entries
-    if !remove_paths.is_empty() {
-        db.batch_remove_deployment_entries(game_id, bottle_name, &remove_paths)
-            .map_err(|e| DeployerError::Database(e.to_string()))?;
-    }
+    db.remove_deployment_entries_by_ids(&remove_ids)
+        .map_err(|e| DeployerError::Database(e.to_string()))?;
 
     // Step 5b: Update files where the owning mod changed
     let update_owned: Vec<(i64, String, String, Option<String>, String, &'static str)> = diff
         .to_update
         .par_iter()
         .filter_map(|(old_entry, new_desired)| {
-            let dst = data_dir.join(&new_desired.relative_path);
+            let base = deploy_base(&new_desired.deploy_target, data_dir, game_path);
+            let old_base = deploy_base(&old_entry.deploy_target, data_dir, game_path);
+            let dst = base.join(&new_desired.relative_path);
             let src = new_desired.staging_path.join(&new_desired.relative_path);
 
             if !src.exists() {
@@ -1433,9 +1601,10 @@ pub fn deploy_incremental(
             }
 
             // The old owner's file may live at a differently-cased path on a
-            // case-sensitive host filesystem — remove it explicitly.
-            if old_entry.relative_path != new_desired.relative_path {
-                let _ = fs::remove_file(data_dir.join(&old_entry.relative_path));
+            // case-sensitive host filesystem (or under a different target) —
+            // remove it explicitly.
+            if old_entry.relative_path != new_desired.relative_path || old_base != base {
+                let _ = fs::remove_file(old_base.join(&old_entry.relative_path));
             }
 
             match deploy_single_file(
@@ -1443,6 +1612,7 @@ pub fn deploy_incremental(
                 &src,
                 &dst,
                 true, // path is in the manifest (owned by old_entry's mod)
+                false,
                 can_hardlink,
                 copy_method,
             ) {
@@ -1497,7 +1667,8 @@ pub fn deploy_incremental(
         diff.to_add
             .par_iter()
             .map(|desired_file| {
-                let dst = data_dir.join(&desired_file.relative_path);
+                let dst = deploy_base(&desired_file.deploy_target, data_dir, game_path)
+                    .join(&desired_file.relative_path);
                 let src = desired_file.staging_path.join(&desired_file.relative_path);
 
                 if !src.exists() {
@@ -1510,6 +1681,8 @@ pub fn deploy_incremental(
                     &src,
                     &dst,
                     false, // not in manifest — vanilla protection applies
+                    classify_stock(game_id, &desired_file.relative_path, vanilla_set.as_ref())
+                        == StockClass::NotStock,
                     can_hardlink,
                     copy_method,
                 ) {
@@ -1589,6 +1762,348 @@ pub fn deploy_incremental(
         fallback_used: final_fallback,
         verification_failures: final_failures,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Targeted exclude / restore (used by game-specific deploy policies)
+// ---------------------------------------------------------------------------
+
+/// Resolve `rel_path` under `base` component-by-component, case-insensitively,
+/// returning the on-disk casing. Wine games target case-insensitive
+/// filesystems, so `SKSE/Plugins/EngineFixes.dll` must match a staging dir
+/// that spells it `skse/plugins/EngineFixes.dll`.
+fn resolve_case_insensitive(base: &Path, rel_path: &str) -> Option<String> {
+    let mut cur = base.to_path_buf();
+    let mut parts: Vec<String> = Vec::new();
+    for comp in rel_path.replace('\\', "/").split('/').filter(|c| !c.is_empty()) {
+        let exact = cur.join(comp);
+        let found = if fs::symlink_metadata(&exact).is_ok() {
+            comp.to_string()
+        } else {
+            fs::read_dir(&cur)
+                .ok()?
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .find(|n| n.eq_ignore_ascii_case(comp))?
+        };
+        cur.push(&found);
+        parts.push(found);
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// Stop deploying specific paths: delete their deployed copies and drop
+/// their manifest rows. Staging is never touched, so the files come back as
+/// soon as the caller stops excluding them (and any full redeploy re-adds
+/// them until the caller's policy runs again).
+///
+/// `paths` is a list of `(relative_path, deploy_target)`; paths match
+/// case-insensitively, targets exactly. Returns the relative paths removed.
+pub fn exclude_deployed_paths(
+    db: &ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+    data_dir: &Path,
+    game_path: &Path,
+    paths: &[(&str, &str)],
+) -> Result<Vec<String>> {
+    let wanted: std::collections::HashSet<(String, &str)> =
+        paths.iter().map(|(p, t)| (manifest_key(p), *t)).collect();
+    let manifest = db
+        .get_deployment_manifest(game_id, bottle_name)
+        .map_err(|e| DeployerError::Database(e.to_string()))?;
+
+    let mut removed = Vec::new();
+    let mut clear_ids = Vec::new();
+    for entry in manifest.iter().filter(|e| {
+        e.deploy_method != "direct"
+            && wanted.contains(&(manifest_key(&e.relative_path), e.deploy_target.as_str()))
+    }) {
+        let base = deploy_base(&entry.deploy_target, data_dir, game_path);
+        let staging_dir =
+            (!entry.staging_path.is_empty()).then(|| Path::new(entry.staging_path.as_str()));
+        match remove_recorded_file(
+            game_id,
+            &entry.relative_path,
+            &entry.deploy_target,
+            base,
+            staging_dir,
+            None,
+        ) {
+            RemoveOutcome::Removed => {
+                removed.push(entry.relative_path.clone());
+                clear_ids.push(entry.id);
+            }
+            RemoveOutcome::AlreadyGone | RemoveOutcome::KeptVanilla => clear_ids.push(entry.id),
+            RemoveOutcome::Failed(e) => warn!(
+                "Exclude: could not remove {} ({}); keeping its record",
+                entry.relative_path, e
+            ),
+        }
+    }
+    db.remove_deployment_entries_by_ids(&clear_ids)
+        .map_err(|e| DeployerError::Database(e.to_string()))?;
+    Ok(removed)
+}
+
+/// Make sure each `(relative_path, deploy_target)` is deployed from the
+/// highest-priority enabled mod whose staging directory ships it, and that
+/// the deployed copy is byte-identical to that staging file. Missing or
+/// modified copies are re-linked from staging and recorded in the manifest.
+///
+/// An untracked file at the destination that is not the winner's copy
+/// belongs to someone else (a manual install) and is left alone.
+/// Returns the relative paths that were (re)deployed.
+pub fn ensure_paths_deployed(
+    db: &ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+    data_dir: &Path,
+    game_path: &Path,
+    paths: &[(&str, &str)],
+) -> Result<Vec<String>> {
+    let mut mods: Vec<_> = db
+        .list_mods(game_id, bottle_name)
+        .map_err(|e| DeployerError::Database(e.to_string()))?
+        .into_iter()
+        .filter(|m| m.enabled && m.staging_path.is_some())
+        .collect();
+    mods.sort_by_key(|m| std::cmp::Reverse(m.install_priority));
+
+    let manifest = db
+        .get_deployment_manifest(game_id, bottle_name)
+        .map_err(|e| DeployerError::Database(e.to_string()))?;
+
+    let mut restored = Vec::new();
+    for &(rel, target) in paths {
+        if !crate::staging::is_safe_relative_path(rel) {
+            continue;
+        }
+        // Highest-priority enabled mod that ships this file for this target.
+        let winner = mods.iter().find_map(|m| {
+            let staging = PathBuf::from(m.staging_path.as_deref()?);
+            let actual = resolve_case_insensitive(&staging, rel)?;
+            if !staging.join(&actual).is_file() {
+                return None;
+            }
+            let mod_target = db
+                .get_deploy_target_for_mod(m.id)
+                .unwrap_or_else(|_| "data".to_string());
+            (mod_target == target).then_some((m, staging, actual))
+        });
+        let Some((winner, staging, staging_rel)) = winner else {
+            continue;
+        };
+
+        let base = deploy_base(target, data_dir, game_path);
+        let key = manifest_key(rel);
+        let existing = manifest
+            .iter()
+            .find(|e| e.deploy_target == target && manifest_key(&e.relative_path) == key);
+        // Keep the casing already on disk/in the manifest so we don't create
+        // a second row for the same game-visible file.
+        let rel_path = existing
+            .map(|e| e.relative_path.clone())
+            .or_else(|| resolve_case_insensitive(base, rel))
+            .unwrap_or_else(|| staging_rel.clone());
+        let src = staging.join(&staging_rel);
+        let dst = base.join(&rel_path);
+
+        let on_disk = fs::symlink_metadata(&dst).is_ok();
+        let is_winner_copy = on_disk && deployed_copy_kind(&src, &dst).is_some();
+        if is_winner_copy && existing.is_some_and(|e| e.mod_id == winner.id) {
+            continue; // already correct
+        }
+        if on_disk && existing.is_none() && !is_winner_copy {
+            warn!(
+                "Restore: leaving untracked {} in place — it is not the copy shipped by '{}'",
+                dst.display(),
+                winner.name
+            );
+            continue;
+        }
+
+        let can_hardlink = same_filesystem(&staging, base);
+        let copy_method = platform::detect_copy_method(&staging, base);
+        let Some(method) =
+            deploy_single_file(&rel_path, &src, &dst, true, false, can_hardlink, copy_method)
+        else {
+            warn!("Restore: failed to deploy {} from '{}'", rel_path, winner.name);
+            continue;
+        };
+        if let Some(e) = existing {
+            db.remove_deployment_entries_by_ids(&[e.id])
+                .map_err(|e| DeployerError::Database(e.to_string()))?;
+        }
+        let staging_str = staging.to_string_lossy();
+        db.batch_add_deployment_entries(&[(
+            game_id,
+            bottle_name,
+            winner.id,
+            rel_path.as_str(),
+            staging_str.as_ref(),
+            method,
+            target,
+        )])
+        .map_err(|e| DeployerError::Database(e.to_string()))?;
+        info!("Restore: deployed {} from '{}' ({})", rel_path, winner.name, method);
+        restored.push(rel_path);
+    }
+    Ok(restored)
+}
+
+// ---------------------------------------------------------------------------
+// Pre-launch self-heal
+// ---------------------------------------------------------------------------
+
+/// Result of [`restore_missing_files`].
+#[derive(Debug, Default, Clone)]
+pub struct SelfHealReport {
+    /// Manifest entries whose on-disk presence was checked.
+    pub checked: usize,
+    /// Checked entries whose file was missing from disk.
+    pub missing: usize,
+    /// Missing files that were re-deployed from staging.
+    pub restored: Vec<String>,
+    /// Missing files that could not be restored (staging copy gone or the
+    /// deploy failed). Their records are kept.
+    pub unrecoverable: Vec<String>,
+    /// Records for missing files whose mod is no longer enabled/installed;
+    /// these were dropped instead of restored.
+    pub stale_dropped: usize,
+}
+
+/// Re-deploy only the managed files that have gone missing from disk.
+///
+/// Each manifest entry is resolved against its real deploy target (`root`
+/// entries live in the game folder, not `Data/`), so root-deployed files such
+/// as the SKSE loader are no longer reported missing on every launch. Only
+/// the missing files are restored; nothing else is touched. `custom`-target
+/// entries are skipped because their base directory can only be recomputed
+/// by the command layer.
+#[allow(clippy::type_complexity)]
+pub fn restore_missing_files(
+    db: &ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+    data_dir: &Path,
+    game_path: &Path,
+) -> Result<SelfHealReport> {
+    let manifest = db
+        .get_deployment_manifest(game_id, bottle_name)
+        .map_err(|e| DeployerError::Database(e.to_string()))?;
+
+    let candidates: Vec<&crate::database::DeploymentEntry> = manifest
+        .iter()
+        .filter(|e| e.deploy_method != "direct" && e.deploy_target != "custom")
+        .collect();
+
+    // Parallel existence check — modlists can track 100k+ files.
+    // symlink_metadata so a symlink counts as "present" and is never followed.
+    let missing: Vec<&crate::database::DeploymentEntry> = candidates
+        .par_iter()
+        .filter(|e| {
+            let base = deploy_base(&e.deploy_target, data_dir, game_path);
+            fs::symlink_metadata(base.join(&e.relative_path)).is_err()
+        })
+        .copied()
+        .collect();
+
+    let mut report = SelfHealReport {
+        checked: candidates.len(),
+        missing: missing.len(),
+        ..Default::default()
+    };
+    if missing.is_empty() {
+        return Ok(report);
+    }
+
+    let enabled: std::collections::HashSet<i64> = db
+        .list_mods(game_id, bottle_name)
+        .map_err(|e| DeployerError::Database(e.to_string()))?
+        .into_iter()
+        .filter(|m| m.enabled)
+        .map(|m| m.id)
+        .collect();
+
+    let staging_root = crate::staging::staging_base_dir(game_id, bottle_name);
+    let can_hardlink = same_filesystem(&staging_root, data_dir);
+    let copy_method = platform::detect_copy_method(&staging_root, data_dir);
+
+    let mut stale_ids = Vec::new();
+    let mut rewritten: Vec<(i64, String, String, &'static str, Option<String>, String)> = Vec::new();
+
+    for entry in missing {
+        if !enabled.contains(&entry.mod_id) {
+            stale_ids.push(entry.id);
+            continue;
+        }
+        if !crate::staging::is_safe_relative_path(&entry.relative_path) {
+            warn!("Self-heal: skipping unsafe manifest path {}", entry.relative_path);
+            report.unrecoverable.push(entry.relative_path.clone());
+            continue;
+        }
+        let staging_dir = Path::new(&entry.staging_path);
+        let src = staging_dir.join(&entry.relative_path);
+        let dst = deploy_base(&entry.deploy_target, data_dir, game_path).join(&entry.relative_path);
+        if entry.staging_path.is_empty() || !src.is_file() {
+            report.unrecoverable.push(entry.relative_path.clone());
+            continue;
+        }
+        match deploy_single_file(&entry.relative_path, &src, &dst, true, false, can_hardlink, copy_method) {
+            Some(method) => {
+                report.restored.push(entry.relative_path.clone());
+                if method != entry.deploy_method {
+                    rewritten.push((
+                        entry.mod_id,
+                        entry.relative_path.clone(),
+                        entry.staging_path.clone(),
+                        method,
+                        entry.sha256.clone(),
+                        entry.deploy_target.clone(),
+                    ));
+                }
+            }
+            None => report.unrecoverable.push(entry.relative_path.clone()),
+        }
+    }
+
+    report.stale_dropped = db
+        .remove_deployment_entries_by_ids(&stale_ids)
+        .map_err(|e| DeployerError::Database(e.to_string()))?;
+
+    if !rewritten.is_empty() {
+        let rows: Vec<(&str, &str, i64, &str, &str, &str, Option<&str>, &str)> = rewritten
+            .iter()
+            .map(|(mod_id, rel, staging, method, sha, target)| {
+                (
+                    game_id,
+                    bottle_name,
+                    *mod_id,
+                    rel.as_str(),
+                    staging.as_str(),
+                    *method,
+                    sha.as_deref(),
+                    target.as_str(),
+                )
+            })
+            .collect();
+        db.batch_add_deployment_entries_with_hashes(&rows)
+            .map_err(|e| DeployerError::Database(e.to_string()))?;
+    }
+
+    info!(
+        "Self-heal for {}/{}: {} checked, {} missing, {} restored, {} unrecoverable, {} stale records dropped",
+        game_id,
+        bottle_name,
+        report.checked,
+        report.missing,
+        report.restored.len(),
+        report.unrecoverable.len(),
+        report.stale_dropped
+    );
+
+    Ok(report)
 }
 
 // ---------------------------------------------------------------------------
@@ -2387,5 +2902,376 @@ mod tests {
         assert!(result.is_err(), "expected stub error for unimplemented native deploy");
         let err_msg = format!("{:?}", result.unwrap_err());
         assert!(err_msg.contains("fakegame"), "error should mention game_id");
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug #4: disable must undeploy recorded mod archives
+    // -----------------------------------------------------------------------
+
+    fn staging_root(tmp: &TempDir) -> PathBuf {
+        let root = tmp.path().join("staging_root");
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn disable_removes_mod_bsa_and_reenable_redeploys_it() {
+        let (db, tmp, _, data_dir) = setup();
+        let (mod_id, staging) = add_test_mod(
+            &db,
+            &staging_root(&tmp),
+            "SkyUI",
+            0,
+            &[("SkyUI_SE.bsa", b"bsa"), ("SkyUI_SE.esp", b"esp")],
+        );
+        let files = crate::staging::list_staging_files(&staging).unwrap();
+        let r = deploy_mod(&db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, "data")
+            .unwrap();
+        assert_eq!(r.deployed_count, 2);
+
+        // Single-toggle disable path.
+        db.set_enabled(mod_id, false).unwrap();
+        undeploy_mod(&db, "skyrimse", "Gaming", mod_id, &data_dir, &data_dir).unwrap();
+        assert!(!data_dir.join("SkyUI_SE.bsa").exists(), "mod BSA must be removed on disable");
+        assert!(!data_dir.join("SkyUI_SE.esp").exists());
+        assert!(db.get_deployment_paths_for_mod(mod_id).unwrap().is_empty());
+
+        // Re-enable: nothing may be skipped as "unmanaged vanilla".
+        db.set_enabled(mod_id, true).unwrap();
+        let r2 = deploy_mod(&db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, "data")
+            .unwrap();
+        assert_eq!(r2.deployed_count, 2);
+        assert_eq!(r2.skipped_count, 0);
+        assert_eq!(db.get_deployment_paths_for_mod(mod_id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn bulk_disable_via_redeploy_all_removes_mod_bsa() {
+        let (db, tmp, _, data_dir) = setup();
+        let (mod_id, _staging) = add_test_mod(
+            &db,
+            &staging_root(&tmp),
+            "USSEP",
+            0,
+            &[
+                ("unofficial skyrim special edition patch.bsa", b"bsa"),
+                ("unofficial skyrim special edition patch.esp", b"esp"),
+            ],
+        );
+        redeploy_all(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
+        assert!(data_dir.join("unofficial skyrim special edition patch.bsa").exists());
+
+        db.set_enabled(mod_id, false).unwrap();
+        redeploy_all(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
+        assert!(
+            !data_dir.join("unofficial skyrim special edition patch.bsa").exists(),
+            "purge must remove recorded mod BSAs"
+        );
+        assert!(db.get_deployment_manifest("skyrimse", "Gaming").unwrap().is_empty());
+
+        db.set_enabled(mod_id, true).unwrap();
+        let r = redeploy_all(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
+        assert_eq!(r.deployed_count, 2);
+        assert_eq!(r.skipped_count, 0);
+    }
+
+    #[test]
+    fn deploy_adopts_untracked_leftover_identical_to_staging() {
+        // Users hit by bug #4 have mod BSAs in Data with no manifest record.
+        let (db, tmp, _, data_dir) = setup();
+        let (mod_id, staging) = add_test_mod(
+            &db,
+            &staging_root(&tmp),
+            "UIExtensions",
+            0,
+            &[("UIExtensions.bsa", b"bsa-bytes")],
+        );
+        let files = crate::staging::list_staging_files(&staging).unwrap();
+        deploy_mod(&db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, "data").unwrap();
+        // Simulate the old undeploy: record dropped, file left behind.
+        db.remove_deployment_entries_for_mod(mod_id).unwrap();
+        assert!(data_dir.join("UIExtensions.bsa").exists());
+
+        let r = deploy_mod(&db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, "data")
+            .unwrap();
+        assert_eq!(r.deployed_count, 1, "leftover must be adopted, not skipped");
+        assert_eq!(r.skipped_count, 0);
+        assert_eq!(db.get_deployment_paths_for_mod(mod_id).unwrap().len(), 1);
+
+        // Same leftover, but as an independent byte-identical copy.
+        db.remove_deployment_entries_for_mod(mod_id).unwrap();
+        fs::remove_file(data_dir.join("UIExtensions.bsa")).unwrap();
+        fs::write(data_dir.join("UIExtensions.bsa"), b"bsa-bytes").unwrap();
+        let r = deploy_mod(&db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, "data")
+            .unwrap();
+        assert_eq!(r.deployed_count, 1);
+        assert_eq!(r.skipped_count, 0);
+    }
+
+    #[test]
+    fn identical_copy_of_a_stock_file_is_never_adopted() {
+        // A mod that ships a byte-identical copy of a base-game file must
+        // not take ownership of the real one (and later delete it).
+        let (db, tmp, _, data_dir) = setup();
+        for name in ["Skyrim - Misc.bsa", "ccBGSSSE001-Fish.esm"] {
+            fs::write(data_dir.join(name), b"vanilla bytes").unwrap();
+        }
+        let (mod_id, staging) = add_test_mod(
+            &db,
+            &staging_root(&tmp),
+            "VanillaCopies",
+            0,
+            &[("Skyrim - Misc.bsa", b"vanilla bytes"), ("ccBGSSSE001-Fish.esm", b"vanilla bytes")],
+        );
+        let files = crate::staging::list_staging_files(&staging).unwrap();
+        let r = deploy_mod(&db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, "data")
+            .unwrap();
+        assert_eq!(r.deployed_count, 0, "stock files are not adopted by content");
+        assert_eq!(r.skipped_count, 2);
+        assert!(db.get_deployment_paths_for_mod(mod_id).unwrap().is_empty());
+
+        // Disabling the mod therefore leaves the base-game files alone.
+        undeploy_mod(&db, "skyrimse", "Gaming", mod_id, &data_dir, &data_dir).unwrap();
+        assert!(data_dir.join("Skyrim - Misc.bsa").exists());
+        assert!(data_dir.join("ccBGSSSE001-Fish.esm").exists());
+    }
+
+    #[test]
+    fn deploy_still_refuses_to_overwrite_untracked_vanilla_archive() {
+        let (db, tmp, _, data_dir) = setup();
+        fs::write(data_dir.join("Skyrim - Misc.bsa"), b"vanilla").unwrap();
+        let (mod_id, staging) = add_test_mod(
+            &db,
+            &staging_root(&tmp),
+            "BadMod",
+            0,
+            &[("Skyrim - Misc.bsa", b"modded")],
+        );
+        let files = crate::staging::list_staging_files(&staging).unwrap();
+        let r = deploy_mod(&db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, "data")
+            .unwrap();
+        assert_eq!(r.deployed_count, 0);
+        assert_eq!(r.skipped_count, 1);
+        assert_eq!(fs::read(data_dir.join("Skyrim - Misc.bsa")).unwrap(), b"vanilla");
+    }
+
+    #[test]
+    fn undeploy_never_deletes_baseline_game_file() {
+        let (db, tmp, _, data_dir) = setup();
+        // Placed into an empty Data dir, so it IS recorded — but it's a real
+        // game master name and must survive undeploy.
+        let (mod_id, staging) =
+            add_test_mod(&db, &staging_root(&tmp), "Masters", 0, &[("Skyrim.esm", b"esm")]);
+        let files = crate::staging::list_staging_files(&staging).unwrap();
+        deploy_mod(&db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, "data").unwrap();
+
+        db.set_enabled(mod_id, false).unwrap();
+        let removed =
+            undeploy_mod(&db, "skyrimse", "Gaming", mod_id, &data_dir, &data_dir).unwrap();
+        assert!(removed.is_empty());
+        assert!(data_dir.join("Skyrim.esm").exists(), "baseline file must not be deleted");
+        assert!(db.get_deployment_paths_for_mod(mod_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn stock_pattern_names_are_removed_only_when_provably_ours() {
+        // "cc*.bsa" is a Creation Club pattern, but mods can match it too.
+        let (db, tmp, _, data_dir) = setup();
+        let (mod_id, staging) = add_test_mod(
+            &db,
+            &staging_root(&tmp),
+            "CCOR",
+            0,
+            &[("ccor.bsa", b"mod archive"), ("ccQDRSSE001-SurvivalMode.bsa", b"mod copy")],
+        );
+        let files = crate::staging::list_staging_files(&staging).unwrap();
+        deploy_mod(&db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, "data").unwrap();
+
+        // Something else replaced the second file with different bytes
+        // (e.g. the store re-downloaded the real CC content).
+        fs::remove_file(data_dir.join("ccQDRSSE001-SurvivalMode.bsa")).unwrap();
+        fs::write(data_dir.join("ccQDRSSE001-SurvivalMode.bsa"), b"real CC").unwrap();
+
+        db.set_enabled(mod_id, false).unwrap();
+        undeploy_mod(&db, "skyrimse", "Gaming", mod_id, &data_dir, &data_dir).unwrap();
+        assert!(!data_dir.join("ccor.bsa").exists(), "our own cc-named file is removed");
+        assert_eq!(
+            fs::read(data_dir.join("ccQDRSSE001-SurvivalMode.bsa")).unwrap(),
+            b"real CC",
+            "a stock-pattern file that isn't ours is left alone"
+        );
+        assert!(db.get_deployment_paths_for_mod(mod_id).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn undeploy_keeps_record_when_file_cannot_be_removed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (db, tmp, _, data_dir) = setup();
+        let (mod_id, staging) = add_test_mod(
+            &db,
+            &staging_root(&tmp),
+            "Locked",
+            0,
+            &[("locked/thing.nif", b"nif"), ("free.esp", b"esp")],
+        );
+        let files = crate::staging::list_staging_files(&staging).unwrap();
+        deploy_mod(&db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, "data").unwrap();
+
+        let locked_dir = data_dir.join("locked");
+        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o555)).unwrap();
+        db.set_enabled(mod_id, false).unwrap();
+        undeploy_mod(&db, "skyrimse", "Gaming", mod_id, &data_dir, &data_dir).unwrap();
+        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        if !locked_dir.join("thing.nif").exists() {
+            // Running as root: permissions don't block removal. Nothing to assert.
+            return;
+        }
+        let remaining: Vec<String> = db
+            .get_deployment_paths_for_mod(mod_id)
+            .unwrap()
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(remaining, vec!["locked/thing.nif".to_string()]);
+        assert!(!data_dir.join("free.esp").exists());
+    }
+
+    #[test]
+    fn redeploy_all_preserves_root_deploy_target() {
+        let (db, tmp, _, data_dir) = setup();
+        let game_root = tmp.path().join("game");
+        fs::create_dir_all(&game_root).unwrap();
+        let (mod_id, staging) = add_test_mod(
+            &db,
+            &staging_root(&tmp),
+            "SKSE",
+            0,
+            &[("skse64_loader.exe", b"exe")],
+        );
+        let files = crate::staging::list_staging_files(&staging).unwrap();
+        deploy_mod(&db, "skyrimse", "Gaming", mod_id, &staging, &game_root, &files, "root").unwrap();
+        assert!(game_root.join("skse64_loader.exe").exists());
+
+        redeploy_all(&db, "skyrimse", "Gaming", &data_dir, &game_root).unwrap();
+        assert!(game_root.join("skse64_loader.exe").exists(), "root file must stay in game root");
+        assert!(!data_dir.join("skse64_loader.exe").exists(), "root file must not move into Data");
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug #6: pre-launch self-heal
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn self_heal_ignores_present_root_deployed_files() {
+        let (db, tmp, _, data_dir) = setup();
+        let game_root = tmp.path().join("game");
+        fs::create_dir_all(&game_root).unwrap();
+        let (mod_id, staging) = add_test_mod(
+            &db,
+            &staging_root(&tmp),
+            "Preloader",
+            0,
+            &[("d3dx9_42.dll", b"dll"), ("skse64_loader.exe", b"exe")],
+        );
+        let files = crate::staging::list_staging_files(&staging).unwrap();
+        deploy_mod(&db, "skyrimse", "Gaming", mod_id, &staging, &game_root, &files, "root").unwrap();
+
+        let report =
+            restore_missing_files(&db, "skyrimse", "Gaming", &data_dir, &game_root).unwrap();
+        assert_eq!(report.checked, 2);
+        assert_eq!(report.missing, 0, "root files resolved against Data looked missing before");
+        assert!(report.restored.is_empty());
+    }
+
+    #[test]
+    fn self_heal_restores_only_the_missing_files() {
+        let (db, tmp, _, data_dir) = setup();
+        let (mod_id, staging) = add_test_mod(
+            &db,
+            &staging_root(&tmp),
+            "Plugins",
+            0,
+            &[("a.esp", b"a"), ("b.esp", b"b"), ("meshes/c.nif", b"c")],
+        );
+        let files = crate::staging::list_staging_files(&staging).unwrap();
+        deploy_mod(&db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, "data").unwrap();
+        fs::remove_file(data_dir.join("b.esp")).unwrap();
+
+        let report =
+            restore_missing_files(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
+        assert_eq!(report.missing, 1);
+        assert_eq!(report.restored, vec!["b.esp".to_string()]);
+        assert!(report.unrecoverable.is_empty());
+        assert_eq!(fs::read(data_dir.join("b.esp")).unwrap(), b"b");
+        assert_eq!(db.get_deployment_paths_for_mod(mod_id).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn self_heal_drops_records_of_disabled_mods_instead_of_restoring() {
+        let (db, tmp, _, data_dir) = setup();
+        let (mod_id, staging) =
+            add_test_mod(&db, &staging_root(&tmp), "Gone", 0, &[("gone.esp", b"x")]);
+        let files = crate::staging::list_staging_files(&staging).unwrap();
+        deploy_mod(&db, "skyrimse", "Gaming", mod_id, &staging, &data_dir, &files, "data").unwrap();
+        fs::remove_file(data_dir.join("gone.esp")).unwrap();
+        db.set_enabled(mod_id, false).unwrap();
+
+        let report =
+            restore_missing_files(&db, "skyrimse", "Gaming", &data_dir, &data_dir).unwrap();
+        assert_eq!(report.stale_dropped, 1);
+        assert!(report.restored.is_empty());
+        assert!(!data_dir.join("gone.esp").exists());
+    }
+
+    #[test]
+    fn incremental_deploy_honours_root_target() {
+        let (db, tmp, _, data_dir) = setup();
+        let game_root = tmp.path().join("game");
+        fs::create_dir_all(&game_root).unwrap();
+        let root = staging_root(&tmp);
+        // Enough data files that adding one root mod stays under the 80% fallback.
+        add_test_mod(
+            &db,
+            &root,
+            "Big",
+            0,
+            &[("a.esp", b"a"), ("b.esp", b"b"), ("c.esp", b"c"), ("d.esp", b"d"), ("e.esp", b"e")],
+        );
+        deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &game_root).unwrap();
+
+        let (mod_id, _staging) =
+            add_test_mod(&db, &root, "RootMod", 1, &[("root_only.dll", b"dll")]);
+        // A root mod that is installed but not yet deployed (e.g. re-enabled).
+        db.set_deploy_target_for_mod(mod_id, "root").unwrap();
+
+        let r = deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &game_root).unwrap();
+        assert_eq!(r.files_added, 1);
+        assert!(game_root.join("root_only.dll").exists());
+        assert!(!data_dir.join("root_only.dll").exists());
+
+        // And the incremental remove path deletes it from the game root.
+        db.set_enabled(mod_id, false).unwrap();
+        deploy_incremental(&db, "skyrimse", "Gaming", &data_dir, &game_root).unwrap();
+        assert!(!game_root.join("root_only.dll").exists());
+    }
+
+    #[test]
+    fn root_target_survives_disable_and_reenable() {
+        let (db, tmp, _, _data_dir) = setup();
+        let game_root = tmp.path().join("game");
+        fs::create_dir_all(&game_root).unwrap();
+        let (mod_id, staging) =
+            add_test_mod(&db, &staging_root(&tmp), "ENB", 0, &[("d3d11.dll", b"dll")]);
+        let files = crate::staging::list_staging_files(&staging).unwrap();
+        deploy_mod(&db, "skyrimse", "Gaming", mod_id, &staging, &game_root, &files, "root").unwrap();
+
+        db.set_enabled(mod_id, false).unwrap();
+        undeploy_mod(&db, "skyrimse", "Gaming", mod_id, &tmp.path().join("data"), &game_root)
+            .unwrap();
+        assert!(!game_root.join("d3d11.dll").exists());
+        assert_eq!(db.get_deploy_target_for_mod(mod_id).unwrap(), "root");
     }
 }

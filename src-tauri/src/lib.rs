@@ -358,6 +358,29 @@ pub(crate) fn sync_plugins_for_game(game: &DetectedGame, bottle: &Bottle) -> Res
     Ok(())
 }
 
+/// [`sync_plugins_for_game`] for call sites that must not fail the whole
+/// operation over a plugins.txt problem: logs the failure with `context`
+/// and returns the error so the caller can surface it in its result.
+pub(crate) fn sync_plugins_logged(
+    game: &DetectedGame,
+    bottle: &Bottle,
+    context: &str,
+) -> Option<String> {
+    match sync_plugins_for_game(game, bottle) {
+        Ok(()) => None,
+        Err(e) => {
+            log::warn!(
+                "plugins.txt sync failed after {} ({} / {}): {}",
+                context,
+                game.game_id,
+                bottle.name,
+                e
+            );
+            Some(e)
+        }
+    }
+}
+
 // --- App Entry Point ---
 
 fn kill_mlx_server() {

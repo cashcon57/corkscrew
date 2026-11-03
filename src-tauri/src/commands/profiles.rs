@@ -173,7 +173,9 @@ pub async fn activate_profile(
         }
 
         // 2. Purge current deployment
-        let _ = deployer::purge_deployment(&db, &game_id, &bottle_name, &data_dir, &game.game_path);
+        if let Err(e) = deployer::purge_deployment(&db, &game_id, &bottle_name, &data_dir, &game.game_path) {
+            log::warn!("Profile switch: purge failed (some files remain tracked for retry): {}", e);
+        }
 
         // 3. Load target profile state
         let mod_states = profiles::get_mod_states(&db, profile_id).map_err(|e| e.to_string())?;
@@ -185,7 +187,11 @@ pub async fn activate_profile(
         }
 
         // 5. Redeploy enabled mods
-        let _ = deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir, &game.game_path);
+        if let Err(e) =
+            deployer::redeploy_all(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
+        {
+            log::warn!("Profile switch: redeploy failed: {}", e);
+        }
 
         // 6. Restore saves for the incoming profile
         if let Some(ref sd) = saves_dir {
@@ -221,7 +227,7 @@ pub async fn activate_profile(
         }
 
         // 8. Sync plugins to ensure plugins.txt matches on-disk state
-        let _ = crate::sync_plugins_for_game(&game, &bottle);
+        crate::sync_plugins_logged(&game, &bottle, "profile switch");
 
         // 9. Mark profile as active
         profiles::set_active_profile(&db, &game_id, &bottle_name, profile_id)

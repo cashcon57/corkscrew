@@ -151,7 +151,7 @@ pub async fn resolve_all_conflicts_cmd(
                 .map_err(|e| e.to_string())?;
             // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
             let bottle = resolve_bottle(&bottle_name)?;
-            let _ = crate::sync_plugins_for_game(&game, &bottle);
+            crate::sync_plugins_logged(&game, &bottle, "conflict auto-resolve");
         }
 
         Ok(result)
@@ -231,7 +231,7 @@ pub async fn reorder_mods(
 
         // Sync plugins after redeploy
         // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
-        let _ = crate::sync_plugins_for_game(&game, &bottle);
+        crate::sync_plugins_logged(&game, &bottle, "reorder");
 
         Ok(())
     })
@@ -289,20 +289,12 @@ pub async fn redeploy_all_mods(
         let _ = deploy_journal::complete(&journal_id);
 
         // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
-        let _ = crate::sync_plugins_for_game(&game, &bottle);
+        let plugins_sync_error = crate::sync_plugins_logged(&game, &bottle, "redeploy");
+        let mut engine_fixes_messages: Vec<String> = Vec::new();
         if game_id == "skyrimse" {
-            let use_wine_ef = config::engine_fixes_wine_enabled();
-            if use_wine_ef {
-                let ef = skse::fix_engine_fixes_for_wine(&data_dir, &db, &game_id, &bottle_name);
-                if ef > 0 {
-                    log::info!(
-                        "Redeploy: patched {} EngineFixes TOML(s) for Wine compatibility",
-                        ef
-                    );
-                }
-            } else {
-                log::info!("Redeploy: skipping Wine EngineFixes (user chose original)");
-            }
+            engine_fixes_messages = skse::apply_engine_fixes_blocking(
+                &db, &game_id, &bottle_name, &data_dir, &game.game_path, None, "Redeploy",
+            );
             // Disable Wine-incompatible SKSE plugins
             let wine_disabled =
                 skse::disable_wine_incompatible_plugins(&data_dir, &db, &game_id, &bottle_name);
@@ -312,17 +304,6 @@ pub async fn redeploy_all_mods(
                     name,
                     reason
                 );
-            }
-            if use_wine_ef {
-                // Auto-deploy SSE Engine Fixes for Wine on redeploy
-                match skse::install_engine_fixes_wine_blocking(&data_dir) {
-                    Ok(true) => log::info!("Redeploy: auto-deployed SSE Engine Fixes for Wine"),
-                    Ok(false) => {}
-                    Err(e) => log::warn!(
-                        "Redeploy: could not auto-deploy SSE Engine Fixes for Wine: {}",
-                        e
-                    ),
-                }
             }
         }
 
@@ -338,6 +319,8 @@ pub async fn redeploy_all_mods(
             "skipped_count": result.skipped_count,
             "fallback_used": result.fallback_used,
             "elapsed_ms": elapsed.as_millis() as u64,
+            "plugins_sync_error": plugins_sync_error,
+            "engine_fixes_messages": engine_fixes_messages,
         }))
     })
     .await
@@ -366,7 +349,7 @@ pub async fn deploy_incremental_cmd(
         let deploy_start = Instant::now();
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
-        let result =
+        let mut result =
             deployer::deploy_incremental(&db, &game_id, &bottle_name, &data_dir, &game.game_path)
                 .map_err(|e| e.to_string())?;
 
@@ -377,20 +360,15 @@ pub async fn deploy_incremental_cmd(
         );
 
         // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
-        let _ = crate::sync_plugins_for_game(&game, &bottle);
+        if let Some(e) = crate::sync_plugins_logged(&game, &bottle, "incremental deploy") {
+            result
+                .verification_failures
+                .push(format!("plugins.txt sync failed: {}", e));
+        }
         if game_id == "skyrimse" {
-            let use_wine_ef = config::engine_fixes_wine_enabled();
-            if use_wine_ef {
-                let ef = skse::fix_engine_fixes_for_wine(&data_dir, &db, &game_id, &bottle_name);
-                if ef > 0 {
-                    log::info!(
-                        "Incremental deploy: patched {} EngineFixes TOML(s) for Wine compatibility",
-                        ef
-                    );
-                }
-            } else {
-                log::info!("Incremental deploy: skipping Wine EngineFixes (user chose original)");
-            }
+            skse::apply_engine_fixes_blocking(
+                &db, &game_id, &bottle_name, &data_dir, &game.game_path, None, "Incremental deploy",
+            );
             // Disable Wine-incompatible SKSE plugins
             let wine_disabled =
                 skse::disable_wine_incompatible_plugins(&data_dir, &db, &game_id, &bottle_name);
@@ -400,18 +378,6 @@ pub async fn deploy_incremental_cmd(
                     name,
                     reason
                 );
-            }
-            if use_wine_ef {
-                match skse::install_engine_fixes_wine_blocking(&data_dir) {
-                    Ok(true) => {
-                        log::info!("Incremental deploy: auto-deployed SSE Engine Fixes for Wine")
-                    }
-                    Ok(false) => {}
-                    Err(e) => log::warn!(
-                        "Incremental deploy: could not auto-deploy SSE Engine Fixes for Wine: {}",
-                        e
-                    ),
-                }
             }
         }
 
@@ -683,7 +649,7 @@ pub async fn purge_deployment_cmd(
         let _ = deploy_journal::complete(&journal_id);
 
         // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
-        let _ = crate::sync_plugins_for_game(&game, &bottle);
+        crate::sync_plugins_logged(&game, &bottle, "purge");
 
         Ok(removed)
     })
