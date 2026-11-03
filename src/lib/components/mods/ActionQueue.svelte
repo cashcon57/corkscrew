@@ -109,11 +109,15 @@
 {/if}
 
 <style>
+  /* Rendered above the mod list in the page's flex column: full width, never
+     shrunk vertically, aligned with the filter bar (no horizontal inset). */
   .action-queue {
     display: flex;
     flex-direction: column;
     gap: 6px;
-    padding: 0 var(--space-4) var(--space-2);
+    flex-shrink: 0;
+    min-width: 0;
+    padding: 0 0 var(--space-2);
   }
 
   .action-card {

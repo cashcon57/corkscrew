@@ -294,7 +294,10 @@
     // Signal the backend to stop the install loop
     try {
       await cancelCollectionInstall();
-    } catch { /* best effort */ }
+    } catch (err) {
+      console.error("Failed to cancel collection install:", err);
+      showError(`Failed to cancel install: ${err}`);
+    }
 
     if (shouldDelete && colName) {
       const game = get(selectedGame);

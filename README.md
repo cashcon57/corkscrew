@@ -428,10 +428,13 @@ corkscrew --remove-game <id>
 | Moonshine | Yes | — |
 | Heroic (Wine) | Yes | Yes |
 | Mythic | Yes | — |
+| GameHub (beta) | Yes | — |
 | Lutris | — | Yes |
 | Proton / Steam | — | Yes |
 | Bottles | — | Yes |
 | Native Wine | Yes | Yes |
+
+GameHub games are started through GameHub, so script extenders (SKSE etc.) and modding tools can't be launched from Corkscrew for them yet. A GameHub game is detected after its first launch from GameHub.
 
 ### Games
 

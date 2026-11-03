@@ -443,6 +443,10 @@ pub fn stage_mod_from_extracted_opts(
 ///
 /// This eliminates the temp dir → copy → staging pipeline, saving one full
 /// write pass of all extracted data.
+///
+/// `cancel` is forwarded to the extractor (see
+/// [`installer::extract_archive_cancellable`]); when it fires, staging fails
+/// with the extractor's cancellation error.
 pub fn stage_mod_extract_direct(
     archive_path: &Path,
     game_id: &str,
@@ -450,6 +454,7 @@ pub fn stage_mod_extract_direct(
     mod_id: i64,
     mod_name: &str,
     skip_hash: bool,
+    cancel: &installer::CancelCheck,
 ) -> Result<StagingResult> {
     let staging_dir = mod_staging_dir(game_id, bottle_name, mod_id, mod_name);
 
@@ -469,7 +474,7 @@ pub fn stage_mod_extract_direct(
         staging_dir.display()
     );
 
-    installer::extract_archive(archive_path, &extract_subdir)?;
+    installer::extract_archive_cancellable(archive_path, &extract_subdir, cancel)?;
 
     // Find the data root (unwrap nested single-folder archives).
     let data_root = installer::find_data_root(&extract_subdir);
