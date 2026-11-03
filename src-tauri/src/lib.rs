@@ -32,6 +32,7 @@ pub mod fs_ci;
 pub mod fromsoft_saves;
 pub mod game_lock;
 pub mod game_registry;
+pub mod gamehub;
 pub mod games;
 pub mod graphics_backend;
 pub mod google_oauth;
@@ -1249,6 +1250,7 @@ pub fn run() {
             commands::mods::start_depot_download,
             commands::mods::check_depot_ready,
             commands::mods::apply_downgrade_cmd,
+            commands::mods::restore_downgrade_cmd,
             commands::mods::list_game_versions,
             commands::mods::swap_game_version,
             commands::mods::set_vibrancy,
@@ -1613,6 +1615,8 @@ pub fn run() {
             commands::depot::dd_download_depot,
             commands::depot::dd_get_depot_versions,
             commands::depot::dd_apply_depot,
+            commands::depot::dd_skyrim_builds,
+            commands::depot::dd_apply_skyrim_build,
             // Self-Update (macOS fallback)
             self_update::get_installed_app_version,
             self_update::manual_self_update,

@@ -1,4 +1,4 @@
-//! Wine bottle detection for CrossOver, Whisky, Moonshine, Mythic, Heroic,
+//! Wine bottle detection for CrossOver, Whisky, Moonshine, Mythic, GameHub, Heroic,
 //! and native Wine/Proton managers on macOS and Linux.
 
 use std::ffi::OsStr;
@@ -342,6 +342,11 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
                 .join("Containers")
                 .join("io.getmythic.Mythic")
                 .join("Bottles"),
+        },
+        // GameHub (per-game virtual containers; see `crate::gamehub`)
+        SearchLocation {
+            source: crate::gamehub::SOURCE,
+            path: crate::gamehub::virtual_containers_dir(home),
         },
     ];
     // NotProton (Steam Play for macOS) prefixes in every macOS Steam library.
@@ -918,6 +923,13 @@ fn collect_bottles_from(location: &SearchLocation, bottles: &mut Vec<Bottle>) {
     //   bottles/{name}/drive_c
     if location.source == PROTON_SOURCE || location.source == NOTPROTON_SOURCE {
         collect_proton_bottles(&location.path, location.source, bottles);
+        return;
+    }
+
+    // GameHub containers are numeric IDs that need stable `GameHub <id>`
+    // names, and base containers must never be listed.
+    if location.source == crate::gamehub::SOURCE {
+        crate::gamehub::collect_bottles(&location.path, bottles);
         return;
     }
 
