@@ -24,7 +24,9 @@
 //! Genshin can land in three layouts inside a Wine bottle:
 //!
 //! 1. **Steam** — `Program Files (x86)/Steam/steamapps/common/Genshin Impact/Genshin Impact game/`
-//!    (Genshin's Steam release uses a nested `Genshin Impact game` directory).
+//!    (nested `Genshin Impact game` directory). Genshin has no Steam store
+//!    listing, so this only covers a copy placed in a bottle's Steam library by
+//!    hand; it is never resolved through a Proton prefix's owning Steam app.
 //! 2. **HoYoPlay launcher** — `Program Files/HoYoPlay/games/Genshin Impact game/`
 //!    (HoYo's official cross-platform launcher; the path is plural-less).
 //! 3. **Standalone install** — `Program Files/Genshin Impact/Genshin Impact Game/`
@@ -47,12 +49,6 @@ use crate::runtime::{GameRuntime, WineContext};
 /// Known executable filenames (case-insensitive). `YuanShen.exe` is the CN
 /// client; the global build uses `GenshinImpact.exe`.
 const EXECUTABLES: &[&str] = &["GenshinImpact.exe", "YuanShen.exe"];
-
-/// Steam App ID for Genshin Impact (global release).
-const STEAM_APP_ID: &str = "1517290";
-
-/// Relative path components from `drive_c` to the default Steam library.
-const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "common"];
 
 /// Steam game directory name. The actual executable lives one level deeper at
 /// `<this>/Genshin Impact game/`.
@@ -175,10 +171,6 @@ impl GamePlugin for GenshinPlugin {
         false
     }
 
-    fn steam_launch_id(&self) -> Option<&str> {
-        Some(STEAM_APP_ID)
-    }
-
     fn critical_files(&self) -> Vec<&str> {
         vec![
             "GenshinImpact.exe",
@@ -287,7 +279,7 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
 /// `Genshin Impact/Genshin Impact game/` layout; we descend into the inner
 /// directory if present.
 fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
-    let common = bottle.find_path(STEAM_COMMON)?;
+    let common = crate::game_registry::default_steam_common(bottle)?;
     let outer = find_child_case_insensitive(&common, STEAM_GAME_DIR)?;
     if !outer.is_dir() {
         return None;
@@ -297,6 +289,15 @@ fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
 
 /// Parse `libraryfolders.vdf` and check each library path.
 fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
+    // Proton prefixes: Genshin Impact has no Steam app (it ships through
+    // HoYoPlay), so no Proton prefix can own a Steam install of it. A prefix
+    // for a non-Steam shortcut is found by the in-prefix HoYoPlay/standalone
+    // checks instead. Never scan the prefix's libraryfolders.vdf — it maps
+    // onto host libraries holding other apps.
+    if bottle.source == "Proton" {
+        return None;
+    }
+
     let steam_dir = bottle.find_path(&["Program Files (x86)", "Steam"])?;
     let vdf_primary = steam_dir.join("steamapps").join("libraryfolders.vdf");
     let vdf_alt = steam_dir.join("config").join("libraryfolders.vdf");
@@ -546,7 +547,8 @@ mod tests {
         assert_eq!(plugin.display_name(), "Genshin Impact");
         assert_eq!(plugin.nexus_slug(), "genshinimpact");
         assert_eq!(plugin.executables(), &["GenshinImpact.exe", "YuanShen.exe"]);
-        assert_eq!(plugin.steam_launch_id(), Some("1517290"));
+        // Not on Steam: never launched through a Steam app ID.
+        assert_eq!(plugin.steam_launch_id(), None);
         assert!(!plugin.use_legacy_data_dir());
     }
 
@@ -979,5 +981,25 @@ mod tests {
             .expect("should detect Documents/Games install");
         assert_eq!(detected.game_id, "genshin");
         assert_eq!(detected.game_path, game_dir);
+    }
+
+    /// Genshin Impact isn't a Steam app, so a Proton prefix never resolves it
+    /// through Steam libraries — neither the in-prefix VDF's host libraries
+    /// nor an owner install (whatever app owns the prefix).
+    #[test]
+    fn library_scan_in_proton_prefix_finds_nothing() {
+        use crate::game_registry::proton_test_fixture;
+        let game: &[&str] = &["Genshin Impact", "Genshin Impact game"];
+
+        let fx = proton_test_fixture::new("1000", game, "GenshinImpact.exe");
+        assert_eq!(check_steam_library_folders(&fx.bottle("Proton")), None);
+        // ...but found by the same scan in a regular bottle.
+        assert_eq!(
+            check_steam_library_folders(&fx.bottle("CrossOver")),
+            Some(fx.host_game.clone())
+        );
+
+        fx.install_owner_game("1000", game, "GenshinImpact.exe");
+        assert_eq!(check_steam_library_folders(&fx.bottle("Proton")), None);
     }
 }

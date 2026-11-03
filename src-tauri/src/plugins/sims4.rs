@@ -50,9 +50,6 @@ const STEAM_APP_ID: &str = "1222670";
 /// Directory the executable lives in, relative to the game root.
 const EXE_RELATIVE_DIR: &[&str] = &["Game", "Bin"];
 
-/// Steam's `steamapps/common` location inside a bottle.
-const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "common"];
-
 /// Known directory names inside Steam's common folder.
 const STEAM_GAME_DIRS: &[&str] = &["The Sims 4"];
 
@@ -295,7 +292,7 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
 }
 
 fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
-    let common = bottle.find_path(STEAM_COMMON)?;
+    let common = crate::game_registry::default_steam_common(bottle)?;
     for name in STEAM_GAME_DIRS {
         if let Some(dir) = find_child_case_insensitive(&common, name) {
             if dir.is_dir() {
@@ -307,6 +304,16 @@ fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
 }
 
 fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
+    // Proton prefixes: only the owning app's host install. Never scan the
+    // prefix's libraryfolders.vdf — it maps onto host libraries holding other apps.
+    if bottle.source == "Proton" {
+        return STEAM_GAME_DIRS
+            .iter()
+            .find_map(|name| {
+                crate::game_registry::find_proton_prefix_game(bottle, name, Some(STEAM_APP_ID))
+            });
+    }
+
     let steam_dir = bottle.find_path(&["Program Files (x86)", "Steam"])?;
     let vdf_primary = steam_dir.join("steamapps").join("libraryfolders.vdf");
     let vdf_alt = steam_dir.join("config").join("libraryfolders.vdf");
@@ -878,5 +885,29 @@ mod tests {
             .expect("should detect Documents/Games install");
         assert_eq!(detected.game_id, "sims4");
         assert_eq!(detected.game_path, game_dir);
+    }
+
+    /// A Proton prefix's own libraryfolders.vdf can list host libraries holding
+    /// other apps; the library scan must only ever return the prefix owner's game.
+    #[test]
+    fn library_scan_in_proton_prefix_is_owner_only() {
+        use crate::game_registry::proton_test_fixture;
+        let game: &[&str] = &["The Sims 4"];
+
+        // Unowned game in a VDF-listed library: ignored under Proton...
+        let fx = proton_test_fixture::new(STEAM_APP_ID, game, "TS4_x64.exe");
+        assert_eq!(check_steam_library_folders(&fx.bottle("Proton")), None);
+        // ...but found by the same scan in a regular bottle.
+        assert_eq!(
+            check_steam_library_folders(&fx.bottle("CrossOver")),
+            Some(fx.host_game.clone())
+        );
+
+        // The prefix owner's own host install is still found.
+        let owned = fx.install_owner_game(STEAM_APP_ID, game, "TS4_x64.exe");
+        assert_eq!(
+            check_steam_library_folders(&fx.bottle("Proton")),
+            Some(owned)
+        );
     }
 }

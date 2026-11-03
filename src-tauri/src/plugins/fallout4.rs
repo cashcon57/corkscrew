@@ -19,11 +19,11 @@ use crate::runtime::{GameRuntime, WineContext};
 /// Known executable names for Fallout 4 (checked case-insensitively).
 const EXECUTABLES: &[&str] = &["Fallout4.exe", "Fallout4Launcher.exe"];
 
-/// Relative path components from `drive_c` to the default Steam library.
-const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "common"];
-
 /// The game's directory name inside a Steam library.
 const STEAM_GAME_DIR: &str = "Fallout 4";
+
+/// Fallout 4's Steam app ID.
+const STEAM_APP_ID: &str = "377160";
 
 /// GOG installation paths to check (relative to `drive_c`).
 const GOG_PATHS: &[&[&str]] = &[
@@ -227,7 +227,7 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
 
 /// Check the default Steam common directory.
 fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
-    let path = bottle.find_path(STEAM_COMMON)?;
+    let path = crate::game_registry::default_steam_common(bottle)?;
     let game_dir = find_child_case_insensitive(&path, STEAM_GAME_DIR)?;
     if game_dir.is_dir() {
         Some(game_dir)
@@ -242,6 +242,13 @@ fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
 /// resolves Windows-style VDF path strings against every `drive_X` directory
 /// present in the bottle, rather than assuming paths are under `drive_c`.
 fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
+    // Proton prefixes install the game on the host, not inside the prefix.
+    if let Some(dir) =
+        crate::game_registry::find_proton_prefix_game(bottle, STEAM_GAME_DIR, Some(STEAM_APP_ID))
+    {
+        return Some(dir);
+    }
+
     let library_paths = crate::game_registry::collect_steam_library_paths(bottle);
     for steamapps in library_paths {
         let common = steamapps.join("common");

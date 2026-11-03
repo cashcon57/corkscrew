@@ -29,9 +29,6 @@ const EXECUTABLES: &[&str] = &["Hades2.exe", "HadesII.exe"];
 /// duplicate `Release/` build and has no executable at the root (issue #193).
 const EXE_SUBDIRS: &[&str] = &["Ship", "Release"];
 
-/// Relative path components from `drive_c` to the default Steam library.
-const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "common"];
-
 /// Known directory names inside Steam's common folder.
 const STEAM_GAME_DIRS: &[&str] = &["Hades II", "HadesII", "Hades2"];
 
@@ -222,7 +219,7 @@ fn find_game_path(bottle: &Bottle) -> Option<PathBuf> {
 }
 
 fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
-    let common = bottle.find_path(STEAM_COMMON)?;
+    let common = crate::game_registry::default_steam_common(bottle)?;
     for name in STEAM_GAME_DIRS {
         if let Some(dir) = find_child_case_insensitive(&common, name) {
             if dir.is_dir() {
@@ -234,6 +231,16 @@ fn check_steam_default(bottle: &Bottle) -> Option<PathBuf> {
 }
 
 fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
+    // Proton prefixes: only the owning app's host install. Never scan the
+    // prefix's libraryfolders.vdf — it maps onto host libraries holding other apps.
+    if bottle.source == "Proton" {
+        return STEAM_GAME_DIRS
+            .iter()
+            .find_map(|name| {
+                crate::game_registry::find_proton_prefix_game(bottle, name, Some(STEAM_APP_ID))
+            });
+    }
+
     let steam_dir = bottle.find_path(&["Program Files (x86)", "Steam"])?;
     let vdf_primary = steam_dir.join("steamapps").join("libraryfolders.vdf");
     let vdf_alt = steam_dir.join("config").join("libraryfolders.vdf");
@@ -708,5 +715,63 @@ mod tests {
             .detect_wine(&bottle_at(bottle_path))
             .expect("exe-anchored non-Steam path must accept Ship/");
         assert_eq!(detected.game_path, game_dir);
+    }
+
+    /// A Proton prefix's own libraryfolders.vdf can list host libraries holding
+    /// other apps; the library scan must only ever return the prefix owner's game.
+    #[test]
+    fn library_scan_in_proton_prefix_is_owner_only() {
+        use crate::game_registry::proton_test_fixture;
+        let game: &[&str] = &["Hades II"];
+
+        // Unowned game in a VDF-listed library: ignored under Proton...
+        let fx = proton_test_fixture::new(STEAM_APP_ID, game, "Hades2.exe");
+        assert_eq!(check_steam_library_folders(&fx.bottle("Proton")), None);
+        // ...but found by the same scan in a regular bottle.
+        assert_eq!(
+            check_steam_library_folders(&fx.bottle("CrossOver")),
+            Some(fx.host_game.clone())
+        );
+
+        // The prefix owner's own host install is still found.
+        let owned = fx.install_owner_game(STEAM_APP_ID, game, "Hades2.exe");
+        assert_eq!(
+            check_steam_library_folders(&fx.bottle("Proton")),
+            Some(owned)
+        );
+    }
+
+    /// A Proton prefix owned by Hades II with the real Steam layout: the exe
+    /// exists only at `Ship/Hades2.exe` in the owning library's install.
+    #[test]
+    fn detect_proton_owner_install_with_exe_only_in_ship() {
+        let tmp = tempfile::tempdir().unwrap();
+        let steamapps = tmp.path().join("steamapps");
+        let pfx = steamapps.join("compatdata").join(STEAM_APP_ID).join("pfx");
+        fs::create_dir_all(pfx.join("drive_c")).unwrap();
+        fs::write(
+            steamapps.join(format!("appmanifest_{STEAM_APP_ID}.acf")),
+            format!(
+                "\"AppState\"\n{{\n\t\"appid\"\t\"{STEAM_APP_ID}\"\n\t\"name\"\t\"Hades II\"\n\
+                 \t\"installdir\"\t\"Hades II\"\n\t\"StateFlags\"\t\"4\"\n}}\n"
+            ),
+        )
+        .unwrap();
+        let game_dir = steamapps.join("common").join("Hades II");
+        fs::create_dir_all(game_dir.join("Ship")).unwrap();
+        fs::write(game_dir.join("Ship").join("Hades2.exe"), b"fake").unwrap();
+        fs::create_dir_all(game_dir.join("Content")).unwrap();
+
+        let bottle = Bottle {
+            name: "Proton Hades II".into(),
+            path: pfx,
+            source: "Proton".into(),
+        };
+        let detected = Hades2Plugin
+            .detect_wine(&bottle)
+            .expect("Proton owner install with Ship/Hades2.exe must detect");
+        assert_eq!(detected.game_path, game_dir);
+        assert_eq!(detected.exe_path, Some(game_dir.join("Ship").join("Hades2.exe")));
+        assert_eq!(detected.data_dir, game_dir.join("Content").join("Mods"));
     }
 }

@@ -149,13 +149,11 @@ impl GamePlugin for VortexGamePlugin {
 // Game detection within Wine bottles
 // ---------------------------------------------------------------------------
 
-/// Standard Steam library path components inside a Wine bottle.
-const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "common"];
-
 /// Try to find a game installation inside a Wine bottle.
 ///
 /// Uses the following search order:
-/// 1. Steam library (default + additional library folders from VDF)
+/// 1. Steam library (default + additional library folders from VDF; for
+///    Proton prefixes, only the owning app's host install)
 /// 2. GOG install paths
 /// 3. Epic Games paths
 fn find_game_in_bottle(bottle: &Bottle, reg: &VortexGameRegistration) -> Option<PathBuf> {
@@ -163,7 +161,7 @@ fn find_game_in_bottle(bottle: &Bottle, reg: &VortexGameRegistration) -> Option<
     let steam_dir = reg.steam_dir_name.as_deref().unwrap_or(&reg.name);
 
     // 1. Default Steam library
-    if let Some(common) = bottle.find_path(STEAM_COMMON) {
+    if let Some(common) = crate::game_registry::default_steam_common(bottle) {
         if let Some(game_dir) = find_child_ci(&common, steam_dir) {
             if game_dir.is_dir() && verify_required_files(&game_dir, &reg.required_files) {
                 return Some(game_dir);
@@ -171,8 +169,25 @@ fn find_game_in_bottle(bottle: &Bottle, reg: &VortexGameRegistration) -> Option<
         }
     }
 
-    // 2. Additional Steam library folders from libraryfolders.vdf
-    if let Some(steam_dir_path) = bottle.find_path(&["Program Files (x86)", "Steam"]) {
+    // 2. Additional Steam libraries. Proton prefixes only resolve the owning
+    // app's host install — their libraryfolders.vdf maps onto host libraries
+    // holding other apps, so it is never scanned there.
+    if bottle.source == "Proton" {
+        let mut candidates = vec![steam_dir];
+        if !reg.name.eq_ignore_ascii_case(steam_dir) {
+            candidates.push(&reg.name);
+        }
+        let expected_app_id = reg.store_ids.steam_app_id.as_deref();
+        let owned = candidates
+            .into_iter()
+            .filter_map(|name| {
+                crate::game_registry::find_proton_prefix_game(bottle, name, expected_app_id)
+            })
+            .find(|dir| verify_required_files(dir, &reg.required_files));
+        if owned.is_some() {
+            return owned;
+        }
+    } else if let Some(steam_dir_path) = bottle.find_path(&["Program Files (x86)", "Steam"]) {
         if let Some(lib_paths) = parse_library_folders_vdf(&steam_dir_path) {
             for lib_path in lib_paths {
                 let common = lib_path.join("steamapps").join("common");
@@ -321,5 +336,109 @@ fn strip_vdf_quotes(s: &str) -> String {
         s[1..s.len() - 1].to_string()
     } else {
         s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game_registry::proton_test_fixture;
+    use crate::vortex_types::StoreIds;
+
+    fn registration(required_files: &[&str]) -> VortexGameRegistration {
+        VortexGameRegistration {
+            id: "testgame".into(),
+            name: "Test Game".into(),
+            executable: "TestGame.exe".into(),
+            required_files: required_files.iter().map(|s| s.to_string()).collect(),
+            query_mod_path: ".".into(),
+            merge_mods: true,
+            store_ids: StoreIds::default(),
+            details: serde_json::Value::Null,
+            environment: serde_json::Value::Null,
+            supported_tools: Vec::new(),
+            mod_types: Vec::new(),
+            installers: Vec::new(),
+            is_stub: false,
+            steam_dir_name: Some("TestGameDir".into()),
+        }
+    }
+
+    /// Proton prefixes skip the in-prefix VDF scan, so the owning app's host
+    /// install must still be found — and only that one.
+    #[test]
+    fn proton_prefix_finds_only_owner_game() {
+        let game: &[&str] = &["TestGameDir"];
+        let reg = registration(&["TestGame.exe"]);
+
+        // Unowned game in a VDF-listed library: ignored under Proton...
+        let fx = proton_test_fixture::new("1000", game, "TestGame.exe");
+        assert_eq!(find_game_in_bottle(&fx.bottle("Proton"), &reg), None);
+        // ...but found by the same scan in a regular bottle.
+        assert_eq!(
+            find_game_in_bottle(&fx.bottle("CrossOver"), &reg),
+            Some(fx.host_game.clone())
+        );
+
+        // The prefix owner's own host install is found, end to end.
+        let owned = fx.install_owner_game("1000", game, "TestGame.exe");
+        let bottle = fx.bottle("Proton");
+        assert_eq!(find_game_in_bottle(&bottle, &reg), Some(owned.clone()));
+        let detected = VortexGamePlugin::new(reg).detect_wine(&bottle).unwrap();
+        assert_eq!(detected.game_path, owned);
+    }
+
+    /// An owned Proton install still has to pass the registration's
+    /// required-files check.
+    #[test]
+    fn proton_owner_game_requires_required_files() {
+        let game: &[&str] = &["TestGameDir"];
+        let fx = proton_test_fixture::new("1000", game, "TestGame.exe");
+        fx.install_owner_game("1000", game, "TestGame.exe");
+        let bottle = fx.bottle("Proton");
+
+        assert_eq!(
+            find_game_in_bottle(&bottle, &registration(&["Data/Missing.esm"])),
+            None
+        );
+    }
+
+    /// Registrations without `steam_dir_name` fall back to the display name.
+    #[test]
+    fn proton_owner_game_matches_display_name() {
+        let game: &[&str] = &["Test Game"];
+        let fx = proton_test_fixture::new("1000", game, "TestGame.exe");
+        let owned = fx.install_owner_game("1000", game, "TestGame.exe");
+
+        let mut reg = registration(&[]);
+        reg.steam_dir_name = None;
+        assert_eq!(find_game_in_bottle(&fx.bottle("Proton"), &reg), Some(owned));
+    }
+
+    /// A registration with a known `steam_app_id` must only match a prefix
+    /// actually owned by that app id, not merely one whose installdir
+    /// happens to match the registration's directory name.
+    #[test]
+    fn proton_owner_game_mismatched_steam_app_id_is_rejected() {
+        let game: &[&str] = &["TestGameDir"];
+        // Prefix owned by app "1000" — installdir matches, app id doesn't.
+        let fx = proton_test_fixture::new("1000", game, "TestGame.exe");
+        fx.install_owner_game("1000", game, "TestGame.exe");
+
+        let mut reg = registration(&["TestGame.exe"]);
+        reg.store_ids.steam_app_id = Some("9999".into());
+        assert_eq!(
+            find_game_in_bottle(&fx.bottle("Proton"), &reg),
+            None,
+            "mismatched steam_app_id must not be treated as owned"
+        );
+
+        // Owned by the registration's declared app id: detected.
+        let fx2 = proton_test_fixture::new("9999", game, "TestGame.exe");
+        let owned = fx2.install_owner_game("9999", game, "TestGame.exe");
+        assert_eq!(
+            find_game_in_bottle(&fx2.bottle("Proton"), &reg),
+            Some(owned)
+        );
     }
 }
