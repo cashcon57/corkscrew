@@ -363,6 +363,15 @@ fn resolve_wine_binary(bottle: &Bottle) -> Result<WineCommand> {
             })?
         }
 
+        // GameHub bottles are only the top layer of a prefix GameHub
+        // assembles at launch; running Wine on them would corrupt it.
+        crate::gamehub::SOURCE => {
+            return Err(LauncherError::UnsupportedSource(format!(
+                "{} (games must be started through GameHub)",
+                source
+            )));
+        }
+
         // Proton behaves similarly to native Wine for our purposes.
         "Proton" => {
             env_vars.push((
@@ -412,6 +421,81 @@ fn resolve_wine_binary(bottle: &Bottle) -> Result<WineCommand> {
         prefix_args,
         env_vars,
     })
+}
+
+/// Start a game in a GameHub bottle through GameHub's `gamehub://` deep
+/// link, which runs it exactly like GameHub's Play button.
+///
+/// GameHub only starts the games it manages, so this refuses anything that
+/// isn't the game's own executable (script extender loaders, modding tools)
+/// instead of silently starting the vanilla game.
+fn launch_via_gamehub(bottle: &Bottle, exe: &Path, game_id: Option<&str>) -> Result<LaunchResult> {
+    let exe_name = exe.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let is_game_exe = game_id
+        .and_then(|gid| {
+            crate::games::with_plugin(gid, |p| {
+                p.executables().iter().any(|e| e.eq_ignore_ascii_case(exe_name))
+            })
+        })
+        .unwrap_or(false);
+    if !is_game_exe {
+        return Err(LauncherError::Other(format!(
+            "GameHub only starts the game itself, so Corkscrew can't run {} in {}. \
+             Script extenders (like SKSE) and modding tools aren't supported for GameHub games yet. \
+             Your deployed mods are in place; start the game from GameHub.",
+            exe_name, bottle.name
+        )));
+    }
+
+    let app_id = crate::gamehub::bound_steam_app_id(bottle).or_else(|| {
+        game_id
+            .and_then(|gid| {
+                crate::games::with_plugin(gid, |p| p.steam_launch_id().map(str::to_string))
+            })
+            .flatten()
+    });
+    let url = app_id
+        .as_deref()
+        .and_then(crate::gamehub::steam_launch_url)
+        .ok_or_else(|| {
+            LauncherError::Other(format!(
+                "Couldn't find the Steam app GameHub has bound to {}. Start the game from GameHub.",
+                bottle.name
+            ))
+        })?;
+
+    info!("Launching via GameHub: {} (bottle {})", url, bottle.name);
+    open_url(&url)?;
+
+    Ok(LaunchResult {
+        executable: exe.display().to_string(),
+        bottle_name: bottle.name.clone(),
+        // GameHub owns the game process; there is no child to track.
+        pid: None,
+        success: true,
+        warning: None,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn open_url(url: &str) -> Result<()> {
+    let status = Command::new("/usr/bin/open").arg(url).status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(LauncherError::Other(format!(
+            "Couldn't open {} (is GameHub installed?)",
+            url
+        )))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_url(url: &str) -> Result<()> {
+    Err(LauncherError::Other(format!(
+        "GameHub launches are only supported on macOS ({})",
+        url
+    )))
 }
 
 /// Locate `wine` on the system PATH, falling back to common install
@@ -574,6 +658,12 @@ pub fn launch_game(
     } else {
         return Err(LauncherError::ExecutableNotFound(exe_path.to_path_buf()));
     };
+
+    // GameHub assembles its layered prefix only when it starts a game itself,
+    // so its bottles are launched through GameHub, never with Wine directly.
+    if bottle.source == crate::gamehub::SOURCE {
+        return launch_via_gamehub(bottle, &resolved_exe, game_id);
+    }
 
     // Determine working directory.
     let work_dir = working_dir
@@ -817,6 +907,34 @@ mod tests {
             source: "CrossOver".into(),
         };
         assert!(matches!(launch_via_steam(&bottle), Err(LauncherError::Other(_))));
+    }
+
+    #[test]
+    fn gamehub_bottle_never_resolves_a_wine_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle = create_fake_bottle(tmp.path(), "1", crate::gamehub::SOURCE);
+        assert!(matches!(
+            resolve_wine_binary(&bottle),
+            Err(LauncherError::UnsupportedSource(_))
+        ));
+    }
+
+    #[test]
+    fn gamehub_refuses_non_game_executables() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle = create_fake_bottle(tmp.path(), "1", crate::gamehub::SOURCE);
+        let tool = tmp.path().join("skse64_loader.exe");
+        fs::write(&tool, b"MZ").unwrap();
+
+        // A script extender loader and an unknown tool (no game id) are both
+        // refused before anything is spawned.
+        for game_id in [Some("skyrimse"), None] {
+            let err = launch_game(&bottle, &tool, None, game_id, None).unwrap_err();
+            assert!(
+                matches!(&err, LauncherError::Other(msg) if msg.contains("GameHub only starts the game itself")),
+                "unexpected error: {err}"
+            );
+        }
     }
 
     /// Create a minimal fake bottle with drive_c.

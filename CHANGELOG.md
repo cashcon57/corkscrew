@@ -7,6 +7,7 @@ All notable changes to Corkscrew are documented here. This project follows [Sema
 ### Added
 
 - **NotProton support on macOS** (Steam Play for macOS, [NotProtonNot/NotProton](https://github.com/NotProtonNot/NotProton)): Corkscrew finds NotProton game prefixes in every Mac Steam library, detects the games in them, deploys mods, and launches the games through Steam. Mod tools such as xEdit run with NotProton's bundled Wine. Script extenders (SKSE and others), custom executables and DLL-loader mods aren't supported under NotProton yet. (#212)
+- **GameHub support on macOS** (GameSir's GameHub beta): each GameHub game gets its own Wine container, which shows up as a `GameHub <n>` bottle once the game has been launched from GameHub at least once. Mods deploy to the game's install (by default under `~/GameHub/steamapps/common/`) and plugin lists go where the game reads them. Launching from Corkscrew starts the game through GameHub, because GameHub only assembles its prefix when it starts a game itself. For the same reason, script extenders (SKSE and others) and modding tools can't be started from Corkscrew for GameHub games yet. (#214, #193)
 
 ### Fixed
 
