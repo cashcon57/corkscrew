@@ -14,6 +14,8 @@
     ddDownloadDepot,
     ddCheckPartialDownload,
     ddApplyDepot,
+    ddSkyrimBuilds,
+    ddApplySkyrimBuild,
   } from "$lib/api";
   import { listen } from "@tauri-apps/api/event";
   import { onDestroy } from "svelte";
@@ -38,6 +40,13 @@
   const gameName = $derived(game.display_name ?? "this game");
   const isSkyrim = $derived(game.game_id === "skyrimse");
   const targetsSE = $derived(isSkyrim && versionInfo.expected.some((v: string) => v.startsWith("1.5.")));
+  // The Skyrim build to download: the collection's own version when Corkscrew
+  // knows its depots, else the usual SE (1.5.97) or AE (1.6.1170) target.
+  const KNOWN_SKYRIM_BUILDS = ["1.7.104", "1.6.1170", "1.5.97"];
+  const skyrimTarget = $derived(
+    versionInfo.expected.map((v: string) => v.split(" ")[0]).find((v: string) => KNOWN_SKYRIM_BUILDS.includes(v))
+      ?? (targetsSE ? "1.5.97" : "1.6.1170")
+  );
   const matchingCached = $derived(
     isSkyrim
       ? versionCache.filter(cv => targetsSE ? cv.version.startsWith("1.5.") : cv.version.startsWith("1.6."))
@@ -66,27 +75,31 @@
   async function handleSkyrimDepotDownload() {
     depotDownloading = true;
     try {
-      const automated = await startDepotDownload(game.game_id);
+      const automated = await startDepotDownload(game.game_id, skyrimTarget);
       if (!automated) {
         try {
-          const info = await getDepotDownloadCommand(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
+          const info = await getDepotDownloadCommand(game.game_id, (wineCtx(game)?.bottle_name ?? ""), skyrimTarget);
           await navigator.clipboard.writeText(info.command);
-          showSuccess("Command copied! Paste it in the Steam console that opened.");
-        } catch { /* ignore clipboard errors */ }
+          showSuccess("Commands copied. Paste each line into the Steam console that opened.");
+        } catch (err) {
+          console.error("depot command clipboard copy failed:", err);
+        }
       }
       depotPollTimer = setInterval(async () => {
         try {
-          const result = await checkDepotReady(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
+          const result = await checkDepotReady(game.game_id, (wineCtx(game)?.bottle_name ?? ""), skyrimTarget);
           if (result) {
             if (depotPollTimer) clearInterval(depotPollTimer);
             depotPollTimer = null;
-            const status = await applyDowngrade(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
+            const status = await applyDowngrade(game.game_id, (wineCtx(game)?.bottle_name ?? ""), skyrimTarget);
             depotDownloading = false;
             showSuccess(`Switched to v${status.current_version}. Let's go.`);
             onproceed();
           }
-        } catch { /* keep polling */ }
-      }, 3000);
+        } catch (err) {
+          console.error("depot readiness poll failed:", err);
+        }
+      }, 10000);
     } catch (e) {
       depotDownloading = false;
       showError(`Download failed: ${e}`);
@@ -126,6 +139,38 @@
         depotDownloading = false;
         depotDowngradePhase = "";
         showSteamAuth = true;
+        return;
+      }
+
+      if (isSkyrim) {
+        // Skyrim builds change the exe, master files and BSAs: fetch all
+        // three depots of the collection's build, then apply them together.
+        const build = (await ddSkyrimBuilds()).find((b) => b.game_version === skyrimTarget);
+        if (!build) {
+          depotDownloading = false;
+          depotDowngradePhase = "";
+          showError(`Corkscrew doesn't know the Steam depots for Skyrim ${skyrimTarget}.`);
+          return;
+        }
+        const unlisten = await listen<{ percent: number | null; detail: string }>("dd-download-progress", (event) => {
+          if (event.payload.percent != null) {
+            depotDowngradePhase = `Downloading Skyrim ${skyrimTarget}... ${event.payload.percent.toFixed(1)}%`;
+          }
+        });
+        try {
+          for (const [i, [depotId, manifestId]] of build.depots.entries()) {
+            depotDowngradePhase = `Downloading Skyrim ${skyrimTarget} (part ${i + 1} of ${build.depots.length})...`;
+            await ddDownloadDepot(build.app_id, depotId, manifestId, game.game_id);
+          }
+          depotDowngradePhase = "Applying downgrade...";
+          const result = await ddApplySkyrimBuild(game.game_id, (wineCtx(game)?.bottle_name ?? ""), skyrimTarget);
+          depotDownloading = false;
+          depotDowngradePhase = "";
+          showSuccess(`Switched to v${result.current_version}. Let's go.`);
+          onproceed();
+        } finally {
+          unlisten();
+        }
         return;
       }
 

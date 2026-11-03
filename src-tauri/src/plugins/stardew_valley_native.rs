@@ -459,6 +459,7 @@ impl GamePlugin for StardewValleyNativePlugin {
             deployed_count,
             skipped_count: 0,
             fallback_used,
+            missing_count: 0,
         })
     }
 }

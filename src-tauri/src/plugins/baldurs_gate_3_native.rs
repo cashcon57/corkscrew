@@ -380,6 +380,7 @@ pub fn deploy_native_inner(
         deployed_count,
         skipped_count: 0,
         fallback_used,
+        missing_count: 0,
     })
 }
 
