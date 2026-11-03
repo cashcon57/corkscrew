@@ -46,6 +46,29 @@ fn join_all(base: &Path, parts: &[&str]) -> PathBuf {
 }
 
 /// Directory holding GameHub's per-game virtual containers.
+/// GameHub's newest bundled Wine (`wine-engine/containers/wine_installations/
+/// <id>/bin/wine`). It runs standalone with any `WINEPREFIX`, which lets
+/// Corkscrew run tools for GameHub games in a prefix of its own instead of
+/// touching GameHub's containers.
+pub fn bundled_wine(home: &Path) -> Option<PathBuf> {
+    let mut dir = home.to_path_buf();
+    for part in DATA_ROOT {
+        dir.push(part);
+    }
+    dir.push("wine-engine/containers/wine_installations");
+    let mut installs: Vec<(u64, PathBuf)> = std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let id: u64 = e.file_name().to_str()?.parse().ok()?;
+            let wine = e.path().join("bin/wine");
+            wine.is_file().then_some((id, wine))
+        })
+        .collect();
+    installs.sort();
+    installs.pop().map(|(_, wine)| wine)
+}
+
 pub fn virtual_containers_dir(home: &Path) -> PathBuf {
     join_all(&join_all(home, DATA_ROOT), VIRTUAL_CONTAINERS)
 }
