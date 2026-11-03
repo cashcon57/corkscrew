@@ -262,14 +262,31 @@ pub fn list_crossover_installs() -> Vec<CrossOverInstall> {
 #[cfg(unix)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn wineserver_dir_for_prefix(prefix: &Path) -> Option<PathBuf> {
-    use std::os::unix::fs::MetadataExt;
-    let meta = fs::metadata(prefix).ok()?;
     // SAFETY: getuid has no preconditions and cannot fail.
     let uid = unsafe { libc::getuid() };
-    Some(
-        PathBuf::from(format!("/tmp/.wine-{uid}"))
-            .join(wineserver_dir_name(meta.dev(), meta.ino())),
-    )
+    let dir = wineserver_dir_path(prefix, uid)?;
+    let base = dir.parent()?;
+    // /tmp is shared: only trust directories this user owns that nobody else
+    // can write to (Wine itself creates them 0700).
+    (owned_private_dir(base, uid) && owned_private_dir(&dir, uid)).then_some(dir)
+}
+
+/// Where Wine puts the server directory for `prefix` (not checked).
+#[cfg(unix)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn wineserver_dir_path(prefix: &Path, uid: u32) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = fs::metadata(prefix).ok()?;
+    Some(PathBuf::from(format!("/tmp/.wine-{uid}")).join(wineserver_dir_name(meta.dev(), meta.ino())))
+}
+
+/// A real directory (not a symlink) owned by `uid` and not group/world-writable.
+#[cfg(unix)]
+pub(crate) fn owned_private_dir(path: &Path, uid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    fs::symlink_metadata(path).is_ok_and(|m| {
+        m.file_type().is_dir() && m.uid() == uid && m.mode() & 0o022 == 0
+    })
 }
 
 /// PID holding the wineserver's lock (`F_GETLK` on `<server dir>/lock`), if
@@ -355,16 +372,13 @@ pub(crate) fn select_install(
                 .zip(fs::canonicalize(b).ok())
                 .is_some_and(|(x, y)| x == y)
     };
-    let known_or_probe = |app: &Path| {
-        installs
-            .iter()
-            .find(|i| same(&i.app_path, app))
-            .cloned()
-            .or_else(|| crossover_install_info(app))
-    };
+    // Only ever run a CrossOver that was found by `list_crossover_installs`;
+    // a path from config or from a process on the system is never probed
+    // and trusted on its own.
+    let known = |app: &Path| installs.iter().find(|i| same(&i.app_path, app)).cloned();
 
     if let Some(app) = override_app {
-        return known_or_probe(app)
+        return known(app)
             .map(|install| CrossOverSelection {
                 install,
                 reason: SelectionReason::Override,
@@ -372,7 +386,7 @@ pub(crate) fn select_install(
             .ok_or_else(|| SelectError::BadOverride(app.display().to_string()));
     }
 
-    if let Some(install) = live_app.and_then(known_or_probe) {
+    if let Some(install) = live_app.and_then(known) {
         return Ok(CrossOverSelection {
             install,
             reason: SelectionReason::LiveWineserver,
@@ -525,14 +539,34 @@ mod tests {
         use std::os::unix::fs::MetadataExt;
         let tmp = tempfile::tempdir().unwrap();
         let meta = fs::metadata(tmp.path()).unwrap();
-        let dir = wineserver_dir_for_prefix(tmp.path()).unwrap();
-        assert!(dir.starts_with("/tmp"));
+        let dir = wineserver_dir_path(tmp.path(), 501).unwrap();
+        assert!(dir.starts_with("/tmp/.wine-501"));
         assert_eq!(
             dir.file_name().unwrap().to_str().unwrap(),
             format!("server-{:x}-{:x}", meta.dev(), meta.ino())
         );
         // Not running: no socket, no lock holder.
         assert_eq!(wineserver_lock_holder(tmp.path()), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wineserver_dirs_must_be_private_and_owned() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: getuid has no preconditions.
+        let uid = unsafe { libc::getuid() };
+        let dir = tmp.path().join("server");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(owned_private_dir(&dir, uid));
+        assert!(!owned_private_dir(&dir, uid + 1), "other owner");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(!owned_private_dir(&dir, uid), "world-writable");
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!owned_private_dir(&link, uid), "symlink");
     }
 
     #[test]
@@ -623,10 +657,14 @@ mod tests {
             select_install(&installs, Some(&tmp.path().join("Gone.app")), None, None).unwrap_err();
         assert!(err.to_string().contains("Gone.app"), "{err}");
 
-        // A live wineserver from an unlisted bundle is still used if it has Wine.
+        // A bundle Corkscrew didn't find itself is never trusted: not as the
+        // live wineserver's app (falls back to the first install)…
         let other = fake_bundle(&tmp.path().join("elsewhere"), "CrossOver Beta", "27", "C");
         let sel = select_install(&installs, None, Some(&other), None).unwrap();
-        assert_eq!(sel.install.app_path, other);
+        assert_eq!(sel.install.app_path, stable_app);
+        assert_eq!(sel.reason, SelectionReason::Default);
+        // …and not as an override.
+        assert!(select_install(&installs, Some(&other), None, None).is_err());
 
         assert!(select_install(&[], None, None, None).is_err());
     }

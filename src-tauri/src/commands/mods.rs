@@ -1259,6 +1259,11 @@ pub async fn get_config() -> Result<AppConfig, String> {
 
 #[tauri::command]
 pub async fn set_config_value(key: String, value: String) -> Result<(), String> {
+    // The CrossOver pin chooses which wine binary runs; it can only be set
+    // through `set_bottle_crossover_install`, which validates it.
+    if key.starts_with(crate::crossover_install::OVERRIDE_KEY_PREFIX) {
+        return Err("Use the CrossOver install setting to change this".to_string());
+    }
     tokio::task::spawn_blocking(move || {
         config::set_config_value(&key, &value).map_err(|e| e.to_string())
     })

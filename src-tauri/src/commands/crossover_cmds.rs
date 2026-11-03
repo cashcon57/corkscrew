@@ -350,11 +350,13 @@ pub async fn set_bottle_crossover_install(
         let value = match app_path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
             None => String::new(),
             Some(p) => {
-                let app = Path::new(p);
-                if !app.is_absolute() || crossover_install::crossover_install_info(app).is_none() {
-                    return Err(format!("{p} is not a CrossOver install"));
-                }
-                p.to_string()
+                // Only an install Corkscrew itself found may be pinned.
+                let wanted = std::fs::canonicalize(p).map_err(|_| format!("{p} is not a CrossOver install"))?;
+                let install = crossover_install::list_crossover_installs()
+                    .into_iter()
+                    .find(|i| std::fs::canonicalize(&i.app_path).is_ok_and(|c| c == wanted))
+                    .ok_or_else(|| format!("{p} is not a CrossOver install Corkscrew found"))?;
+                install.app_path.to_string_lossy().into_owned()
             }
         };
         crate::config::set_config_value(
