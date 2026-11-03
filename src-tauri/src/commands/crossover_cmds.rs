@@ -5,7 +5,7 @@
 //! - `register_unregistered_game`: persist a shortcut to the
 //!   `custom_games` DB so it shows up in the game selector on next scan.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tauri::State;
 
@@ -56,60 +56,20 @@ pub async fn register_unregistered_game(
     if display_name.trim().is_empty() {
         return Err("display_name must not be empty".into());
     }
-    let game_path_p = Path::new(&game_path);
-    let exe_path_p = Path::new(&exe_path);
-
-    if !game_path_p.is_dir() {
-        return Err(format!("game_path does not exist: {}", game_path));
-    }
-    if !exe_path_p.is_file() {
-        return Err(format!("exe_path does not exist: {}", exe_path));
-    }
-
     let bottle = crate::bottles::find_bottle_by_name(&bottle_name)
         .ok_or_else(|| format!("Bottle not found: {bottle_name}"))?;
-
-    // Sanity: the exe must live inside the bottle's root (any drive_X is
-    // allowed — Wine supports multi-drive bottles, and ME2 .bat launchers /
-    // games may legitimately live on drive_d, drive_e, etc). Reject anything
-    // outside the bottle root to prevent registering arbitrary host paths.
-    let canon_bottle = std::fs::canonicalize(&bottle.path)
-        .map_err(|e| format!("canonicalize bottle failed: {e}"))?;
-    let canon_exe = std::fs::canonicalize(exe_path_p)
-        .map_err(|e| format!("canonicalize exe failed: {e}"))?;
-    if !canon_exe.starts_with(&canon_bottle) {
-        return Err("exe_path must live inside the bottle".into());
-    }
-    let canon_game_path = std::fs::canonicalize(game_path_p)
-        .map_err(|e| format!("canonicalize game_path failed: {e}"))?;
-    if !canon_game_path.starts_with(&canon_bottle) {
-        return Err("game_path must live inside the bottle".into());
-    }
-
-    // Resolve data_dir. When the user supplied an override, validate it the
-    // same way as game_path (exists + inside bottle). Otherwise default to
-    // game_path. Bethesda's Data/ subdir is a common override target.
-    let canon_data_dir = match data_dir {
-        Some(d) if !d.trim().is_empty() => {
-            let p = Path::new(d.trim());
-            if !p.is_dir() {
-                return Err(format!("data_dir does not exist: {}", d));
-            }
-            let canon = std::fs::canonicalize(p)
-                .map_err(|e| format!("canonicalize data_dir failed: {e}"))?;
-            if !canon.starts_with(&canon_bottle) {
-                return Err("data_dir must live inside the bottle".into());
-            }
-            canon
-        }
-        _ => canon_game_path.clone(),
-    };
+    let roots = custom_game_roots(&bottle)?;
+    let ValidatedGamePaths {
+        game_path: canon_game_path,
+        exe_path: canon_exe,
+        data_dir: canon_data_dir,
+    } = validate_custom_game_paths(&roots, &game_path, &exe_path, data_dir.as_deref())?;
 
     // Persist the canonicalized paths rather than the raw strings so any
     // `..` redundancy in the caller-supplied path is normalized before the
     // value lands in the custom_games DB. The canonical forms passed all
     // the containment checks above, so they are guaranteed to live inside
-    // the bottle.
+    // the bottle (or, for a Proton prefix, its game's Steam install).
     let custom = CustomGame {
         game_id,
         display_name,
@@ -202,8 +162,8 @@ pub async fn search_nexus_games_cmd(
 }
 
 /// Update the game_path / exe_path / data_dir for an existing custom game.
-/// Re-validates that paths exist and stay inside the bottle (same checks as
-/// `register_unregistered_game`) before writing.
+/// Re-validates the paths with the same rules as `register_unregistered_game`
+/// ([`validate_custom_game_paths`]) before writing.
 #[tauri::command]
 pub async fn update_custom_game_paths_cmd(
     game_id: String,
@@ -213,53 +173,14 @@ pub async fn update_custom_game_paths_cmd(
     data_dir: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let game_path_p = Path::new(&game_path);
-    let exe_path_p = Path::new(&exe_path);
-
-    if !game_path_p.is_dir() {
-        return Err(format!("game_path does not exist: {}", game_path));
-    }
-    if !exe_path_p.is_file() {
-        return Err(format!("exe_path does not exist: {}", exe_path));
-    }
-
     let bottle = crate::bottles::find_bottle_by_name(&bottle_name)
         .ok_or_else(|| format!("Bottle not found: {bottle_name}"))?;
-    let canon_bottle = std::fs::canonicalize(&bottle.path)
-        .map_err(|e| format!("canonicalize bottle failed: {e}"))?;
-    let canon_exe = std::fs::canonicalize(exe_path_p)
-        .map_err(|e| format!("canonicalize exe failed: {e}"))?;
-    if !canon_exe.starts_with(&canon_bottle) {
-        return Err("exe_path must live inside the bottle".into());
-    }
-    let canon_game_path = std::fs::canonicalize(game_path_p)
-        .map_err(|e| format!("canonicalize game_path failed: {e}"))?;
-    if !canon_game_path.starts_with(&canon_bottle) {
-        return Err("game_path must live inside the bottle".into());
-    }
-
-    // data_dir: when supplied, validate the same way as game_path (exists +
-    // canonicalize + inside bottle root) before writing. Previously this
-    // command trusted the caller's string verbatim, which would have let a
-    // crafted UPDATE redirect `data_dir` to `~/.ssh` or `/etc` and steer
-    // subsequent mod deploys at arbitrary paths. When omitted or empty,
-    // default to the canonicalized game path — matches
-    // `register_unregistered_game`.
-    let canon_data_dir = match data_dir {
-        Some(d) if !d.trim().is_empty() => {
-            let p = Path::new(d.trim());
-            if !p.is_dir() {
-                return Err(format!("data_dir does not exist: {}", d));
-            }
-            let canon = std::fs::canonicalize(p)
-                .map_err(|e| format!("canonicalize data_dir failed: {e}"))?;
-            if !canon.starts_with(&canon_bottle) {
-                return Err("data_dir must live inside the bottle".into());
-            }
-            canon
-        }
-        _ => canon_game_path.clone(),
-    };
+    let roots = custom_game_roots(&bottle)?;
+    let ValidatedGamePaths {
+        game_path: canon_game_path,
+        exe_path: canon_exe,
+        data_dir: canon_data_dir,
+    } = validate_custom_game_paths(&roots, &game_path, &exe_path, data_dir.as_deref())?;
     let data_dir_str = canon_data_dir.display().to_string();
 
     let db = state.db.clone();
@@ -277,4 +198,195 @@ pub async fn update_custom_game_paths_cmd(
     })
     .await
     .map_err(|e| format!("update task failed: {e}"))?
+}
+
+/// Canonical directories a custom game's paths may live in: the bottle root
+/// (any `drive_X` — Wine supports multi-drive bottles, and ME2 `.bat`
+/// launchers or games may legitimately live on drive_d, drive_e, ...) and,
+/// for a Proton prefix, the host Steam install of the app that owns it. A
+/// Proton game's files always live outside its prefix, in
+/// `<library>/steamapps/common/<installdir>`; anything else outside the
+/// bottle is rejected so arbitrary host paths can't be registered.
+fn custom_game_roots(bottle: &crate::bottles::Bottle) -> Result<Vec<PathBuf>, String> {
+    let mut roots = vec![std::fs::canonicalize(&bottle.path)
+        .map_err(|e| format!("canonicalize bottle failed: {e}"))?];
+    if let Some(install) = crate::game_registry::proton_owner_install_dir(bottle) {
+        match std::fs::canonicalize(&install) {
+            Ok(canon) => roots.push(canon),
+            Err(e) => log::warn!(
+                "Proton owner install {} could not be canonicalized: {e}",
+                install.display()
+            ),
+        }
+    }
+    Ok(roots)
+}
+
+#[derive(Debug)]
+struct ValidatedGamePaths {
+    game_path: PathBuf,
+    exe_path: PathBuf,
+    data_dir: PathBuf,
+}
+
+/// Validate user-supplied custom-game paths: each must exist and canonicalize
+/// inside one of `roots` (see [`custom_game_roots`]). `data_dir` defaults to
+/// the game path when omitted or empty (Bethesda's `Data/` subdir is a common
+/// override). Returns the canonical forms, which are what gets persisted, so
+/// any `..` in the input is normalized away and a symlink can't smuggle a
+/// path outside the roots.
+fn validate_custom_game_paths(
+    roots: &[PathBuf],
+    game_path: &str,
+    exe_path: &str,
+    data_dir: Option<&str>,
+) -> Result<ValidatedGamePaths, String> {
+    let game_path_p = Path::new(game_path);
+    let exe_path_p = Path::new(exe_path);
+    if !game_path_p.is_dir() {
+        return Err(format!("game_path does not exist: {}", game_path));
+    }
+    if !exe_path_p.is_file() {
+        return Err(format!("exe_path does not exist: {}", exe_path));
+    }
+
+    let inside = |canon: &Path| roots.iter().any(|r| canon.starts_with(r));
+    let outside_err = |field: &str| {
+        if roots.len() > 1 {
+            format!(
+                "{field} must live inside the bottle or its game's Steam install folder ({})",
+                roots[1].display()
+            )
+        } else {
+            format!("{field} must live inside the bottle")
+        }
+    };
+
+    let canon_exe = std::fs::canonicalize(exe_path_p)
+        .map_err(|e| format!("canonicalize exe failed: {e}"))?;
+    if !inside(&canon_exe) {
+        return Err(outside_err("exe_path"));
+    }
+    let canon_game_path = std::fs::canonicalize(game_path_p)
+        .map_err(|e| format!("canonicalize game_path failed: {e}"))?;
+    if !inside(&canon_game_path) {
+        return Err(outside_err("game_path"));
+    }
+
+    let canon_data_dir = match data_dir {
+        Some(d) if !d.trim().is_empty() => {
+            let p = Path::new(d.trim());
+            if !p.is_dir() {
+                return Err(format!("data_dir does not exist: {}", d));
+            }
+            let canon = std::fs::canonicalize(p)
+                .map_err(|e| format!("canonicalize data_dir failed: {e}"))?;
+            if !inside(&canon) {
+                return Err(outside_err("data_dir"));
+            }
+            canon
+        }
+        _ => canon_game_path.clone(),
+    };
+
+    Ok(ValidatedGamePaths {
+        game_path: canon_game_path,
+        exe_path: canon_exe,
+        data_dir: canon_data_dir,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    struct Fixture {
+        _tmp: tempfile::TempDir,
+        bottle: PathBuf,
+        install: PathBuf,
+        outside: PathBuf,
+    }
+
+    fn fixture() -> Fixture {
+        let tmp = tempfile::tempdir().unwrap();
+        let bottle = tmp.path().join("compatdata/990080/pfx");
+        let install = tmp.path().join("common/Hogwarts Legacy");
+        let outside = tmp.path().join("elsewhere");
+        for d in [&bottle, &install, &outside] {
+            fs::create_dir_all(d.join("bin")).unwrap();
+            fs::write(d.join("bin/game.exe"), b"exe").unwrap();
+        }
+        Fixture {
+            bottle: bottle.canonicalize().unwrap(),
+            install: install.canonicalize().unwrap(),
+            outside: outside.canonicalize().unwrap(),
+            _tmp: tmp,
+        }
+    }
+
+    fn s(p: &Path) -> String {
+        p.display().to_string()
+    }
+
+    #[test]
+    fn accepts_paths_inside_the_bottle() {
+        let f = fixture();
+        let roots = vec![f.bottle.clone()];
+        let v = validate_custom_game_paths(&roots, &s(&f.bottle), &s(&f.bottle.join("bin/game.exe")), None)
+            .unwrap();
+        assert_eq!(v.game_path, f.bottle);
+        assert_eq!(v.data_dir, f.bottle, "data_dir defaults to game_path");
+    }
+
+    #[test]
+    fn proton_owner_install_is_accepted_only_when_it_is_a_root() {
+        let f = fixture();
+        let exe = s(&f.install.join("bin/game.exe"));
+
+        let bottle_only = vec![f.bottle.clone()];
+        let err = validate_custom_game_paths(&bottle_only, &s(&f.install), &exe, None).unwrap_err();
+        assert_eq!(err, "exe_path must live inside the bottle");
+
+        let with_install = vec![f.bottle.clone(), f.install.clone()];
+        let v = validate_custom_game_paths(&with_install, &s(&f.install), &exe, Some(&s(&f.install.join("bin"))))
+            .unwrap();
+        assert_eq!(v.exe_path, f.install.join("bin/game.exe"));
+        assert_eq!(v.data_dir, f.install.join("bin"));
+    }
+
+    #[test]
+    fn rejects_paths_outside_every_root() {
+        let f = fixture();
+        let roots = vec![f.bottle.clone(), f.install.clone()];
+        let err = validate_custom_game_paths(&roots, &s(&f.outside), &s(&f.outside.join("bin/game.exe")), None)
+            .unwrap_err();
+        assert!(err.starts_with("exe_path must live inside the bottle or its game's Steam install folder"), "{err}");
+
+        let err = validate_custom_game_paths(&roots, &s(&f.install), &s(&f.install.join("bin/game.exe")), Some(&s(&f.outside)))
+            .unwrap_err();
+        assert!(err.starts_with("data_dir must live inside"), "{err}");
+    }
+
+    #[test]
+    fn dotdot_paths_are_canonicalized_before_the_check() {
+        let f = fixture();
+        let roots = vec![f.bottle.clone()];
+        // Starts inside the bottle but walks out of it.
+        let sneaky = format!("{}/../../../elsewhere", s(&f.bottle));
+        let err = validate_custom_game_paths(&roots, &sneaky, &s(&f.bottle.join("bin/game.exe")), None).unwrap_err();
+        assert_eq!(err, "game_path must live inside the bottle");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_inside_install_pointing_outside_is_rejected() {
+        let f = fixture();
+        let link = f.install.join("escape");
+        std::os::unix::fs::symlink(&f.outside, &link).unwrap();
+        let roots = vec![f.bottle.clone(), f.install.clone()];
+        let err = validate_custom_game_paths(&roots, &s(&f.install), &s(&f.install.join("bin/game.exe")), Some(&s(&link)))
+            .unwrap_err();
+        assert!(err.starts_with("data_dir must live inside"), "{err}");
+    }
 }
