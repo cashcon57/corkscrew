@@ -1073,8 +1073,27 @@ export async function startNexusSso(): Promise<string> {
 }
 
 // OAuth
-export async function startOAuthLogin(): Promise<TokenPair> {
-  return invoke("start_oauth_login");
+/**
+ * Start the Nexus Mods sign-in. `onAuthUrl` receives the sign-in link as soon
+ * as it exists, so the UI can offer it for pasting into another browser or
+ * profile. The listener is registered before the command runs.
+ */
+export async function startOAuthLogin(
+  onAuthUrl?: (url: string) => void
+): Promise<TokenPair> {
+  const unlisten = onAuthUrl
+    ? await listen<string>("nexus-oauth-url", (e) => onAuthUrl(e.payload))
+    : null;
+  try {
+    return await invoke("start_oauth_login");
+  } finally {
+    unlisten?.();
+  }
+}
+
+/** Stop a sign-in that is waiting for the browser. */
+export async function cancelOAuthLogin(): Promise<void> {
+  return invoke("cancel_oauth_login");
 }
 
 // OAuth (legacy — accepts explicit client ID)

@@ -29,8 +29,10 @@
     quickCsModCount,
     getAllGames,
     startOAuthLogin,
+    cancelOAuthLogin,
     getCollectionRevisions,
   } from "$lib/api";
+  import OAuthWaiting from "$lib/components/OAuthWaiting.svelte";
   import { listen } from "@tauri-apps/api/event";
   import type { CollectionSummary, CollectionDiff, DeploymentHealth } from "$lib/types";
   import { config } from "$lib/stores";
@@ -351,6 +353,7 @@
   let checkingAuth = $state(true);
   let signingIn = $state(false);
   let oauthConnecting = $state(false);
+  let oauthUrl = $state<string | null>(null);
   let showApiKeyFallback = $state(false);
   let apiKeyInput = $state("");
   let validationError = $state<string | null>(null);
@@ -640,9 +643,10 @@
 
   async function handleOAuthLogin() {
     oauthConnecting = true;
+    oauthUrl = null;
     validationError = null;
     try {
-      await startOAuthLogin();
+      await startOAuthLogin((url) => { oauthUrl = url; });
       const status = await getNexusAccountStatus();
       if (status.connected) {
         await initCollectionsAfterAuth(status);
@@ -656,7 +660,12 @@
       }
     } finally {
       oauthConnecting = false;
+      oauthUrl = null;
     }
+  }
+
+  function cancelOAuth() {
+    cancelOAuthLogin().catch((err) => console.error("cancel OAuth sign-in:", err));
   }
 
   async function handleConnect() {
@@ -1477,24 +1486,22 @@
           Premium members get faster downloads.
         </p>
         <div class="connect-steps">
+          {#if oauthConnecting}
+            <OAuthWaiting authUrl={oauthUrl} onCancel={cancelOAuth} />
+          {:else}
           <button
             class="btn btn-accent btn-step"
             onclick={handleOAuthLogin}
-            disabled={oauthConnecting}
             type="button"
           >
-            {#if oauthConnecting}
-              <span class="spinner-sm"></span>
-              Opening browser...
-            {:else}
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
-                <polyline points="10 17 15 12 10 7" />
-                <line x1="15" y1="12" x2="3" y2="12" />
-              </svg>
-              Sign in with Nexus Mods
-            {/if}
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+              <polyline points="10 17 15 12 10 7" />
+              <line x1="15" y1="12" x2="3" y2="12" />
+            </svg>
+            Sign in with Nexus Mods
           </button>
+          {/if}
           <button
             class="btn-text"
             onclick={() => { showApiKeyFallback = !showApiKeyFallback; }}
