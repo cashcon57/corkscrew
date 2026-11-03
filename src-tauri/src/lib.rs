@@ -1400,6 +1400,7 @@ pub fn run() {
             commands::nexus::start_nexus_sso,
             // OAuth
             commands::nexus::start_oauth_login,
+            commands::nexus::cancel_oauth_login,
             commands::nexus::start_nexus_oauth,
             commands::nexus::refresh_nexus_tokens,
             commands::nexus::save_oauth_tokens,

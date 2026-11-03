@@ -2,6 +2,18 @@
 
 All notable changes to Corkscrew are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.14.25] - 2026-11-03
+
+### Fixed
+
+- **Nexus Mods sign-in could hang on "Opening browser..." forever**: Chrome opens extra "preconnect" connections to the local sign-in callback that never send anything. Corkscrew waited on the first one with no time limit, so the real callback from Nexus sat unread and sign-in never finished. Each connection now gets a few seconds to send its request, idle ones are dropped, and the sign-in keeps listening. The Google Drive sign-in had the same bug and gets the same fix. (#211)
+- **Sign-in opened the wrong browser profile**: macOS and Linux hand the link to whichever browser profile was used last. While waiting, Corkscrew now shows the sign-in link with a **Copy link** button so you can paste it into the browser or profile you're signed in with. **Cancel** now stops the waiting sign-in instead of only hiding the spinner. (#211)
+- **Linux: `nxm://` links from the browser** now reach the running Corkscrew instead of starting a second copy, and links that launch Corkscrew are handled on startup. The desktop entry's command is quoted correctly and repaired if the AppImage moves. Crash recovery now finishes before the window opens. (#205)
+- **Linux: Proton prefixes in every Steam install** are found: native (`~/.local/share/Steam`, `~/.steam/steam`, `~/.steam/root`), Flatpak, Snap and a custom `XDG_DATA_HOME`, without listing the same prefix twice (#207). Steam integration and the Skyrim downgrader search the same places (#208).
+- **"Add game" for a game in a Proton prefix** now accepts the game's real install folder under `steamapps/common`, not only paths inside the prefix (#209, #210, #194).
+- **Heroic, Bottles and Lutris on Linux**: Heroic's per-game `Prefixes/default/<game>` prefixes are found, and `XDG_CONFIG_HOME`/`XDG_DATA_HOME` are honored for Heroic, Bottles and Lutris (#206). Snap Steam's `compatibilitytools.d` is searched for Proton builds (#203).
+- **Wabbajack installs** use a single install record, so a successful install no longer shows as cancelled (#204).
+
 ## [0.14.24] - 2026-11-02
 
 ### Fixed

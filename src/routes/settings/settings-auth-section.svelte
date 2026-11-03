@@ -7,7 +7,9 @@
     clearOAuthTokens,
     getNexusAccountStatus,
     startOAuthLogin,
+    cancelOAuthLogin,
   } from "$lib/api";
+  import OAuthWaiting from "$lib/components/OAuthWaiting.svelte";
 
   const NEXUS_API_KEY_URL = "https://www.nexusmods.com/users/myaccount?tab=api+access";
 
@@ -27,6 +29,7 @@
   let loadingAuth = $state(true);
   let signingOut = $state(false);
   let oauthConnecting = $state(false);
+  let oauthUrl = $state<string | null>(null);
   let showApiKeyFallback = $state(false);
   let apiKeyInput = $state("");
   let apiKeyConnecting = $state(false);
@@ -55,9 +58,10 @@
 
   async function handleOAuthLogin() {
     oauthConnecting = true;
+    oauthUrl = null;
     validationError = null;
     try {
-      await startOAuthLogin();
+      await startOAuthLogin((url) => { oauthUrl = url; });
       // OAuth flow completed — tokens are saved, refresh account status
       const status = await getNexusAccountStatus();
       if (status.connected) {
@@ -76,7 +80,12 @@
       }
     } finally {
       oauthConnecting = false;
+      oauthUrl = null;
     }
+  }
+
+  function cancelOAuth() {
+    cancelOAuthLogin().catch((err) => console.error("cancel OAuth sign-in:", err));
   }
 
   async function handleApiKeyConnect() {
@@ -187,20 +196,7 @@
 
           <!-- Primary: OAuth Sign In -->
           {#if oauthConnecting}
-            <div class="oauth-waiting">
-              <span class="spinner-sm"></span>
-              <div class="oauth-waiting-text">
-                <span class="oauth-waiting-title">Waiting for authorization...</span>
-                <span class="oauth-waiting-subtitle">Complete sign-in in your browser, then return here.</span>
-              </div>
-              <button
-                class="btn-ghost btn-sm"
-                onclick={() => { oauthConnecting = false; }}
-                type="button"
-              >
-                Cancel
-              </button>
-            </div>
+            <OAuthWaiting authUrl={oauthUrl} onCancel={cancelOAuth} />
           {:else}
             <button
               class="btn-nexus"
@@ -460,40 +456,9 @@
     flex-shrink: 0;
   }
 
-  /* ---- OAuth Waiting ---- */
-
-  .oauth-waiting {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    padding: var(--space-3);
-    background: var(--surface-hover);
-    border-radius: var(--radius-md, 8px);
-    animation: fade-in 0.2s ease;
-  }
-
   @keyframes fade-in {
     from { opacity: 0; transform: translateY(-4px); }
     to { opacity: 1; transform: translateY(0); }
-  }
-
-  .oauth-waiting-text {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    flex: 1;
-    min-width: 0;
-  }
-
-  .oauth-waiting-title {
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--text-primary);
-  }
-
-  .oauth-waiting-subtitle {
-    font-size: 11px;
-    color: var(--text-tertiary);
   }
 
   /* ---- Divider ---- */
@@ -643,10 +608,5 @@
   .btn-ghost:disabled {
     opacity: 0.5;
     cursor: not-allowed;
-  }
-
-  .btn-sm {
-    padding: 4px 10px;
-    font-size: 12px;
   }
 </style>

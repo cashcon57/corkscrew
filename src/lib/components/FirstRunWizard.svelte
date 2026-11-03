@@ -5,10 +5,12 @@
     getAllGames,
     setConfigValue,
     startOAuthLogin,
+    cancelOAuthLogin,
     getNexusAccountStatus,
     checkSteamStatus,
     addToSteam,
   } from "$lib/api";
+  import OAuthWaiting from "$lib/components/OAuthWaiting.svelte";
   import { bottles, games, selectedGame, currentPage } from "$lib/stores";
   import type { Bottle, DetectedGame, SteamStatus } from "$lib/types";
   import { wineCtx } from "$lib/types";
@@ -24,6 +26,7 @@
   let nexusConnected = $state(false);
   let nexusName = $state<string | null>(null);
   let nexusConnecting = $state(false);
+  let nexusAuthUrl = $state<string | null>(null);
   let nexusError = $state<string | null>(null);
 
   // Steam integration (Linux only)
@@ -53,9 +56,10 @@
 
   async function handleNexusOAuth() {
     nexusConnecting = true;
+    nexusAuthUrl = null;
     nexusError = null;
     try {
-      await startOAuthLogin();
+      await startOAuthLogin((url) => { nexusAuthUrl = url; });
       const status = await getNexusAccountStatus();
       if (status.connected) {
         nexusConnected = true;
@@ -70,7 +74,12 @@
       }
     } finally {
       nexusConnecting = false;
+      nexusAuthUrl = null;
     }
+  }
+
+  function cancelNexusOAuth() {
+    cancelOAuthLogin().catch((err) => console.error("cancel OAuth sign-in:", err));
   }
 
   function selectGame(game: DetectedGame) {
@@ -308,17 +317,11 @@
             </svg>
             <span>Signed in{nexusName ? ` as ${nexusName}` : ''}</span>
           </div>
+        {:else if nexusConnecting}
+          <OAuthWaiting authUrl={nexusAuthUrl} onCancel={cancelNexusOAuth} />
         {:else}
-          <button
-            class="btn-primary btn-lg"
-            onclick={handleNexusOAuth}
-            disabled={nexusConnecting}
-          >
-            {#if nexusConnecting}
-              <span class="spinner-xs"></span> Connecting...
-            {:else}
-              Sign in with NexusMods
-            {/if}
+          <button class="btn-primary btn-lg" onclick={handleNexusOAuth}>
+            Sign in with NexusMods
           </button>
         {/if}
 
