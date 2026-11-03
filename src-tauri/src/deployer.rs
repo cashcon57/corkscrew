@@ -199,6 +199,10 @@ pub struct DeployResult {
     pub skipped_count: usize,
     /// Whether any files fell back to copy (hardlinks not supported).
     pub fallback_used: bool,
+    /// Number of requested files that were not present in staging. A
+    /// non-zero value with `deployed_count == 0` means the staged layout
+    /// does not match the file list (nothing usable was deployed).
+    pub missing_count: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -491,6 +495,7 @@ fn deploy_mod_inner(
         deployed_count: final_deployed,
         skipped_count: final_skipped,
         fallback_used: final_fallback,
+        missing_count: final_missing,
     })
 }
 
@@ -742,6 +747,7 @@ where
     let total = enabled_mods.len();
     let mut total_deployed = 0;
     let mut total_skipped = 0;
+    let mut total_missing = 0;
     let mut any_fallback = false;
 
     // Pre-count total files for accurate progress reporting
@@ -793,6 +799,7 @@ where
                 files_so_far += file_count;
                 total_deployed += result.deployed_count;
                 total_skipped += result.skipped_count;
+                total_missing += result.missing_count;
                 any_fallback = any_fallback || result.fallback_used;
             }
         }
@@ -808,6 +815,7 @@ where
         deployed_count: total_deployed,
         skipped_count: total_skipped,
         fallback_used: any_fallback,
+        missing_count: total_missing,
     })
 }
 
