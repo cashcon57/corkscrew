@@ -2,14 +2,12 @@
 
 use crate::oauth;
 use crate::config;
-use crate::deployer;
 use crate::google_oauth;
 use crate::nexus;
 use crate::nexus_sso;
 use crate::nxm_handler;
 use crate::oauth::{NexusUserInfo, TokenPair};
-use crate::staging;
-use crate::{AppState, nexus_client, resolve_game};
+use crate::{AppState, check_game_lock, nexus_client};
 use std::path::PathBuf;
 use tauri::Emitter;
 use tauri::{AppHandle, State};
@@ -239,22 +237,11 @@ pub async fn download_and_install_nexus_mod(
     if !client.is_premium().await {
         return Err("Premium membership required for direct downloads".to_string());
     }
+    check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
 
-    // Get mod info for name/version
-    let mod_info = client
-        .get_mod(&game_slug, mod_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let mod_name = mod_info
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Unknown Mod")
-        .to_string();
-    let mod_version = mod_info
-        .get("version")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    // Name/version from the chosen file, not only the mod page.
+    let (mod_name, mod_version) =
+        crate::commands::mods::nexus_file_identity(&client, &game_slug, mod_id, file_id).await?;
 
     // Emit progress: starting
     let _ = app.emit(
@@ -278,6 +265,7 @@ pub async fn download_and_install_nexus_mod(
     let dl_cfg = config::get_config().map_err(|e| e.to_string())?;
     let download_dir = dl_cfg
         .download_dir
+        .clone()
         .map(PathBuf::from)
         .unwrap_or_else(config::downloads_dir);
 
@@ -311,7 +299,8 @@ pub async fn download_and_install_nexus_mod(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Stage & Deploy (reuse existing install pattern)
+    // Stage & Deploy (replaces the installed copy in place when this file,
+    // or the pending update of a mod, is already installed)
     let _ = app.emit(
         "install-progress",
         serde_json::json!({
@@ -322,89 +311,29 @@ pub async fn download_and_install_nexus_mod(
         }),
     );
 
-    let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
-    let db = &state.db;
-
-    let next_priority = db
-        .get_next_priority(&game_id, &bottle_name)
-        .map_err(|e| e.to_string())?;
-    let db_mod_id = db
-        .add_mod(
-            &game_id,
-            &bottle_name,
-            Some(mod_id),
-            &mod_name,
-            &mod_version,
-            &archive_path.to_string_lossy(),
-            &[],
-        )
-        .map_err(|e| e.to_string())?;
-    db.set_mod_priority(db_mod_id, next_priority)
-        .map_err(|e| e.to_string())?;
-
-    // Stage
-    let staging_result =
-        staging::stage_mod(&archive_path, &game_id, &bottle_name, db_mod_id, &mod_name).map_err(
-            |e| {
-                let _ = db.remove_mod(db_mod_id);
-                format!("Staging failed: {e}")
-            },
-        )?;
-
-    // Update DB
-    db.set_staging_path(db_mod_id, &staging_result.staging_path.to_string_lossy())
-        .map_err(|e| e.to_string())?;
-    db.update_installed_files(db_mod_id, &staging_result.files)
-        .map_err(|e| e.to_string())?;
-    db.store_file_hashes(db_mod_id, &staging_result.hashes)
-        .map_err(|e| e.to_string())?;
-
-    // Deploy
-    deployer::deploy_mod(
-        db,
-        &game_id,
-        &bottle_name,
-        db_mod_id,
-        &staging_result.staging_path,
-        &data_dir,
-        &staging_result.files,
-        "data",
-    )
-    .map_err(|e| {
-        let _ = staging::remove_staging(&staging_result.staging_path);
-        let _ = db.remove_mod(db_mod_id);
-        format!("Deploy failed: {e}")
-    })?;
-    let _ = db.set_deploy_target_for_mod(db_mod_id, "data");
-
-    // Set source
-    let _ = db.set_mod_source(
-        db_mod_id,
-        "nexus",
-        Some(&format!(
-            "https://www.nexusmods.com/{}/mods/{}",
-            game_slug, mod_id
-        )),
-    );
-
-    // Sync plugins if Skyrim
-    // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
-    let _ = crate::sync_plugins_for_game(&game, &bottle);
-
-    // Auto-delete archive if setting enabled
-    if dl_cfg
-        .extra
-        .get("auto_delete_archives")
-        .and_then(|v: &serde_json::Value| v.as_str())
-        == Some("true")
-    {
-        let _ = std::fs::remove_file(&archive_path);
-    }
-
-    let installed = db
-        .get_mod(db_mod_id)
-        .map_err(|e| e.to_string())?
-        .ok_or("Failed to retrieve installed mod")?;
+    let _guard = crate::DeployGuard::try_acquire(state.deploy_in_progress.clone(), app.clone())?;
+    let db = state.db.clone();
+    let req = crate::commands::mods::NexusInstallRequest {
+        game_id,
+        bottle_name,
+        archive_path,
+        name: mod_name,
+        version: mod_version,
+        nexus_mod_id: mod_id,
+        nexus_file_id: Some(file_id),
+        source_url: format!("https://www.nexusmods.com/{}/mods/{}", game_slug, mod_id),
+        replace_mod_id: None,
+        delete_archive_after: dl_cfg
+            .extra
+            .get("auto_delete_archives")
+            .and_then(|v: &serde_json::Value| v.as_str())
+            == Some("true"),
+    };
+    let installed = tokio::task::spawn_blocking(move || {
+        crate::commands::mods::install_nexus_archive_blocking(&db, &req)
+    })
+    .await
+    .map_err(crate::format_join_error)??;
 
     let _ = app.emit(
         "install-progress",
@@ -412,7 +341,7 @@ pub async fn download_and_install_nexus_mod(
             "kind": "modCompleted",
             "mod_index": 0,
             "mod_name": &installed.name,
-            "mod_id": db_mod_id,
+            "mod_id": installed.id,
         }),
     );
 

@@ -27,6 +27,9 @@ import type {
   FileTreeNode,
   Profile,
   ModUpdateInfo,
+  NxmDownloadResult,
+  RoutedUpdate,
+  UpdateOutcome,
   IntegrityReport,
   FomodInstaller,
   FomodFile,
@@ -270,7 +273,9 @@ export async function installMod(
   modVersion?: string,
   sourceType?: string,
   sourceUrl?: string,
-  nexusModId?: number
+  nexusModId?: number,
+  nexusFileId?: number,
+  replaceModId?: number,
 ): Promise<InstalledMod> {
   return invoke("install_mod_cmd", {
     archivePath,
@@ -281,6 +286,8 @@ export async function installMod(
     sourceType: sourceType ?? null,
     sourceUrl: sourceUrl ?? null,
     nexusModId: nexusModId ?? null,
+    nexusFileId: nexusFileId ?? null,
+    replaceModId: replaceModId ?? null,
   });
 }
 
@@ -324,7 +331,7 @@ export async function downloadFromNexus(
   gameId: string,
   bottleName: string,
   autoInstall: boolean
-): Promise<InstalledMod | string> {
+): Promise<InstalledMod | NxmDownloadResult> {
   return invoke("download_from_nexus", {
     nxmUrl,
     gameId,
@@ -943,6 +950,36 @@ export async function checkModUpdates(
   bottleName: string
 ): Promise<ModUpdateInfo[]> {
   return invoke("check_mod_updates", { gameId, bottleName });
+}
+
+/** Updates found by the last check (persisted) that haven't been applied. */
+export async function getModUpdateResults(
+  gameId: string,
+  bottleName: string
+): Promise<ModUpdateInfo[]> {
+  return invoke("get_mod_update_results", { gameId, bottleName });
+}
+
+/** Premium accounts get API downloads; free accounts get Nexus file pages. */
+export async function routeModUpdates(
+  gameId: string,
+  bottleName: string,
+  modIds: number[]
+): Promise<RoutedUpdate[]> {
+  return invoke("route_mod_updates", { gameId, bottleName, modIds });
+}
+
+/** Premium only: download and replace the given mods in place. */
+export async function updateModsFromNexus(
+  gameId: string,
+  bottleName: string,
+  modIds: number[]
+): Promise<UpdateOutcome[]> {
+  return invoke("update_mods_from_nexus", { gameId, bottleName, modIds });
+}
+
+export async function cancelModUpdates(): Promise<void> {
+  return invoke("cancel_mod_updates");
 }
 
 // FOMOD
