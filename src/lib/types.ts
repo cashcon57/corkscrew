@@ -245,6 +245,8 @@ export interface SkseStatus {
   installed: boolean;
   loader_path: string | null;
   version: string | null;
+  /** Skyrim version the installed SKSE was built for (e.g. "1.6.1170"). */
+  runtime: string | null;
   use_skse: boolean;
 }
 
@@ -263,7 +265,10 @@ export interface CachedVersion {
 }
 
 export interface DepotDownloadInfo {
+  /** All console commands, one per line. */
   command: string;
+  commands: string[];
+  target_version: string;
   steam_uri: string;
   expected_path: string;
 }
@@ -296,6 +301,8 @@ export interface SkseBuild {
   download_url: string;
   filename: string;
   is_recommended: boolean;
+  /** False for Nexus-only builds; download_url is then the Nexus files page. */
+  auto_install: boolean;
 }
 
 export interface SkseAvailableBuilds {
@@ -310,6 +317,28 @@ export interface DisplaySettings {
   height: number;
   fullscreen: boolean;
   borderless: boolean;
+}
+
+/** One installed CrossOver build (macOS). */
+export interface CrossOverInstall {
+  app_path: string;
+  name: string;
+  version: string | null;
+  build_timestamp: string | null;
+}
+
+export type CrossOverSelectionReason =
+  | "override"
+  | "live_wineserver"
+  | "bottle_version"
+  | "default";
+
+/** CrossOver installs and which one a bottle launches with. */
+export interface BottleCrossOverInfo {
+  installs: CrossOverInstall[];
+  selected: { install: CrossOverInstall; reason: CrossOverSelectionReason } | null;
+  override_path: string | null;
+  error: string | null;
 }
 
 export interface DisplayFixResult {

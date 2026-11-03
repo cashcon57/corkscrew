@@ -251,8 +251,30 @@ pub struct DepotVersion {
     pub build_id: String,
 }
 
+/// Where `dd_download_depot` puts each depot (`<cache>/depot_downloads/<app>_<depot>`).
+fn dd_download_root() -> std::path::PathBuf {
+    crate::config::cache_dir().join("depot_downloads")
+}
+
+/// A depot folder from the frontend, accepted only if it is one of our own
+/// DepotDownloader output folders.
+fn validated_dd_dir(depot_dir: &str) -> Result<std::path::PathBuf, String> {
+    let root = dd_download_root()
+        .canonicalize()
+        .map_err(|_| "No DepotDownloader downloads exist yet".to_string())?;
+    let dir = std::path::Path::new(depot_dir)
+        .canonicalize()
+        .map_err(|e| format!("Depot folder not found: {e}"))?;
+    if dir.parent() != Some(root.as_path()) {
+        return Err("Depot folder is not a Corkscrew DepotDownloader download".to_string());
+    }
+    Ok(dir)
+}
+
 /// Apply a downloaded depot to a game installation.
 /// Copies all files from the depot download directory over the game files.
+/// Skyrim SE goes through [`dd_apply_skyrim_build`] instead: its builds
+/// change the master files and BSAs too, so one depot isn't a downgrade.
 #[tauri::command]
 pub async fn dd_apply_depot(
     game_id: String,
@@ -262,10 +284,92 @@ pub async fn dd_apply_depot(
 ) -> Result<u64, String> {
     let _db = state.db.clone();
     tokio::task::spawn_blocking(move || {
+        if game_id == "skyrimse" {
+            return Err("Skyrim SE downgrades need all three depots; use dd_apply_skyrim_build".to_string());
+        }
+        let depot_path = validated_dd_dir(&depot_dir)?;
         let (_bottle, game, _data_dir) = crate::resolve_game(&game_id, &bottle_name)?;
-        let depot_path = std::path::Path::new(&depot_dir);
-        crate::downgrader::apply_depot_to_game(&game.game_path, depot_path, &game_id)
+        crate::downgrader::apply_depot_to_game(std::path::Path::new(&game.game_path), &depot_path, &game_id)
             .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// The Skyrim SE builds Corkscrew can downgrade to (or restore), with the
+/// manifest of each of their three depots.
+#[tauri::command]
+pub fn dd_skyrim_builds() -> Vec<SkyrimBuildInfo> {
+    crate::downgrader::SKYRIM_BUILDS
+        .iter()
+        .map(|b| SkyrimBuildInfo {
+            game_version: b.version.to_string(),
+            app_id: crate::downgrader::SKYRIM_APP_ID,
+            depots: b
+                .manifests
+                .iter()
+                .map(|(depot, manifest)| (*depot, manifest.to_string()))
+                .collect(),
+        })
+        .collect()
+}
+
+#[derive(Serialize)]
+pub struct SkyrimBuildInfo {
+    pub game_version: String,
+    pub app_id: u32,
+    /// `(depot_id, manifest_id)` for each depot of the build.
+    pub depots: Vec<(u32, String)>,
+}
+
+/// Apply a Skyrim SE build downloaded with DepotDownloader (all three
+/// depots, via [`dd_download_depot`]) to an install. Everything replaced is
+/// backed up and can be restored with `restore_downgrade_cmd`.
+#[tauri::command]
+pub async fn dd_apply_skyrim_build(
+    game_id: String,
+    bottle_name: String,
+    target: String,
+) -> Result<crate::downgrader::DowngradeStatus, String> {
+    tokio::task::spawn_blocking(move || {
+        use crate::downgrader;
+        let build = downgrader::skyrim_build(&target)
+            .ok_or_else(|| format!("Unknown Skyrim SE build {target}"))?;
+        let (bottle, game, _) = crate::resolve_game(&game_id, &bottle_name)?;
+        let game_path = std::path::PathBuf::from(&game.game_path);
+
+        let depot_dirs: Vec<std::path::PathBuf> = build
+            .manifests
+            .iter()
+            .map(|(depot, _)| {
+                let dir = dd_download_root().join(format!("{}_{depot}", downgrader::SKYRIM_APP_ID));
+                if dir.is_dir() { Ok(dir) } else { Err(format!("Depot {depot} hasn't been downloaded")) }
+            })
+            .collect::<Result<_, String>>()?;
+        let exe = depot_dirs[2].join("SkyrimSE.exe");
+        let exe_version = downgrader::detect_skyrim_version(&depot_dirs[2])
+            .map(|s| s.current_version)
+            .map_err(|_| format!("{} is missing", exe.display()))?;
+        if exe_version.split_whitespace().next() != Some(build.version) {
+            return Err(format!("Downloaded SkyrimSE.exe is {exe_version}, not {}", build.version));
+        }
+
+        let current = downgrader::detect_skyrim_version(&game_path).map_err(|e| e.to_string())?;
+        if current.current_version.split_whitespace().next() != Some(build.version) {
+            downgrader::apply_full_downgrade(
+                &game_path,
+                &depot_dirs,
+                &downgrader::new_full_downgrade_backup(&game_path, &game_id),
+                &current.current_version,
+                build.version,
+                &downgrader::content_catalog_candidates(&game_path, &bottle.appdata_local()),
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        let mut status = downgrader::detect_skyrim_version(&game_path).map_err(|e| e.to_string())?;
+        status.target_version = build.version.to_string();
+        status.is_downgraded = status.current_version.split_whitespace().next() == Some(build.version);
+        Ok(status)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?

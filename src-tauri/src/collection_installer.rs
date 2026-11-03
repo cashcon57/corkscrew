@@ -10,8 +10,40 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::oneshot;
 use tokio::sync::{Notify, Semaphore};
 
-/// Global cancellation flag for collection installs.
-static INSTALL_CANCELLED: AtomicBool = AtomicBool::new(false);
+/// Cancellation state: a flag for polling plus a `Notify` so async waiters
+/// (extraction waits, install-loop waits) wake immediately on cancel instead
+/// of sleeping until some unrelated event fires.
+struct CancelSignal {
+    flag: AtomicBool,
+    notify: Notify,
+}
+
+impl CancelSignal {
+    fn new() -> Self {
+        Self {
+            flag: AtomicBool::new(false),
+            notify: Notify::new(),
+        }
+    }
+
+    fn cancel(&self) {
+        self.flag.store(true, Ordering::SeqCst);
+        // Wakes every waiter that has already created + enabled a
+        // `Notified` future; later waiters see the flag (see `wait_for_extraction`).
+        self.notify.notify_waiters();
+    }
+
+    fn reset(&self) {
+        self.flag.store(false, Ordering::SeqCst);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
+    }
+}
+
+/// Global cancellation signal for collection installs.
+static INSTALL_CANCEL: Lazy<CancelSignal> = Lazy::new(CancelSignal::new);
 
 /// FOMOD selection channel type alias.
 type FomodSelections = HashMap<String, Vec<String>>;
@@ -22,14 +54,166 @@ static FOMOD_PENDING: Lazy<std::sync::Mutex<HashMap<String, oneshot::Sender<Fomo
 
 /// Request cancellation of the currently running collection install.
 pub fn cancel_install() {
-    INSTALL_CANCELLED.store(true, Ordering::SeqCst);
+    INSTALL_CANCEL.cancel();
     // Drain any pending FOMOD wizard channels so blocked tasks unblock immediately
     drain_fomod_pending();
 }
 
 /// Check if install has been cancelled.
 fn is_cancelled() -> bool {
-    INSTALL_CANCELLED.load(Ordering::SeqCst)
+    INSTALL_CANCEL.is_cancelled()
+}
+
+/// Wait until `pos` appears in `done` (extraction finished, success or
+/// failure). Returns `true` when done, `false` if `cancel` fired first.
+///
+/// Both `Notified` futures are created and enabled BEFORE the state is
+/// checked, so a `notify_waiters()` landing between the check and the await
+/// cannot be lost (the previous check-then-`notified()` pattern could miss
+/// the final wakeup and hang the install loop forever).
+async fn wait_for_extraction(
+    done: &std::sync::Mutex<HashSet<usize>>,
+    extraction_notify: &Notify,
+    pos: usize,
+    cancel: &CancelSignal,
+) -> bool {
+    loop {
+        let extracted = extraction_notify.notified();
+        let cancelled = cancel.notify.notified();
+        tokio::pin!(extracted, cancelled);
+        extracted.as_mut().enable();
+        cancelled.as_mut().enable();
+
+        if done
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&pos)
+        {
+            return true;
+        }
+        if cancel.is_cancelled() {
+            return false;
+        }
+        tokio::select! {
+            _ = &mut extracted => {}
+            _ = &mut cancelled => {}
+        }
+    }
+}
+
+/// Why a cancellable extraction did not produce a directory.
+#[derive(Debug)]
+enum ExtractFailure {
+    /// The extractor (or archive validation) returned an error.
+    Failed(String),
+    /// The blocking task panicked.
+    Panicked(String),
+    TimedOut,
+    Cancelled,
+}
+
+impl std::fmt::Display for ExtractFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(e) => write!(f, "{}", e),
+            Self::Panicked(e) => write!(f, "Task panicked: {}", e),
+            Self::TimedOut => write!(f, "Extraction timed out after 30 minutes"),
+            // Must contain "cancelled" — see `is_retryable_extraction_error`.
+            Self::Cancelled => write!(f, "Cancelled"),
+        }
+    }
+}
+
+/// Upper bound for a single archive extraction.
+const EXTRACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
+
+/// A fresh, never-reused extraction directory under `base` for mod `pos`.
+///
+/// A timed-out or cancelled extraction thread can keep running for a while
+/// after its waiter gives up; giving each attempt its own directory means a
+/// retry can never collide with (or be deleted by) that straggler.
+fn unique_extract_dir(base: &Path, pos: usize) -> PathBuf {
+    static ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = ATTEMPT.fetch_add(1, Ordering::Relaxed);
+    base.join(format!(
+        "corkscrew_extract_{}_{}_{}",
+        pos,
+        std::process::id(),
+        n
+    ))
+}
+
+/// Extract `archive` into `temp_dir` (from [`unique_extract_dir`]) on a
+/// blocking thread, bounded by [`EXTRACTION_TIMEOUT`] and by install
+/// cancellation. When `validate` is set the archive headers are checked
+/// first (see [`validate_archive`]).
+///
+/// On cancel or timeout this returns immediately; the extractor is told to
+/// stop via its cancel hook (native 7z child killed, Rust extractors bail at
+/// the next entry/chunk) and removes its own partial output when it does.
+async fn extract_cancellable(
+    archive: PathBuf,
+    temp_dir: PathBuf,
+    validate: bool,
+) -> Result<PathBuf, ExtractFailure> {
+    let cancel: &'static CancelSignal = &INSTALL_CANCEL;
+    // Per-attempt abort flag: set when the waiter gives up (timeout) so the
+    // blocking extractor stops even though the install wasn't cancelled.
+    let abort = Arc::new(AtomicBool::new(false));
+    let abort_c = Arc::clone(&abort);
+
+    let cancelled = cancel.notify.notified();
+    tokio::pin!(cancelled);
+    cancelled.as_mut().enable();
+
+    let mut handle = tokio::task::spawn_blocking(move || {
+        let should_stop = move || cancel.is_cancelled() || abort_c.load(Ordering::SeqCst);
+        if should_stop() {
+            return Err(ExtractFailure::Cancelled);
+        }
+        if validate {
+            if let Err(e) = validate_archive(&archive) {
+                return Err(ExtractFailure::Failed(format!(
+                    "Archive validation failed: {}",
+                    e
+                )));
+            }
+        }
+        if temp_dir.exists() {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+        }
+        let _ = std::fs::create_dir_all(&temp_dir);
+        match crate::installer::extract_archive_cancellable(&archive, &temp_dir, &should_stop) {
+            Ok(_) => Ok(temp_dir),
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&temp_dir);
+                Err(match e {
+                    crate::installer::InstallerError::Cancelled => ExtractFailure::Cancelled,
+                    other => ExtractFailure::Failed(other.to_string()),
+                })
+            }
+        }
+    });
+
+    if cancel.is_cancelled() {
+        abort.store(true, Ordering::SeqCst);
+        return Err(ExtractFailure::Cancelled);
+    }
+
+    tokio::select! {
+        res = tokio::time::timeout(EXTRACTION_TIMEOUT, &mut handle) => match res {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(join_err)) => Err(ExtractFailure::Panicked(join_err.to_string())),
+            Err(_) => {
+                abort.store(true, Ordering::SeqCst);
+                Err(ExtractFailure::TimedOut)
+            }
+        },
+        _ = &mut cancelled => {
+            abort.store(true, Ordering::SeqCst);
+            Err(ExtractFailure::Cancelled)
+        }
+    }
 }
 
 /// Submit FOMOD choices from the frontend for a pending request.
@@ -758,7 +942,7 @@ pub async fn install_collection(
     resume_checkpoint: Option<(i64, HashMap<usize, String>)>,
 ) -> Result<CollectionInstallResult, String> {
     // Reset cancellation flag at the start of each install
-    INSTALL_CANCELLED.store(false, Ordering::SeqCst);
+    INSTALL_CANCEL.reset();
 
     // Emit initialization progress so the UI shows something immediately
     let _ = app.emit(
@@ -1366,8 +1550,7 @@ pub async fn install_collection(
                         // Extract under install destination (or download dir
                         // fallback) — `/tmp` on Linux is tmpfs and OOMs on
                         // multi-GB pak extracts. Cleaned up on success.
-                        let temp_dir = extract_base_c
-                            .join(format!("corkscrew_extract_{}", order_pos));
+                        let temp_dir = unique_extract_dir(&extract_base_c, order_pos);
 
                         // Spawn dir-size poller for progress tracking
                         let poller_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1398,42 +1581,17 @@ pub async fn install_collection(
                             }
                         });
 
-                        // Extract with 30-minute timeout
-                        let ext_result = tokio::time::timeout(
-                            std::time::Duration::from_secs(1800),
-                            tokio::task::spawn_blocking({
-                                let archive = archive.clone();
-                                let temp_dir = temp_dir.clone();
-                                move || {
-                                    if is_cancelled() {
-                                        return Err("Cancelled".to_string());
-                                    }
-                                    if let Err(e) = validate_archive(&archive) {
-                                        return Err(format!("Archive validation failed: {}", e));
-                                    }
-                                    if temp_dir.exists() {
-                                        let _ = std::fs::remove_dir_all(&temp_dir);
-                                    }
-                                    let _ = std::fs::create_dir_all(&temp_dir);
-                                    match crate::installer::extract_archive(&archive, &temp_dir) {
-                                        Ok(_) => Ok(temp_dir),
-                                        Err(e) => {
-                                            let _ = std::fs::remove_dir_all(&temp_dir);
-                                            Err(e.to_string())
-                                        }
-                                    }
-                                }
-                            }),
-                        )
-                        .await;
+                        // Extract (30-minute timeout, returns promptly on cancel)
+                        let ext_result =
+                            extract_cancellable(archive.clone(), temp_dir.clone(), true).await;
 
                         // Stop poller
                         poller_stop.store(true, std::sync::atomic::Ordering::SeqCst);
                         poller_handle.abort();
 
-                        // Convert nested Result to a flat extraction outcome
+                        // Convert to a flat extraction outcome
                         let first_error = match ext_result {
-                            Ok(Ok(Ok(dir))) => {
+                            Ok(dir) => {
                                 // Success on first try
                                 let duration_ms = extract_start.elapsed().as_millis() as u64;
                                 let extracted_size: u64 = walkdir::WalkDir::new(&dir)
@@ -1457,9 +1615,7 @@ pub async fn install_collection(
                                     .insert(order_pos, dir);
                                 None // no error
                             }
-                            Ok(Ok(Err(e))) => Some(e),
-                            Ok(Err(e)) => Some(format!("Task panicked: {}", e)),
-                            Err(_) => Some("Extraction timed out after 30 minutes".to_string()),
+                            Err(failure) => Some(failure.to_string()),
                         };
 
                         // Retry loop: if first extraction failed and error is retryable,
@@ -1470,6 +1626,10 @@ pub async fn install_collection(
                                 let mut succeeded = false;
 
                                 for attempt in 1..=MAX_EXTRACTION_RETRIES {
+                                    if is_cancelled() {
+                                        last_error = ExtractFailure::Cancelled.to_string();
+                                        break;
+                                    }
                                     log::warn!(
                                         "Extraction failed for mod {} ({}): {} — retry {}/{}",
                                         order_pos,
@@ -1539,34 +1699,17 @@ pub async fn install_collection(
                                             let retry_archive = dl2.archive_path.clone();
                                             // Update archive path for next retry iteration
                                             archive = dl2.archive_path;
-                                            let retry_temp = extract_base_c.join(format!(
-                                                "corkscrew_extract_{}_retry{}",
-                                                order_pos, attempt
-                                            ));
-                                            let retry_result =
-                                                tokio::task::spawn_blocking(move || {
-                                                    if retry_temp.exists() {
-                                                        let _ =
-                                                            std::fs::remove_dir_all(&retry_temp);
-                                                    }
-                                                    let _ = std::fs::create_dir_all(&retry_temp);
-                                                    match crate::installer::extract_archive(
-                                                        &retry_archive,
-                                                        &retry_temp,
-                                                    ) {
-                                                        Ok(_) => Ok(retry_temp),
-                                                        Err(e2) => {
-                                                            let _ = std::fs::remove_dir_all(
-                                                                &retry_temp,
-                                                            );
-                                                            Err(e2.to_string())
-                                                        }
-                                                    }
-                                                })
-                                                .await;
+                                            let retry_temp =
+                                                unique_extract_dir(&extract_base_c, order_pos);
+                                            let retry_result = extract_cancellable(
+                                                retry_archive,
+                                                retry_temp,
+                                                false,
+                                            )
+                                            .await;
 
                                             match retry_result {
-                                                Ok(Ok(dir)) => {
+                                                Ok(dir) => {
                                                     log::info!(
                                                         "Retry extraction succeeded for mod {} on attempt {}",
                                                         order_pos, attempt
@@ -1601,13 +1744,16 @@ pub async fn install_collection(
                                                     succeeded = true;
                                                     break;
                                                 }
-                                                Ok(Err(e2)) => {
-                                                    last_error = e2;
-                                                    // Continue to next retry
+                                                Err(
+                                                    e2 @ (ExtractFailure::Panicked(_)
+                                                    | ExtractFailure::Cancelled),
+                                                ) => {
+                                                    last_error = e2.to_string();
+                                                    break; // Don't retry panics or cancels
                                                 }
                                                 Err(e2) => {
-                                                    last_error = format!("Task panicked: {}", e2);
-                                                    break; // Don't retry panics
+                                                    last_error = e2.to_string();
+                                                    // Continue to next retry
                                                 }
                                             }
                                         }
@@ -1791,8 +1937,7 @@ pub async fn install_collection(
 
                         let estimated_total = arc_size.saturating_mul(3);
                         // Avoid /tmp on Linux (tmpfs OOM on multi-GB paks).
-                        let temp_dir = extraction_temp_base
-                            .join(format!("corkscrew_extract_{}", order_pos));
+                        let temp_dir = unique_extract_dir(&extraction_temp_base, order_pos);
 
                         let poller_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
                         let poller_stop_c = poller_stop.clone();
@@ -1823,39 +1968,14 @@ pub async fn install_collection(
                         });
 
                         let extract_start = std::time::Instant::now();
-                        let ext_result = tokio::time::timeout(
-                            std::time::Duration::from_secs(1800),
-                            tokio::task::spawn_blocking({
-                                let archive = archive.clone();
-                                let temp_dir = temp_dir.clone();
-                                move || {
-                                    if is_cancelled() {
-                                        return Err("Cancelled".to_string());
-                                    }
-                                    if let Err(e) = validate_archive(&archive) {
-                                        return Err(format!("Archive validation failed: {}", e));
-                                    }
-                                    if temp_dir.exists() {
-                                        let _ = std::fs::remove_dir_all(&temp_dir);
-                                    }
-                                    let _ = std::fs::create_dir_all(&temp_dir);
-                                    match crate::installer::extract_archive(&archive, &temp_dir) {
-                                        Ok(_) => Ok(temp_dir),
-                                        Err(e) => {
-                                            let _ = std::fs::remove_dir_all(&temp_dir);
-                                            Err(e.to_string())
-                                        }
-                                    }
-                                }
-                            }),
-                        )
-                        .await;
+                        let ext_result =
+                            extract_cancellable(archive.clone(), temp_dir.clone(), true).await;
 
                         poller_stop.store(true, std::sync::atomic::Ordering::SeqCst);
                         poller_handle.abort();
 
                         match ext_result {
-                            Ok(Ok(Ok(dir))) => {
+                            Ok(dir) => {
                                 let duration_ms = extract_start.elapsed().as_millis() as u64;
                                 let extracted_size: u64 = walkdir::WalkDir::new(&dir)
                                     .into_iter()
@@ -1877,40 +1997,18 @@ pub async fn install_collection(
                                     .unwrap_or_else(|e| e.into_inner())
                                     .insert(order_pos, dir);
                             }
-                            Ok(Ok(Err(e))) => {
-                                log::warn!("Retry extraction failed for mod {}: {}", order_pos, e);
-                                let _ = app.emit(
-                                    INSTALL_PROGRESS_EVENT,
-                                    InstallProgress::StagingModFailed {
-                                        mod_index: order_pos,
-                                        mod_name: mod_name_ext,
-                                        error: e,
-                                    },
-                                );
-                            }
-                            Ok(Err(e)) => {
+                            Err(failure) => {
                                 log::warn!(
-                                    "Retry extraction panicked for mod {}: {}",
+                                    "Retry extraction failed for mod {}: {}",
                                     order_pos,
-                                    e
+                                    failure
                                 );
                                 let _ = app.emit(
                                     INSTALL_PROGRESS_EVENT,
                                     InstallProgress::StagingModFailed {
                                         mod_index: order_pos,
                                         mod_name: mod_name_ext,
-                                        error: format!("Task panicked: {}", e),
-                                    },
-                                );
-                            }
-                            Err(_) => {
-                                log::warn!("Retry extraction timed out for mod {}", order_pos);
-                                let _ = app.emit(
-                                    INSTALL_PROGRESS_EVENT,
-                                    InstallProgress::StagingModFailed {
-                                        mod_index: order_pos,
-                                        mod_name: mod_name_ext,
-                                        error: "Extraction timed out after 30 minutes".to_string(),
+                                        error: failure.to_string(),
                                     },
                                 );
                             }
@@ -2221,26 +2319,21 @@ pub async fn install_collection(
         // Wait for this mod's extraction if it's in the extraction pipeline.
         // This blocks only until THIS mod is ready, not all of them.
         let pre_ext = if needs_extraction_set.contains(&i) {
-            loop {
-                // Check if extraction is done (success or failure)
-                if extraction_done
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .contains(&i)
-                {
-                    // Take the extracted dir if extraction succeeded
-                    let dir = extracted_map
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .remove(&i);
-                    if let Some(ref d) = dir {
-                        temp_guard.track(d.clone());
-                    }
-                    break dir;
-                }
-                // Not done yet — wait for notification, then check again
-                extraction_notify.notified().await;
+            // Wait for extraction (success or failure) — or cancellation,
+            // which the next iteration's top-of-loop check reports.
+            if !wait_for_extraction(&extraction_done, &extraction_notify, i, &INSTALL_CANCEL).await
+            {
+                continue;
             }
+            // Take the extracted dir if extraction succeeded
+            let dir = extracted_map
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&i);
+            if let Some(ref d) = dir {
+                temp_guard.track(d.clone());
+            }
+            dir
         } else {
             None
         };
@@ -2363,23 +2456,19 @@ pub async fn install_collection(
 
             // Wait for extraction to complete (it should be done by now, but be safe)
             let pre_ext = if needs_extraction_set.contains(&i) {
-                loop {
-                    if extraction_done
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .contains(&i)
-                    {
-                        let dir = extracted_map
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .remove(&i);
-                        if let Some(ref d) = dir {
-                            temp_guard.track(d.clone());
-                        }
-                        break dir;
-                    }
-                    extraction_notify.notified().await;
+                if !wait_for_extraction(&extraction_done, &extraction_notify, i, &INSTALL_CANCEL)
+                    .await
+                {
+                    break; // cancelled
                 }
+                let dir = extracted_map
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&i);
+                if let Some(ref d) = dir {
+                    temp_guard.track(d.clone());
+                }
+                dir
             } else {
                 None
             };
@@ -3928,7 +4017,11 @@ async fn stage_and_deploy(
         let bn = bottle_name.to_string();
         let mn = mod_name.clone();
 
-        tokio::task::spawn_blocking(move || {
+        let cancelled = INSTALL_CANCEL.notify.notified();
+        tokio::pin!(cancelled);
+        cancelled.as_mut().enable();
+
+        let mut handle = tokio::task::spawn_blocking(move || {
             if let Some(extracted_dir) = pre_extracted {
                 // Fast path: skip SHA-256 hashing for collection installs
                 let result = staging::stage_mod_from_extracted_opts(
@@ -3944,18 +4037,41 @@ async fn stage_and_deploy(
                 result
             } else {
                 // Fallback: direct extraction + staging (also skip hash for collections)
-                staging::stage_mod_extract_direct(&archive, &gid, &bn, mod_id, &mn, true)
+                staging::stage_mod_extract_direct(&archive, &gid, &bn, mod_id, &mn, true, &is_cancelled)
             }
-        })
-        .await
-        .map_err(|e| {
-            let _ = db.remove_mod(mod_id);
-            InstallError::Failed(format!("Staging join error: {}", e))
-        })?
-        .map_err(|e| {
-            let _ = db.remove_mod(mod_id);
-            InstallError::Failed(format!("Staging failed: {}", e))
-        })?
+        });
+
+        let joined = if is_cancelled() {
+            None
+        } else {
+            tokio::select! {
+                res = &mut handle => Some(res),
+                _ = &mut cancelled => None,
+            }
+        };
+        match joined {
+            Some(res) => res
+                .map_err(|e| {
+                    let _ = db.remove_mod(mod_id);
+                    InstallError::Failed(format!("Staging join error: {}", e))
+                })?
+                .map_err(|e| {
+                    let _ = db.remove_mod(mod_id);
+                    InstallError::Failed(format!("Staging failed: {}", e))
+                })?,
+            None => {
+                // Cancelled: don't block on the staging thread (it stops at
+                // its next cancel checkpoint); clean its output up once it
+                // has actually finished so nothing races the removal.
+                let _ = db.remove_mod(mod_id);
+                let staging_dir = staging::mod_staging_dir(game_id, bottle_name, mod_id, mod_name);
+                tokio::spawn(async move {
+                    let _ = handle.await;
+                    let _ = staging::remove_staging(&staging_dir);
+                });
+                return Err(InstallError::Failed("Cancelled".to_string()));
+            }
+        }
     };
 
     log::info!(
@@ -3968,6 +4084,15 @@ async fn stage_and_deploy(
             .as_ref()
             .map(|c| c.to_string().chars().take(200).collect::<String>())
     );
+
+    if staging_result.files.is_empty() {
+        let _ = staging::remove_staging(&staging_result.staging_path);
+        let _ = db.remove_mod(mod_id);
+        return Err(InstallError::Failed(format!(
+            "No installable files were extracted from the archive for '{}'",
+            mod_name
+        )));
+    }
 
     // Check for MO2-style "Root" folder in staging. If present, the files
     // inside it should be deployed to game_path (root), not data_dir.
@@ -4156,6 +4281,34 @@ async fn stage_and_deploy(
             selections.len(),
             fomod_files.len()
         );
+        // A FOMOD whose options carry payload but whose selections resolved
+        // to nothing beyond requiredInstallFiles almost always means the
+        // variant files were missed (e.g. stale choices) — the shared files
+        // alone rarely work (MCM Helper: no .esp, no DLL).
+        let options_have_payload = fomod_installer.steps.iter().any(|s| {
+            s.groups
+                .iter()
+                .any(|g| g.options.iter().any(|o| !o.files.is_empty()))
+        });
+        if options_have_payload && fomod_files.len() <= fomod_installer.required_files.len() {
+            log::warn!(
+                "[stage_deploy] FOMOD for '{}' resolved to only its {} required file(s) — \
+                 no option payload selected",
+                mod_name,
+                fomod_installer.required_files.len()
+            );
+            let _ = app.emit(
+                INSTALL_PROGRESS_EVENT,
+                InstallProgress::StepChanged {
+                    mod_index,
+                    step: "warning".to_string(),
+                    detail: Some(format!(
+                        "FOMOD for '{}' selected no optional files — only shared files will be installed. Reinstall it and pick options if it doesn't work.",
+                        mod_name
+                    )),
+                },
+            );
+        }
         for ff in &fomod_files {
             log::debug!(
                 "[stage_deploy] FOMOD file: src={}, dst={}",
@@ -4634,20 +4787,46 @@ async fn stage_and_deploy(
         .await
         .map_err(|e| InstallError::Failed(format!("Deploy join error: {}", e)))?;
 
-        if let Err(e) = deploy_result {
-            let err_msg = e.to_string();
-            // If deploy failed because 0 files could be found, keep staging + DB
-            // entry so a "redeploy" can fix it later. Only remove staging for
-            // truly fatal errors (I/O, DB, etc.).
-            if err_msg.contains("0 of") && err_msg.contains("files deployed") {
-                log::warn!(
-                    "Deploy returned 0 files for mod {} — keeping staging for later redeploy: {}",
-                    mod_id,
-                    err_msg
-                );
-                // Still return Ok so the mod appears as "installed" — the user
-                // can trigger a redeploy to actually link the files.
-            } else {
+        match deploy_result {
+            Ok(res) => {
+                // Nothing deployed and files were missing from staging: the
+                // staged layout doesn't match the file list (e.g. archive
+                // entries that couldn't be mapped to real paths). Reporting
+                // this as "installed" leaves an enabled mod that does nothing.
+                // Files skipped because a higher-priority mod owns them are
+                // NOT counted as missing, so legitimate full overrides pass.
+                if res.deployed_count == 0 && res.missing_count > 0 {
+                    log::error!(
+                        "Deploy placed 0 of {} files for mod {} ('{}'); {} missing from staging",
+                        files_to_deploy.len(),
+                        mod_id,
+                        mod_name,
+                        res.missing_count
+                    );
+                    let _ = staging::remove_staging(&staging_result.staging_path);
+                    let _ = db.remove_mod(mod_id);
+                    return Err(InstallError::Failed(format!(
+                        "Deploy placed 0 of {} files for '{}' ({} missing from staging)",
+                        files_to_deploy.len(),
+                        mod_name,
+                        res.missing_count
+                    )));
+                }
+                if res.missing_count > 0 {
+                    let _ = app.emit(
+                        INSTALL_PROGRESS_EVENT,
+                        InstallProgress::StepChanged {
+                            mod_index,
+                            step: "warning".to_string(),
+                            detail: Some(format!(
+                                "{} file(s) of '{}' were missing from staging and not deployed",
+                                res.missing_count, mod_name
+                            )),
+                        },
+                    );
+                }
+            }
+            Err(e) => {
                 let _ = staging::remove_staging(&staging_result.staging_path);
                 let _ = db.remove_mod(mod_id);
                 return Err(InstallError::Failed(format!("Deploy failed: {}", e)));
@@ -5172,5 +5351,273 @@ mod tests {
         let result = parse_fomod_choices(&json).unwrap();
         assert_eq!(result["Resolution"], vec!["4K", "Parallax"]);
         assert_eq!(result["Compatibility"], vec!["USSEP Patch"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Cancellation of extraction waits (bug #2)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn wait_for_extraction_returns_promptly_on_cancel() {
+        // An extraction that never finishes: nothing is ever inserted into
+        // `done` and `extraction_notify` is never fired.
+        let done = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let extraction_notify = Arc::new(Notify::new());
+        let cancel = Arc::new(CancelSignal::new());
+
+        let waiter = {
+            let (done, n, c) = (done.clone(), extraction_notify.clone(), cancel.clone());
+            tokio::spawn(async move { wait_for_extraction(&done, &n, 7, &c).await })
+        };
+        // Let the waiter park on its Notified futures first.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "must block while extraction is pending");
+
+        cancel.cancel();
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("wait must return within 1s of cancel")
+            .unwrap();
+        assert!(!finished, "cancelled wait reports not-done");
+    }
+
+    #[tokio::test]
+    async fn wait_for_extraction_sees_cancel_issued_before_waiting() {
+        let done = std::sync::Mutex::new(HashSet::new());
+        let extraction_notify = Notify::new();
+        let cancel = CancelSignal::new();
+        cancel.cancel(); // no waiter registered yet — must not be lost
+        let finished = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_extraction(&done, &extraction_notify, 0, &cancel),
+        )
+        .await
+        .expect("must not hang");
+        assert!(!finished);
+    }
+
+    #[tokio::test]
+    async fn wait_for_extraction_wakes_on_completion() {
+        let done = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let extraction_notify = Arc::new(Notify::new());
+        let cancel = Arc::new(CancelSignal::new());
+
+        let waiter = {
+            let (done, n, c) = (done.clone(), extraction_notify.clone(), cancel.clone());
+            tokio::spawn(async move { wait_for_extraction(&done, &n, 3, &c).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        // Unrelated completion: must keep waiting.
+        done.lock().unwrap().insert(1);
+        extraction_notify.notify_waiters();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!waiter.is_finished());
+
+        done.lock().unwrap().insert(3);
+        extraction_notify.notify_waiters();
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("must wake on completion")
+            .unwrap();
+        assert!(finished);
+    }
+
+    /// The only test that touches the process-global signal: checks that
+    /// `cancel_install()` wakes waiters on `INSTALL_CANCEL` and makes
+    /// `extract_cancellable` bail without extracting.
+    #[tokio::test]
+    async fn cancel_install_wakes_global_waiters_and_stops_extraction() {
+        INSTALL_CANCEL.reset();
+        let done = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let extraction_notify = Arc::new(Notify::new());
+        let waiter = {
+            let (done, n) = (done.clone(), extraction_notify.clone());
+            tokio::spawn(async move { wait_for_extraction(&done, &n, 0, &INSTALL_CANCEL).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        cancel_install();
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("cancel_install must wake the wait within 1s")
+            .unwrap();
+        assert!(!finished);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("never_read.zip");
+        std::fs::write(&archive, b"not really a zip").unwrap();
+        let out = unique_extract_dir(tmp.path(), 0);
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            extract_cancellable(archive, out.clone(), true),
+        )
+        .await
+        .expect("cancelled extraction must return promptly");
+        assert!(matches!(res, Err(ExtractFailure::Cancelled)), "{:?}", res);
+        assert!(!is_retryable_extraction_error(&ExtractFailure::Cancelled.to_string()));
+
+        INSTALL_CANCEL.reset();
+    }
+
+    #[test]
+    fn unique_extract_dir_never_repeats() {
+        let base = Path::new("/tmp/x");
+        let a = unique_extract_dir(base, 4);
+        let b = unique_extract_dir(base, 4);
+        assert_ne!(a, b);
+        assert!(a.starts_with(base));
+        assert!(a
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("corkscrew_extract_4_"));
+    }
+
+    // -----------------------------------------------------------------------
+    // FOMOD payload (bug #15): MCM Helper (Nexus 53000) shape
+    // -----------------------------------------------------------------------
+
+    const MCM_HELPER_XML: &str = r#"<?xml version="1.0" encoding="utf-16"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://qconsulting.ca/fo3/ModConfig5.0.xsd">
+    <moduleName>MCM Helper</moduleName>
+    <requiredInstallFiles>
+        <folder source="Data" destination="" />
+    </requiredInstallFiles>
+    <installSteps order="Explicit">
+        <installStep name="Options">
+            <optionalFileGroups order="Explicit">
+                <group name="Game" type="SelectExactlyOne">
+                    <plugins order="Explicit">
+                        <plugin name="Skyrim Special Edition">
+                            <description>SSE / AE</description>
+                            <files>
+                                <folder source="SkyrimSE" destination="" />
+                            </files>
+                            <typeDescriptor><type name="Recommended" /></typeDescriptor>
+                        </plugin>
+                        <plugin name="Skyrim VR">
+                            <description>VR</description>
+                            <files>
+                                <folder source="SkyrimVR" destination="" />
+                            </files>
+                            <typeDescriptor><type name="Optional" /></typeDescriptor>
+                        </plugin>
+                    </plugins>
+                </group>
+                <group name="Plugin" type="SelectExactlyOne">
+                    <plugins order="Explicit">
+                        <plugin name="ESP">
+                            <description>Regular plugin</description>
+                            <files><folder source="ESP" destination="" /></files>
+                            <typeDescriptor><type name="Recommended" /></typeDescriptor>
+                        </plugin>
+                        <plugin name="ESL">
+                            <description>ESL-flagged plugin</description>
+                            <files><folder source="ESL" destination="" /></files>
+                            <typeDescriptor><type name="Optional" /></typeDescriptor>
+                        </plugin>
+                    </plugins>
+                </group>
+                <group name="Scripts" type="SelectExactlyOne">
+                    <plugins order="Explicit">
+                        <plugin name="BSA">
+                            <description>Packed scripts</description>
+                            <files><folder source="BSA" destination="" /></files>
+                            <typeDescriptor><type name="Recommended" /></typeDescriptor>
+                        </plugin>
+                        <plugin name="Loose">
+                            <description>Loose scripts</description>
+                            <files><folder source="Loose" destination="" /></files>
+                            <typeDescriptor><type name="Optional" /></typeDescriptor>
+                        </plugin>
+                    </plugins>
+                </group>
+            </optionalFileGroups>
+        </installStep>
+    </installSteps>
+</config>
+"#;
+
+    fn create_mcm_helper_archive_tree(root: &Path) {
+        let files: &[&str] = &[
+            "Data/Interface/Translations/MCMHelper_english.txt",
+            "Data/Interface/Translations/MCMHelper_french.txt",
+            "Data/MCM/Config/MCMHelper/config.json",
+            "Data/SKSE/Plugins/MCMHelper/settings.ini",
+            "ESP/MCMHelper.esp",
+            "ESL/MCMHelper.esp",
+            "BSA/MCMHelper.bsa",
+            "Loose/Scripts/MCM_ConfigBase.pex",
+            "SkyrimSE/SKSE/Plugins/MCMHelper.dll",
+            "SkyrimVR/SKSE/Plugins/MCMHelper.dll",
+            "fomod/info.xml",
+        ];
+        for f in files {
+            let p = root.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, f.as_bytes()).unwrap();
+        }
+        std::fs::write(root.join("fomod").join("ModuleConfig.xml"), MCM_HELPER_XML).unwrap();
+    }
+
+    #[test]
+    fn mcm_helper_fomod_without_choices_stages_variant_payload() {
+        // Archive extracted to a temp dir (with a wrapper folder, as many
+        // Nexus archives have).
+        let extracted = tempfile::tempdir().unwrap();
+        let archive_root = extracted.path().join("MCM Helper");
+        create_mcm_helper_archive_tree(&archive_root);
+
+        // Staging copies everything under find_data_root(). Before the fix
+        // this picked `Data/`, dropping fomod/ and every option folder.
+        let data_root = crate::installer::find_data_root(extracted.path());
+        assert_eq!(data_root, archive_root);
+
+        let staging = tempfile::tempdir().unwrap();
+        for entry in walkdir::WalkDir::new(&data_root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            let rel = entry.path().strip_prefix(&data_root).unwrap();
+            let dest = staging.path().join(rel);
+            std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+            std::fs::copy(entry.path(), &dest).unwrap();
+        }
+
+        // Same calls stage_and_deploy makes for a mod with no manifest
+        // choices and no saved recipe.
+        let installer = fomod::parse_fomod(staging.path())
+            .unwrap()
+            .expect("FOMOD must be detected in staging");
+        let selections = fomod::get_default_selections(&installer, None, None);
+        let fomod_files = fomod::get_files_for_selections(&installer, &selections, None, None);
+        assert!(fomod_files.len() > installer.required_files.len());
+
+        let staged = apply_fomod_to_staging(staging.path(), &fomod_files)
+            .expect("FOMOD layout applied");
+
+        for expected in [
+            "MCMHelper.esp",
+            "MCMHelper.bsa",
+            "SKSE/Plugins/MCMHelper.dll",
+            "Interface/Translations/MCMHelper_english.txt",
+            "MCM/Config/MCMHelper/config.json",
+        ] {
+            assert!(
+                staged.iter().any(|f| f == expected),
+                "missing {} in {:?}",
+                expected,
+                staged
+            );
+            assert!(staging.path().join(expected).is_file(), "{} not on disk", expected);
+        }
+        // The SE DLL variant was chosen, not VR; loose scripts not chosen.
+        assert_eq!(
+            std::fs::read_to_string(staging.path().join("SKSE/Plugins/MCMHelper.dll")).unwrap(),
+            "SkyrimSE/SKSE/Plugins/MCMHelper.dll"
+        );
+        assert!(!staged.iter().any(|f| f.contains("MCM_ConfigBase.pex")));
+        assert!(!staged.iter().any(|f| f.to_lowercase().starts_with("fomod/")));
     }
 }

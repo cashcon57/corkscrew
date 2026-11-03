@@ -203,6 +203,52 @@ pub fn skse_log_dir(bottle_path: &Path) -> PathBuf {
     script_extender_log_dir(bottle_path, "skyrimse")
 }
 
+/// ISO 8601 local time (`YYYY-MM-DDTHH:MM:SS`) for a crash log, which the
+/// frontend can hand to `new Date()`. CrashLogger names logs
+/// `crash-YYYY-MM-DD-HH-MM-SS.log` in local time; when the name doesn't follow
+/// that pattern the file's modification time is used instead.
+fn crash_log_timestamp(filename: &str, path: &Path) -> String {
+    const ISO: &str = "%Y-%m-%dT%H:%M:%S";
+    let stem = filename
+        .strip_prefix("crash-")
+        .unwrap_or(filename)
+        .trim_end_matches(".log");
+    if let Ok(t) = chrono::NaiveDateTime::parse_from_str(stem, "%Y-%m-%d-%H-%M-%S") {
+        return t.format(ISO).to_string();
+    }
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map(|t| chrono::DateTime::<chrono::Local>::from(t).format(ISO).to_string())
+        .unwrap_or_default()
+}
+
+/// Resolve a crash log `filename` (as listed by [`find_crash_logs`]) to its
+/// path inside the game's script-extender log directory. Only a bare
+/// `crash-*.log` file name is accepted: no separators, no `..`.
+pub fn resolve_crash_log_path(
+    bottle_path: &Path,
+    game_id: &str,
+    filename: &str,
+) -> std::result::Result<PathBuf, String> {
+    let valid = filename.starts_with("crash-")
+        && filename.ends_with(".log")
+        && !filename.contains(['/', '\\', '\0'])
+        && !filename.contains("..");
+    if !valid {
+        return Err(format!("Invalid crash log name: {filename}"));
+    }
+    let dir = script_extender_log_dir(bottle_path, game_id);
+    let path = dir.join(filename);
+    match fs::symlink_metadata(&path) {
+        Ok(m) if m.file_type().is_file() => Ok(path),
+        Ok(_) => Err(format!("Not a crash log file: {filename}")),
+        Err(_) => Err(format!(
+            "Crash log {filename} no longer exists in {}. Refresh the list.",
+            dir.display()
+        )),
+    }
+}
+
 /// Find all crash logs in the SKSE directory for a game.
 ///
 /// Returns a list of [`CrashLogEntry`] summaries sorted by timestamp
@@ -233,11 +279,7 @@ pub fn find_crash_logs(game_path: &Path, bottle_path: &Path, game_id: &str) -> V
             _ => continue,
         };
 
-        // Extract timestamp from filename: crash-YYYY-MM-DD-HH-MM-SS.log
-        let timestamp = filename
-            .trim_start_matches("crash-")
-            .trim_end_matches(".log")
-            .to_string();
+        let timestamp = crash_log_timestamp(&filename, path);
 
         // Quick summary from the first few lines
         let (summary, severity) = match fs::read_to_string(path) {
@@ -438,10 +480,7 @@ fn check_new_crashes_with_marker(
         .iter()
         .take(3)
         .map(|(path, _nanos, filename)| {
-            let timestamp = filename
-                .trim_start_matches("crash-")
-                .trim_end_matches(".log")
-                .to_string();
+            let timestamp = crash_log_timestamp(filename, path);
             let (summary, severity) = match fs::read_to_string(path) {
                 Ok(content) => quick_summary(&content),
                 Err(_) => ("Unreadable crash log".to_string(), CrashSeverity::Unknown),
@@ -2212,9 +2251,60 @@ Nothing to see here.
 
         assert_eq!(entries.len(), 2);
         // Most recent first.
-        assert_eq!(entries[0].timestamp, "2024-03-15-14-23-45");
-        assert_eq!(entries[1].timestamp, "2024-03-14-10-15-30");
+        assert_eq!(entries[0].timestamp, "2024-03-15T14:23:45");
+        assert_eq!(entries[1].timestamp, "2024-03-14T10:15:30");
         assert!(!entries[0].summary.is_empty());
+
+        // Listed names resolve inside the log directory.
+        let resolved =
+            resolve_crash_log_path(tmp.path(), "skyrimse", &entries[0].filename).unwrap();
+        assert_eq!(resolved, skse_dir.join("crash-2024-03-15-14-23-45.log"));
+        assert!(analyze_crash_log(&resolved).is_ok());
+    }
+
+    #[test]
+    fn test_crash_log_timestamp_is_iso_8601() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("crash-2026-10-30-19-39-07.log");
+        assert_eq!(
+            crash_log_timestamp("crash-2026-10-30-19-39-07.log", &p),
+            "2026-10-30T19:39:07"
+        );
+        // Unparseable name falls back to the file's mtime, still ISO 8601.
+        let odd = tmp.path().join("crash-latest.log");
+        fs::write(&odd, "x").unwrap();
+        let ts = crash_log_timestamp("crash-latest.log", &odd);
+        assert!(
+            chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%dT%H:%M:%S").is_ok(),
+            "{ts}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_crash_log_path_rejects_unsafe_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = script_extender_log_dir(tmp.path(), "skyrimse");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("crash-2024-01-01-00-00-00.log"), "x").unwrap();
+        for bad in [
+            "../crash-2024-01-01-00-00-00.log",
+            "crash-../../etc/passwd.log",
+            "sub/crash-2024-01-01-00-00-00.log",
+            "crash-2024\\x.log",
+            "/etc/crash-x.log",
+            "skse64.log",
+            "",
+        ] {
+            assert!(resolve_crash_log_path(tmp.path(), "skyrimse", bad).is_err(), "{bad}");
+        }
+        // Missing file: a clear error, not a raw ENOENT.
+        let err =
+            resolve_crash_log_path(tmp.path(), "skyrimse", "crash-2099-01-01-00-00-00.log")
+                .unwrap_err();
+        assert!(err.contains("no longer exists"), "{err}");
+        assert!(
+            resolve_crash_log_path(tmp.path(), "skyrimse", "crash-2024-01-01-00-00-00.log").is_ok()
+        );
     }
 
     #[test]

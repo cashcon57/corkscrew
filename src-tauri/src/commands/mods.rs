@@ -1537,6 +1537,11 @@ pub async fn get_config() -> Result<AppConfig, String> {
 
 #[tauri::command]
 pub async fn set_config_value(key: String, value: String) -> Result<(), String> {
+    // The CrossOver pin chooses which wine binary runs; it can only be set
+    // through `set_bottle_crossover_install`, which validates it.
+    if key.starts_with(crate::crossover_install::OVERRIDE_KEY_PREFIX) {
+        return Err("Use the CrossOver install setting to change this".to_string());
+    }
     tokio::task::spawn_blocking(move || {
         config::set_config_value(&key, &value).map_err(|e| e.to_string())
     })
@@ -2088,15 +2093,38 @@ pub async fn launch_game_cmd(
     let game_path = PathBuf::from(&game.game_path);
     let data_dir_check = PathBuf::from(&game.data_dir);
 
-    // NotProton games start through the macOS Steam client (see
-    // `launcher::launch_via_steam`), which runs the game's own executable.
-    // Script extenders and custom executables need a different exe and aren't
-    // wired up for NotProton yet.
-    let via_steam = bottle.source == crate::bottles::NOTPROTON_SOURCE;
-    if via_steam && use_skse {
-        return Err("Launching through a script extender isn't supported for NotProton games yet. \
-                    Turn off the script extender option to start the game through Steam."
-            .to_string());
+    // Steam Play games (Proton on Linux, NotProton on macOS) must be started
+    // by the Steam client so they get its Steam bridge; running the exe under
+    // Wine directly makes Steam-DRM games like Skyrim exit at once. GameHub
+    // games are started by GameHub. Both start the game's launcher exe, so a
+    // script extender runs by taking the launcher's place (`launcher_swap`).
+    let via_steam = bottle.is_steam_compat_prefix();
+    let started_by_client = via_steam || bottle.source == crate::gamehub::SOURCE;
+    let launcher_swap = if started_by_client {
+        crate::launcher_swap::for_game(&game_id)
+    } else {
+        None
+    };
+    if started_by_client {
+        match (use_skse, launcher_swap) {
+            (true, Some(swap)) => {
+                crate::launcher_swap::apply(&game_path, swap).map_err(|e| {
+                    format!("Couldn't set up the script extender for a {} launch: {e}", bottle.source)
+                })?;
+            }
+            (true, None) => {
+                return Err(format!(
+                    "Script extenders aren't supported for this game under {} yet. \
+                     Turn off the script extender option to start the game normally.",
+                    bottle.source
+                ));
+            }
+            (false, Some(swap)) => {
+                crate::launcher_swap::restore(&game_path, swap)
+                    .map_err(|e| format!("Couldn't restore {}: {e}", swap.launcher))?;
+            }
+            (false, None) => {}
+        }
     }
 
     // Pre-launch self-healing: check if deployment is consistent, auto-fix if not
@@ -2128,7 +2156,7 @@ pub async fn launch_game_cmd(
 
     // When SKSE is requested, it takes priority over custom executables.
     // Otherwise, check for a custom default executable first.
-    if !use_skse && !via_steam {
+    if !use_skse && !started_by_client {
         let custom_exe =
             executables::get_default_executable(&db, &game_id, &bottle_name).unwrap_or(None);
 
@@ -2303,14 +2331,16 @@ pub async fn launch_game_cmd(
         .map(|v| v == "true")
         .unwrap_or(false);
 
-    // Auto-apply display fix for Skyrim SE before launching to ensure fullscreen
+    // Pre-launch display fix for Skyrim SE: Wine input/registry fixes, and a
+    // SkyrimPrefs.ini correction that keeps the user's display mode.
     if game_id == "skyrimse" && !fixes_disabled {
-        match display_fix::auto_fix_display(&bottle) {
+        match display_fix::auto_fix_display(&bottle, Some(&data_dir_check)) {
             Ok(result) => {
                 if result.fixed {
                     log::info!(
-                        "Auto-applied display fix: {}x{} fullscreen (was {}x{} fs={} borderless={})",
+                        "Auto-applied display fix: {}x{} fs={} borderless={} (was {}x{} fs={} borderless={})",
                         result.applied.width, result.applied.height,
+                        result.applied.fullscreen, result.applied.borderless,
                         result.previous.width, result.previous.height,
                         result.previous.fullscreen, result.previous.borderless
                     );
@@ -2413,10 +2443,27 @@ pub async fn launch_game_cmd(
 
     let mut result = if via_steam {
         launcher::launch_via_steam(&bottle)
+    } else if started_by_client {
+        // GameHub starts the game itself; with a script extender its launcher
+        // entry now runs the loader, so hand GameHub the game's own exe.
+        let game_exe = games::with_plugin(&game_id, |p| {
+            p.executables().first().and_then(|n| launcher::find_executable(&game_path, n))
+        })
+        .flatten()
+        .unwrap_or_else(|| exe_path.clone());
+        launcher::launch_game(&bottle, &game_exe, Some(&game_path), Some(&game_id), None)
     } else {
         launcher::launch_game(&bottle, &exe_path, Some(&game_path), Some(&game_id), None)
     }
     .map_err(|e| format!("Launch failed ({}): {}", bottle.source, e))?;
+    if use_skse && launcher_swap.is_some() {
+        let note = "The script extender starts in place of the game's launcher. \
+                    If Steam verifies or updates the game, Corkscrew sets it up again on the next launch.";
+        result.warning = Some(match result.warning.take() {
+            Some(w) => format!("{w}\n{note}"),
+            None => note.to_string(),
+        });
+    }
 
     // Cursor fix is now handled by Wine registry keys (set in auto_fix_display
     // above via fix_cursor_grab). No runtime Dock/Hot Corner/event tap needed.
@@ -2453,6 +2500,7 @@ pub async fn check_skse(game_id: String, bottle_name: String) -> Result<SkseStat
                 installed: false,
                 loader_path: None,
                 version: None,
+                runtime: None,
                 use_skse: false,
             });
         }
@@ -2644,7 +2692,8 @@ pub async fn scan_skse_plugins_cmd(
             .map(|s| s.current_version)
             .unwrap_or_else(|_| "unknown".to_string());
 
-        Ok(skse::scan_skse_plugins(&data_dir, &version))
+        let skse_version = skse::detect_skse(&game_path).version;
+        Ok(skse::scan_skse_plugins(&data_dir, &version, skse_version.as_deref()))
     })
     .await
     .map_err(crate::format_join_error)?
@@ -2711,17 +2760,57 @@ pub async fn reenable_wine_plugin_cmd(
 pub async fn fix_skyrim_display(bottle_name: String) -> Result<display_fix::DisplayFixResult, String> {
     tokio::task::spawn_blocking(move || {
         let bottle = resolve_bottle(&bottle_name)?;
-        display_fix::auto_fix_display(&bottle)
+        // Explicit user action: force exclusive fullscreen at native resolution.
+        display_fix::force_exclusive_fullscreen(&bottle)
     })
     .await
     .map_err(crate::format_join_error)?
 }
 
+/// Version status of a Skyrim install relative to a downgrade target.
+fn status_for_target(game_path: &Path, build: &downgrader::SkyrimBuild) -> Result<DowngradeStatus, String> {
+    let mut status = downgrader::detect_skyrim_version(game_path).map_err(|e| e.to_string())?;
+    status.target_version = build.version.to_string();
+    status.is_downgraded =
+        status.current_version.split_whitespace().next() == Some(build.version);
+    Ok(status)
+}
+
+/// Apply a downloaded three-depot build to a Skyrim install, backing up
+/// everything it replaces. See [`downgrader::apply_full_downgrade`].
+fn apply_full_downgrade_for(
+    bottle: &crate::bottles::Bottle,
+    game_path: &Path,
+    game_id: &str,
+    build: &downgrader::SkyrimBuild,
+) -> Result<DowngradeStatus, String> {
+    let current = status_for_target(game_path, build)?;
+    if current.is_downgraded {
+        return Ok(current);
+    }
+    let depot_dirs = downgrader::full_depot_set_ready(&downgrader::depot_search_dirs(bottle), build)?;
+    let aside = downgrader::content_catalog_candidates(game_path, &bottle.appdata_local());
+    downgrader::apply_full_downgrade(
+        game_path,
+        &depot_dirs,
+        &downgrader::new_full_downgrade_backup(game_path, game_id),
+        &current.current_version,
+        build.version,
+        &aside,
+    )
+    .map_err(|e| e.to_string())?;
+    status_for_target(game_path, build)
+}
+
+/// Downgrade Skyrim SE to `mode` (a known build such as "1.6.1170"; any
+/// other value means 1.5.97). Every depot of the target build is applied, so
+/// the exe, master files and BSAs match. Returns `NEEDS_DEPOT_DOWNLOAD` when
+/// the depots haven't been downloaded yet.
 #[tauri::command]
 pub async fn downgrade_skyrim(
     game_id: String,
     bottle_name: String,
-    _mode: String,
+    mode: String,
 ) -> Result<DowngradeStatus, String> {
     if game_id != "skyrimse" {
         return Err("Downgrade is only available for Skyrim SE".to_string());
@@ -2729,38 +2818,26 @@ pub async fn downgrade_skyrim(
 
     let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
     let game_path = PathBuf::from(&game.game_path);
+    let build = downgrader::downgrade_target(Some(&mode));
 
     let status = {
         let game_id = game_id.clone();
         let game_path = game_path.clone();
         tokio::task::spawn_blocking(move || -> Result<DowngradeStatus, String> {
-            // A cached v1.5.97 exe can be swapped in directly.
-            let cached = downgrader::list_cached_versions(&game_id);
-            if let Some(se) = cached.iter().find(|c| c.version.starts_with("1.5.97")) {
-                let version = se.version.clone();
-                return downgrader::swap_to_version(&game_path, &game_id, &version)
-                    .map_err(|e| e.to_string());
-            }
-
-            // A depot download already on disk can be applied.
-            for steam_dir in downgrader::depot_search_dirs(&bottle.path) {
-                if let Some(depot_exe) = downgrader::check_depot_downloaded(
-                    &steam_dir,
-                    downgrader::SKYRIM_APP_ID,
-                    downgrader::SKYRIM_DEPOT_ID,
-                ) {
-                    return downgrader::apply_depot_downgrade(&game_path, &depot_exe, &game_id)
-                        .map_err(|e| e.to_string());
+            match apply_full_downgrade_for(&bottle, &game_path, &game_id, build) {
+                Ok(status) => Ok(status),
+                Err(reason) if reason.contains("hasn't been downloaded") => {
+                    log::info!("Downgrade to {} needs a depot download: {}", build.version, reason);
+                    Err("NEEDS_DEPOT_DOWNLOAD".to_string())
                 }
+                Err(reason) => Err(reason),
             }
-
-            Err("NEEDS_DEPOT_DOWNLOAD".to_string())
         })
         .await
         .map_err(crate::format_join_error)??
     };
 
-    // The v1.5.97 exe needs the matching SKSE build.
+    // The new exe needs the matching SKSE build.
     if status.is_downgraded && skse::get_skse_preference(&game_id, &bottle_name) {
         match skse::install_skse_auto(&game_path, &status.current_version).await {
             Ok(skse_status) => log::info!(
@@ -2778,42 +2855,47 @@ pub async fn downgrade_skyrim(
 pub async fn get_depot_download_command(
     game_id: String,
     bottle_name: String,
+    target: Option<String>,
 ) -> Result<downgrader::DepotDownloadInfo, String> {
     tokio::task::spawn_blocking(move || {
         let (bottle, _, _) = resolve_game(&game_id, &bottle_name)?;
-        downgrader::get_depot_download_info(&game_id, &bottle.path).map_err(|e| e.to_string())
+        downgrader::get_depot_download_info(&game_id, &bottle, target.as_deref())
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(crate::format_join_error)?
 }
 
 #[tauri::command]
-pub async fn start_depot_download(game_id: String) -> Result<bool, String> {
+pub async fn start_depot_download(game_id: String, target: Option<String>) -> Result<bool, String> {
     tokio::task::spawn_blocking(move || {
         if game_id != "skyrimse" {
             return Err("Depot download only supported for Skyrim SE".into());
         }
-        downgrader::send_depot_command_to_steam()
+        downgrader::send_depot_command_to_steam(target.as_deref())
     })
     .await
     .map_err(crate::format_join_error)?
 }
 
+/// The exe depot path once every depot of the target build is downloaded
+/// and settled, else `None`.
 #[tauri::command]
-pub async fn check_depot_ready(game_id: String, bottle_name: String) -> Result<Option<String>, String> {
+pub async fn check_depot_ready(
+    game_id: String,
+    bottle_name: String,
+    target: Option<String>,
+) -> Result<Option<String>, String> {
     tokio::task::spawn_blocking(move || {
         let (bottle, _, _) = resolve_game(&game_id, &bottle_name)?;
-
-        Ok(downgrader::depot_search_dirs(&bottle.path)
-            .into_iter()
-            .find_map(|steam_dir| {
-                downgrader::check_depot_downloaded(
-                    &steam_dir,
-                    downgrader::SKYRIM_APP_ID,
-                    downgrader::SKYRIM_DEPOT_ID,
-                )
-            })
-            .map(|p| p.to_string_lossy().into_owned()))
+        let build = downgrader::downgrade_target(target.as_deref());
+        match downgrader::full_depot_set_ready(&downgrader::depot_search_dirs(&bottle), build) {
+            Ok(dirs) => Ok(dirs.last().map(|d| d.to_string_lossy().into_owned())),
+            Err(reason) => {
+                log::debug!("Depots for {} not ready: {}", build.version, reason);
+                Ok(None)
+            }
+        }
     })
     .await
     .map_err(crate::format_join_error)?
@@ -2823,27 +2905,30 @@ pub async fn check_depot_ready(game_id: String, bottle_name: String) -> Result<O
 pub async fn apply_downgrade_cmd(
     game_id: String,
     bottle_name: String,
+    target: Option<String>,
 ) -> Result<DowngradeStatus, String> {
     tokio::task::spawn_blocking(move || {
         let (bottle, game, _) = resolve_game(&game_id, &bottle_name)?;
+        let build = downgrader::downgrade_target(target.as_deref());
+        apply_full_downgrade_for(&bottle, Path::new(&game.game_path), &game_id, build)
+    })
+    .await
+    .map_err(crate::format_join_error)?
+}
+
+/// Undo a full downgrade: put back every file it replaced.
+#[tauri::command]
+pub async fn restore_downgrade_cmd(
+    game_id: String,
+    bottle_name: String,
+) -> Result<DowngradeStatus, String> {
+    tokio::task::spawn_blocking(move || {
+        let (_, game, _) = resolve_game(&game_id, &bottle_name)?;
         let game_path = PathBuf::from(&game.game_path);
-
-        let depot_exe = downgrader::depot_search_dirs(&bottle.path)
-            .into_iter()
-            .find_map(|steam_dir| {
-                downgrader::check_depot_downloaded(
-                    &steam_dir,
-                    downgrader::SKYRIM_APP_ID,
-                    downgrader::SKYRIM_DEPOT_ID,
-                )
-            })
-            .ok_or_else(|| {
-                "Depot files not downloaded yet. Run download_depot in Steam console first."
-                    .to_string()
-            })?;
-
-        downgrader::apply_depot_downgrade(&game_path, &depot_exe, &game_id)
-            .map_err(|e| e.to_string())
+        let backup = downgrader::full_downgrade_backup(&game_path, &game_id)
+            .ok_or_else(|| "No downgrade backup exists for this install".to_string())?;
+        downgrader::restore_full_downgrade(&backup).map_err(|e| e.to_string())?;
+        downgrader::detect_skyrim_version(&game_path).map_err(|e| e.to_string())
     })
     .await
     .map_err(crate::format_join_error)?

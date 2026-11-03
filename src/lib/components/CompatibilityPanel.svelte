@@ -146,7 +146,7 @@
           {#if skseStatus.installed}
             <span class="compat-label">SKSE:</span>
             <span class="compat-value">
-              {skseStatus.version ? `v${skseStatus.version}` : "Installed (version unknown)"}
+              {skseStatus.version ? `v${skseStatus.version}` : "Installed (version unknown)"}{skseStatus.runtime ? ` (for Skyrim ${skseStatus.runtime})` : ""}
             </span>
           {:else}
             <span class="compat-label">SKSE:</span>

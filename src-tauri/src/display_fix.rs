@@ -13,7 +13,10 @@
 //! - **SteamOS/Steam Deck**: Detects Gamescope resolution or defaults to 1280x800.
 //!
 //! The fix applies three changes:
-//! 1. **SkyrimPrefs.ini**: Set detected resolution + `bFull Screen=1`
+//! 1. **SkyrimPrefs.ini**: Repair an unusable resolution, keeping the user's
+//!    display mode (fullscreen, borderless, or SSE Display Tweaks); a plain
+//!    bordered window becomes `bFull Screen=1`. The manual "Fix Display"
+//!    action forces exclusive fullscreen at the screen resolution.
 //! 2. **Wine registry**: Remove virtual desktop settings that force windowed mode
 //! 3. **Wine registry**: Configure display capture + mouse warping for proper input
 
@@ -32,7 +35,7 @@ use crate::bottles::Bottle;
 // Types
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisplaySettings {
     pub width: u32,
     pub height: u32,
@@ -1011,41 +1014,34 @@ pub fn read_display_settings(prefs_path: &Path) -> Result<DisplaySettings, Strin
     })
 }
 
-/// Apply display fix: set resolution to the detected screen resolution in
-/// exclusive fullscreen mode (`bFull Screen=1, bBorderless=0`).
+/// Write display settings to the `[Display]` section of SkyrimPrefs.ini.
 ///
-/// Exclusive fullscreen is required for Wine to properly capture input and
-/// hide the macOS cursor. Borderless mode leaves Wine in windowed mode with
-/// no input grab and a visible OS cursor.
-pub fn fix_display_settings(
+/// For exclusive fullscreen also sets `bConstrainCursor=1`, which keeps the
+/// cursor from reaching the screen edge where macOS shows the Dock and breaks
+/// through Wine's display capture.
+pub fn write_display_settings(
     prefs_path: &Path,
-    width: u32,
-    height: u32,
+    target: &DisplaySettings,
 ) -> Result<DisplaySettings, String> {
     let content = fs::read_to_string(prefs_path)
         .map_err(|e| format!("Failed to read {}: {}", prefs_path.display(), e))?;
 
+    let flag = |b: bool| if b { "1" } else { "0" };
     let mut updated = content.clone();
-    updated = set_ini_display_value(&updated, "iSize W", &width.to_string());
-    updated = set_ini_display_value(&updated, "iSize H", &height.to_string());
-    updated = set_ini_display_value(&updated, "bFull Screen", "1");
-    updated = set_ini_display_value(&updated, "bBorderless", "0");
-    // Constrain cursor to the game window — prevents the cursor from reaching
-    // the very bottom edge of the screen where macOS triggers Dock auto-show,
-    // which breaks through Wine's display capture and makes the OS cursor visible.
-    updated = set_ini_display_value(&updated, "bConstrainCursor", "1");
+    updated = set_ini_display_value(&updated, "iSize W", &target.width.to_string());
+    updated = set_ini_display_value(&updated, "iSize H", &target.height.to_string());
+    updated = set_ini_display_value(&updated, "bFull Screen", flag(target.fullscreen));
+    updated = set_ini_display_value(&updated, "bBorderless", flag(target.borderless));
+    if target.fullscreen {
+        updated = set_ini_display_value(&updated, "bConstrainCursor", "1");
+    }
 
     // Write via temp file + rename for atomicity
     let temp_path = prefs_path.with_extension("ini.tmp");
     fs::write(&temp_path, &updated).map_err(|e| format!("Failed to write temp file: {}", e))?;
     fs::rename(&temp_path, prefs_path).map_err(|e| format!("Failed to rename temp file: {}", e))?;
 
-    Ok(DisplaySettings {
-        width,
-        height,
-        fullscreen: true,
-        borderless: false,
-    })
+    Ok(target.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -1191,39 +1187,66 @@ fn remove_registry_key(content: &str, section_header: &str, key_name: &str) -> S
 // Full pipeline
 // ---------------------------------------------------------------------------
 
+/// Whether a user.reg line is the header of `section`. Headers carry a
+/// trailing timestamp: `[Software\\Wine\\Mac Driver] 1730000000`.
+fn is_registry_section_header(line: &str, section: &str) -> bool {
+    let line = line.trim_start();
+    match (line.get(..section.len()), line.get(section.len()..)) {
+        (Some(head), Some(rest)) => {
+            head.eq_ignore_ascii_case(section) && (rest.is_empty() || rest.starts_with(' '))
+        }
+        _ => false,
+    }
+}
+
 /// Set a registry key in user.reg, creating the section if needed.
+///
+/// The key is looked up only inside `section` (the same value name appears
+/// under several driver keys), and the content is left byte-identical when
+/// the value is already set, so callers can detect "no change".
 fn set_registry_value(content: &mut String, section: &str, key: &str, value: &str) {
     let entry = format!("\"{}\"=\"{}\"", key, value);
-    let key_prefix = format!("\"{}\"", key);
+    let key_prefix = format!("\"{}\"=", key).to_ascii_lowercase();
 
-    if content.contains(section) {
-        if content.contains(&key_prefix) {
-            // Replace existing value
-            let mut replaced = false;
-            *content = content
-                .lines()
-                .map(|line| {
-                    if !replaced && line.trim().starts_with(&key_prefix) {
-                        replaced = true;
-                        entry.clone()
-                    } else {
-                        line.to_string()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-        } else {
-            // Add after section header
-            if let Some(pos) = content.find(section) {
-                let after = pos + section.len();
-                if let Some(nl) = content[after..].find('\n') {
-                    let insert = after + nl + 1;
-                    content.insert_str(insert, &format!("{}\n", entry));
-                }
-            }
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let Some(header) = lines
+        .iter()
+        .position(|l| is_registry_section_header(l, section))
+    else {
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
         }
-    } else {
         content.push_str(&format!("\n{}\n{}\n", section, entry));
+        return;
+    };
+    let end = lines[header + 1..]
+        .iter()
+        .position(|l| l.starts_with('['))
+        .map_or(lines.len(), |i| header + 1 + i);
+
+    let existing = (header + 1..end).find(|&i| {
+        lines[i]
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with(&key_prefix)
+    });
+    match existing {
+        Some(i) if lines[i].trim() == entry => return,
+        Some(i) => lines[i] = entry,
+        None => {
+            // After the header's `#time=` / `#arch=` metadata lines.
+            let mut at = header + 1;
+            while at < end && lines[at].starts_with('#') {
+                at += 1;
+            }
+            lines.insert(at, entry);
+        }
+    }
+
+    let trailing_newline = content.ends_with('\n');
+    *content = lines.join("\n");
+    if trailing_newline {
+        content.push('\n');
     }
 }
 
@@ -1431,14 +1454,179 @@ fn detect_gpu_name() -> String {
     String::new()
 }
 
-/// Full pipeline: detect resolution, find prefs, fix INI + Wine registry.
+// ---------------------------------------------------------------------------
+// SSE Display Tweaks
+// ---------------------------------------------------------------------------
+
+/// Display-mode settings from SSE Display Tweaks
+/// (`Data/SKSE/Plugins/SSEDisplayTweaks.ini`), which overrides the game's own
+/// `SkyrimPrefs.ini` display mode at runtime. `None` = key absent/commented.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DisplayTweaks {
+    pub fullscreen: Option<bool>,
+    pub borderless: Option<bool>,
+    pub borderless_upscale: Option<bool>,
+}
+
+impl DisplayTweaks {
+    /// The user picked borderless (optionally upscaled) through Display Tweaks.
+    fn wants_borderless(&self) -> bool {
+        self.borderless == Some(true) || self.borderless_upscale == Some(true)
+    }
+}
+
+fn parse_ini_bool(v: &str) -> Option<bool> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// Parse the display keys of an SSEDisplayTweaks.ini. Section-agnostic
+/// (they live under `[Render]`), case-insensitive, `#`/`;` comments ignored.
+pub fn parse_display_tweaks(content: &str) -> DisplayTweaks {
+    let mut tweaks = DisplayTweaks::default();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.starts_with(';') || line.starts_with('[') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.split(['#', ';']).next().unwrap_or("");
+        let slot = match key.trim().to_ascii_lowercase().as_str() {
+            "fullscreen" => &mut tweaks.fullscreen,
+            "borderless" => &mut tweaks.borderless,
+            "borderlessupscale" => &mut tweaks.borderless_upscale,
+            _ => continue,
+        };
+        if let Some(b) = parse_ini_bool(value) {
+            *slot = Some(b);
+        }
+    }
+    tweaks
+}
+
+/// Read SSE Display Tweaks settings from a game's `Data` directory. The
+/// optional `SSEDisplayTweaks_Custom.ini` (user overrides) takes precedence.
+/// Returns `None` when Display Tweaks is not installed.
+pub fn read_display_tweaks(data_dir: &Path) -> Option<DisplayTweaks> {
+    let plugins = crate::fs_ci::find_dir_ci(data_dir, "skse")
+        .and_then(|skse| crate::fs_ci::find_dir_ci(&skse, "plugins"))?;
+    let base = find_file_ci(&plugins, "ssedisplaytweaks.ini")
+        .and_then(|p| fs::read_to_string(p).ok())?;
+    let mut tweaks = parse_display_tweaks(&base);
+    if let Some(custom) = find_file_ci(&plugins, "ssedisplaytweaks_custom.ini")
+        .and_then(|p| fs::read_to_string(p).ok())
+    {
+        let over = parse_display_tweaks(&custom);
+        tweaks.fullscreen = over.fullscreen.or(tweaks.fullscreen);
+        tweaks.borderless = over.borderless.or(tweaks.borderless);
+        tweaks.borderless_upscale = over.borderless_upscale.or(tweaks.borderless_upscale);
+    }
+    Some(tweaks)
+}
+
+// ---------------------------------------------------------------------------
+// Pre-launch decision
+// ---------------------------------------------------------------------------
+
+/// Decide the `SkyrimPrefs.ini` display settings to launch with.
 ///
-/// 1. Detects correct resolution for the platform and bottle's Retina setting
-/// 2. Sets SkyrimPrefs.ini to detected resolution in exclusive fullscreen
-/// 3. Removes Wine virtual desktop to allow true fullscreen
-/// 4. Configures mouse capture and display capture for proper input
-/// 5. Fixes GPU device name in Bethesda INI files
-pub fn auto_fix_display(bottle: &Bottle) -> Result<DisplayFixResult, String> {
+/// The user's display mode is kept whenever they chose one: exclusive
+/// fullscreen, borderless (`bBorderless=1`), or any explicit mode in SSE
+/// Display Tweaks (`Borderless`/`BorderlessUpscale=true`, or
+/// `Fullscreen=false`). In those cases only an unusable resolution (zero, or
+/// larger than the screen — usually stale from another display) is replaced
+/// with the screen resolution.
+///
+/// Only a plain bordered window with no Display Tweaks choice is switched to
+/// exclusive fullscreen: under Wine that mode has no input grab and shows the
+/// host cursor over the game.
+pub fn decide_display_target(
+    previous: &DisplaySettings,
+    screen: (u32, u32),
+    tweaks: Option<&DisplayTweaks>,
+) -> DisplaySettings {
+    let (screen_w, screen_h) = screen;
+    let resolution_invalid = previous.width == 0
+        || previous.height == 0
+        || previous.width > screen_w
+        || previous.height > screen_h;
+    let (width, height) = if resolution_invalid {
+        (screen_w, screen_h)
+    } else {
+        (previous.width, previous.height)
+    };
+
+    let user_chose_mode = previous.fullscreen
+        || previous.borderless
+        || tweaks.is_some_and(|t| t.wants_borderless() || t.fullscreen == Some(false));
+
+    if user_chose_mode {
+        DisplaySettings {
+            width,
+            height,
+            ..previous.clone()
+        }
+    } else {
+        DisplaySettings {
+            width,
+            height,
+            fullscreen: true,
+            borderless: false,
+        }
+    }
+}
+
+/// Exclusive fullscreen at the screen resolution (the manual "Fix Display"
+/// action).
+fn exclusive_fullscreen_target(screen: (u32, u32)) -> DisplaySettings {
+    DisplaySettings {
+        width: screen.0,
+        height: screen.1,
+        fullscreen: true,
+        borderless: false,
+    }
+}
+
+/// Pre-launch display fix: Wine registry fixes plus a `SkyrimPrefs.ini`
+/// correction that respects the user's display mode (see
+/// [`decide_display_target`]). `data_dir` is the game's `Data` directory,
+/// used to read SSE Display Tweaks.
+///
+/// `fixed` in the result is true only when `SkyrimPrefs.ini` was changed.
+pub fn auto_fix_display(
+    bottle: &Bottle,
+    data_dir: Option<&Path>,
+) -> Result<DisplayFixResult, String> {
+    let tweaks = data_dir.and_then(read_display_tweaks);
+    if let Some(t) = &tweaks {
+        debug!("SSE Display Tweaks settings: {:?}", t);
+    }
+    apply_display_fix(bottle, |previous, screen| {
+        decide_display_target(previous, screen, tweaks.as_ref())
+    })
+}
+
+/// Manual "Fix Display": force exclusive fullscreen at the screen resolution,
+/// plus the same Wine registry fixes as [`auto_fix_display`].
+pub fn force_exclusive_fullscreen(bottle: &Bottle) -> Result<DisplayFixResult, String> {
+    apply_display_fix(bottle, |_, screen| exclusive_fullscreen_target(screen))
+}
+
+/// Shared pipeline:
+/// 1. Detects the screen resolution for the platform and bottle's Retina setting
+/// 2. Removes Wine virtual desktop to allow true fullscreen
+/// 3. Configures mouse capture and display capture for proper input
+/// 4. Fixes GPU device name in Bethesda INI files
+/// 5. Writes the `target` display settings to SkyrimPrefs.ini if they differ
+fn apply_display_fix(
+    bottle: &Bottle,
+    target: impl FnOnce(&DisplaySettings, (u32, u32)) -> DisplaySettings,
+) -> Result<DisplayFixResult, String> {
     let (screen_w, screen_h) = detect_screen_resolution(bottle)?;
 
     let prefs_path = find_skyrim_prefs(bottle)
@@ -1446,7 +1634,6 @@ pub fn auto_fix_display(bottle: &Bottle) -> Result<DisplayFixResult, String> {
 
     let previous = read_display_settings(&prefs_path)?;
 
-    // Always attempt Wine registry fixes
     if let Err(e) = disable_wine_virtual_desktop(bottle) {
         warn!("Could not disable Wine virtual desktop: {}", e);
     }
@@ -1471,20 +1658,16 @@ pub fn auto_fix_display(bottle: &Bottle) -> Result<DisplayFixResult, String> {
         }
     }
 
-    // Check if INI fix is needed (target is exclusive fullscreen)
-    let ini_already_correct = previous.width == screen_w
-        && previous.height == screen_h
-        && previous.fullscreen
-        && !previous.borderless;
-
-    let applied = if ini_already_correct {
-        previous.clone()
+    let wanted = target(&previous, (screen_w, screen_h));
+    let fixed = wanted != previous;
+    let applied = if fixed {
+        write_display_settings(&prefs_path, &wanted)?
     } else {
-        fix_display_settings(&prefs_path, screen_w, screen_h)?
+        previous.clone()
     };
 
     Ok(DisplayFixResult {
-        fixed: true, // Always report fixed since we also fix Wine registry
+        fixed,
         prefs_path: prefs_path.to_string_lossy().into_owned(),
         previous,
         applied,
@@ -2035,5 +2218,176 @@ Geometry: 0,0 2560x1600
         assert!(!result.contains("1024x768"));
         assert!(result.contains("Mac Driver"));
         assert!(result.contains("RetinaMode"));
+    }
+
+    // --- Pre-launch display decision ---
+
+    fn ds(width: u32, height: u32, fullscreen: bool, borderless: bool) -> DisplaySettings {
+        DisplaySettings {
+            width,
+            height,
+            fullscreen,
+            borderless,
+        }
+    }
+
+    const SCREEN: (u32, u32) = (1800, 1169);
+
+    #[test]
+    fn decide_keeps_user_borderless() {
+        let prev = ds(1800, 1169, false, true);
+        assert_eq!(decide_display_target(&prev, SCREEN, None), prev);
+        // A smaller borderless window is a valid choice too.
+        let prev = ds(1280, 720, false, true);
+        assert_eq!(decide_display_target(&prev, SCREEN, None), prev);
+    }
+
+    #[test]
+    fn decide_keeps_display_tweaks_borderless_upscale() {
+        // The reporter's setup: windowed prefs, Display Tweaks borderless +
+        // upscale. Exclusive fullscreen crashes there, so it must stay.
+        let tweaks = parse_display_tweaks(
+            "[Render]\n#Fullscreen=false\nBorderless=true\nBorderlessUpscale=true\n",
+        );
+        assert_eq!(tweaks.borderless_upscale, Some(true));
+        assert_eq!(tweaks.fullscreen, None, "commented key must be ignored");
+        let prev = ds(1280, 720, false, false);
+        assert_eq!(decide_display_target(&prev, SCREEN, Some(&tweaks)), prev);
+
+        let upscale_only = parse_display_tweaks("BorderlessUpscale = TRUE ; comment\n");
+        assert_eq!(decide_display_target(&prev, SCREEN, Some(&upscale_only)), prev);
+
+        let windowed = parse_display_tweaks("[Render]\nFullscreen=false\nBorderless=false\n");
+        assert_eq!(decide_display_target(&prev, SCREEN, Some(&windowed)), prev);
+    }
+
+    #[test]
+    fn decide_repairs_only_stale_resolution() {
+        // Borderless at a resolution from a bigger monitor: fix size, keep mode.
+        let prev = ds(3840, 2160, false, true);
+        assert_eq!(
+            decide_display_target(&prev, SCREEN, None),
+            ds(1800, 1169, false, true)
+        );
+        // Missing size keys read as 0.
+        let prev = ds(0, 0, true, false);
+        assert_eq!(
+            decide_display_target(&prev, SCREEN, None),
+            ds(1800, 1169, true, false)
+        );
+        // Valid exclusive fullscreen at a lower resolution is left alone.
+        let prev = ds(1440, 900, true, false);
+        assert_eq!(decide_display_target(&prev, SCREEN, None), prev);
+    }
+
+    #[test]
+    fn decide_converts_plain_window_to_fullscreen() {
+        let prev = ds(1280, 720, false, false);
+        assert_eq!(
+            decide_display_target(&prev, SCREEN, None),
+            ds(1280, 720, true, false)
+        );
+        // Display Tweaks installed but no display-mode choice made.
+        let neutral = parse_display_tweaks("[Render]\nEnableVsync=true\n");
+        assert_eq!(
+            decide_display_target(&prev, SCREEN, Some(&neutral)),
+            ds(1280, 720, true, false)
+        );
+    }
+
+    #[test]
+    fn decide_is_idempotent() {
+        let tweaks = parse_display_tweaks("Borderless=true\n");
+        for prev in [
+            ds(1280, 720, false, false),
+            ds(3840, 2160, false, true),
+            ds(1800, 1169, true, false),
+        ] {
+            let once = decide_display_target(&prev, SCREEN, None);
+            assert_eq!(decide_display_target(&once, SCREEN, None), once);
+            let once = decide_display_target(&prev, SCREEN, Some(&tweaks));
+            assert_eq!(decide_display_target(&once, SCREEN, Some(&tweaks)), once);
+        }
+    }
+
+    #[test]
+    fn read_display_tweaks_case_insensitive_with_custom_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(read_display_tweaks(tmp.path()).is_none());
+        let plugins = tmp.path().join("skse").join("Plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        fs::write(
+            plugins.join("SSEDisplayTweaks.ini"),
+            "[Render]\nBorderless=false\nBorderlessUpscale=false\n",
+        )
+        .unwrap();
+        let t = read_display_tweaks(tmp.path()).unwrap();
+        assert!(!t.wants_borderless());
+        fs::write(
+            plugins.join("SSEDisplayTweaks_Custom.ini"),
+            "[Render]\nBorderlessUpscale=true\n",
+        )
+        .unwrap();
+        let t = read_display_tweaks(tmp.path()).unwrap();
+        assert_eq!(t.borderless, Some(false));
+        assert_eq!(t.borderless_upscale, Some(true));
+        assert!(t.wants_borderless());
+    }
+
+    #[test]
+    fn write_display_settings_round_trips_borderless() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prefs = tmp.path().join("SkyrimPrefs.ini");
+        fs::write(&prefs, SAMPLE_INI).unwrap();
+        let target = ds(1800, 1169, false, true);
+        write_display_settings(&prefs, &target).unwrap();
+        assert_eq!(read_display_settings(&prefs).unwrap(), target);
+        let content = fs::read_to_string(&prefs).unwrap();
+        assert!(!content.contains("bConstrainCursor"));
+        assert!(content.contains("[Audio]"));
+    }
+
+    // --- user.reg editing ---
+
+    const USER_REG: &str = "WINE REGISTRY Version 2\n;; All keys relative to \\\\User\n\n\
+[Software\\\\Wine\\\\DirectInput] 1730000000\n#time=1db1\n\"Other\"=\"1\"\n\n\
+[Software\\\\Wine\\\\X11 Driver] 1730000000\n#time=1db2\n\"MouseWarpOverride\"=\"enable\"\n";
+
+    #[test]
+    fn set_registry_value_is_section_scoped() {
+        let mut reg = USER_REG.to_string();
+        set_registry_value(&mut reg, "[Software\\\\Wine\\\\DirectInput]", "MouseWarpOverride", "force");
+        // Added to DirectInput, X11's own value untouched.
+        assert!(reg.contains("#time=1db1\n\"MouseWarpOverride\"=\"force\"\n\"Other\"=\"1\""), "{reg}");
+        assert!(reg.contains("[Software\\\\Wine\\\\X11 Driver] 1730000000\n#time=1db2\n\"MouseWarpOverride\"=\"enable\""), "{reg}");
+        assert!(reg.ends_with('\n'));
+
+        set_registry_value(&mut reg, "[Software\\\\Wine\\\\X11 Driver]", "MouseWarpOverride", "force");
+        assert_eq!(reg.matches("\"MouseWarpOverride\"=\"force\"").count(), 2, "{reg}");
+    }
+
+    #[test]
+    fn set_registry_value_no_change_when_already_set() {
+        let mut reg = USER_REG.to_string();
+        set_registry_value(&mut reg, "[Software\\\\Wine\\\\X11 Driver]", "MouseWarpOverride", "enable");
+        assert_eq!(reg, USER_REG);
+        set_registry_value(&mut reg, "[Software\\\\Wine\\\\Mac Driver]", "CaptureDisplaysForFullscreen", "Y");
+        assert!(reg.ends_with("\n[Software\\\\Wine\\\\Mac Driver]\n\"CaptureDisplaysForFullscreen\"=\"Y\"\n"), "{reg}");
+        let once = reg.clone();
+        set_registry_value(&mut reg, "[Software\\\\Wine\\\\Mac Driver]", "CaptureDisplaysForFullscreen", "Y");
+        assert_eq!(reg, once);
+    }
+
+    #[test]
+    fn fix_cursor_grab_reports_no_change_on_second_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("user.reg"), USER_REG).unwrap();
+        let bottle = Bottle {
+            name: "test".into(),
+            path: tmp.path().to_path_buf(),
+            source: "Wine".into(),
+        };
+        assert!(fix_cursor_grab(&bottle).unwrap().applied);
+        assert!(!fix_cursor_grab(&bottle).unwrap().applied);
     }
 }

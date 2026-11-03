@@ -1708,12 +1708,15 @@ pub async fn execute_tool(
         }
 
         "analyze_crash_log" => {
-            let log_path = args
-                .get("log_path")
+            // The model may echo a full path; only the file name is used and
+            // it is resolved inside the game's crash log directory.
+            let filename = args
+                .get("filename")
+                .or_else(|| args.get("log_path"))
                 .and_then(|p| p.as_str())
-                .unwrap_or("")
-                .to_string();
-            let r = match analyze_crash_log_cmd(log_path).await {
+                .map(|p| p.rsplit(['/', '\\']).next().unwrap_or(p).to_string())
+                .unwrap_or_default();
+            let r = match analyze_crash_log_cmd(gid.clone(), bn.clone(), filename).await {
                 Ok(report) => {
                     let diagnoses: Vec<String> = report
                         .diagnosis

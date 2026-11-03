@@ -194,10 +194,14 @@
   }
 
   async function toggleGameFixes() {
-    disableGameFixes = !disableGameFixes;
+    const next = !disableGameFixes;
     try {
-      await setConfigValue("disable_game_fixes", disableGameFixes ? "true" : "false");
-    } catch { /* best-effort */ }
+      await setConfigValue("disable_game_fixes", next ? "true" : "false");
+      disableGameFixes = next;
+    } catch (e: unknown) {
+      console.error("Failed to save launch fixes setting:", e);
+      showError(`Failed to save launch fixes setting: ${e}`);
+    }
   }
 
   async function handleFixDisplay() {
@@ -353,7 +357,7 @@
         try {
           const info = await getDepotDownloadCommand(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
           await navigator.clipboard.writeText(info.command);
-          showSuccess("Command copied! Paste it in the Steam console that opened.");
+          showSuccess("Commands copied. Paste each line into the Steam console that opened.");
         } catch (err) {
           console.error("depot command clipboard copy failed:", err);
         }
@@ -469,6 +473,23 @@
         Launch Game Directly
       </button>
       <div class="dropdown-divider"></div>
+      <button
+        class="dropdown-item"
+        onclick={(e) => { e.stopPropagation(); toggleGameFixes(); }}
+        title="Before launch: Wine cursor/input fixes, and repair SkyrimPrefs.ini display settings. Your fullscreen, borderless, or SSE Display Tweaks mode is kept."
+        role="menuitemcheckbox"
+        aria-checked={!disableGameFixes}
+      >
+        <span class="dropdown-check">
+          {#if !disableGameFixes}
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10 3L4.5 8.5L2 6" />
+            </svg>
+          {/if}
+        </span>
+        Apply display &amp; cursor fixes
+      </button>
+      <div class="dropdown-divider"></div>
       <div class="dropdown-info">
         {#if skse?.installed}
           SKSE {skse.version ?? ""} installed
@@ -574,7 +595,7 @@
         Skyrim SE {downgradeStatus.current_version}
         {#if downgradeStatus.current_version !== "1.5.97"} — Downgrade Available{/if}
       </p>
-      <p class="skse-banner-text">Most mods target v1.5.97.</p>
+      <p class="skse-banner-text">Some mods and collections need v1.5.97. Downgrading downloads about 13 GB through Steam and backs up the files it replaces.</p>
     </div>
     <div class="skse-banner-actions">
       <button class="btn btn-primary btn-sm" onclick={handleDowngrade} disabled={downgrading}>

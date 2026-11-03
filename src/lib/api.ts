@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Bottle,
+  BottleCrossOverInfo,
   BottleSettings,
   BottleSettingDef,
   DetectedGame,
@@ -355,6 +356,21 @@ export async function setConfigValue(
   return invoke("set_config_value", { key, value });
 }
 
+/** CrossOver installs on this Mac and the one `bottleName` launches with. */
+export async function getBottleCrossOverInfo(
+  bottleName: string
+): Promise<BottleCrossOverInfo> {
+  return invoke("get_bottle_crossover_info", { bottleName });
+}
+
+/** Pin a CrossOver bottle to an install (`.app` path), or `null` for automatic. */
+export async function setBottleCrossOverInstall(
+  bottleName: string,
+  appPath: string | null
+): Promise<void> {
+  return invoke("set_bottle_crossover_install", { bottleName, appPath });
+}
+
 export async function getNativeMode(): Promise<boolean> {
   return invoke<boolean>("get_native_mode");
 }
@@ -533,31 +549,65 @@ export async function downgradeSkyrim(
   return invoke("downgrade_skyrim", { gameId, bottleName, mode });
 }
 
+/** `target` is a Skyrim build such as "1.6.1170"; omitted means 1.5.97. */
 export async function getDepotDownloadCommand(
   gameId: string,
-  bottleName: string
+  bottleName: string,
+  target?: string
 ): Promise<DepotDownloadInfo> {
-  return invoke("get_depot_download_command", { gameId, bottleName });
+  return invoke("get_depot_download_command", { gameId, bottleName, target: target ?? null });
 }
 
 export async function startDepotDownload(
-  gameId: string
+  gameId: string,
+  target?: string
 ): Promise<boolean> {
-  return invoke("start_depot_download", { gameId });
+  return invoke("start_depot_download", { gameId, target: target ?? null });
 }
 
+/** Non-null once every depot of the target build is downloaded. */
 export async function checkDepotReady(
   gameId: string,
-  bottleName: string
+  bottleName: string,
+  target?: string
 ): Promise<string | null> {
-  return invoke("check_depot_ready", { gameId, bottleName });
+  return invoke("check_depot_ready", { gameId, bottleName, target: target ?? null });
 }
 
 export async function applyDowngrade(
   gameId: string,
+  bottleName: string,
+  target?: string
+): Promise<DowngradeStatus> {
+  return invoke("apply_downgrade_cmd", { gameId, bottleName, target: target ?? null });
+}
+
+/** Undo a full downgrade, restoring every file it replaced. */
+export async function restoreDowngrade(
+  gameId: string,
   bottleName: string
 ): Promise<DowngradeStatus> {
-  return invoke("apply_downgrade_cmd", { gameId, bottleName });
+  return invoke("restore_downgrade_cmd", { gameId, bottleName });
+}
+
+export interface SkyrimBuildInfo {
+  game_version: string;
+  app_id: number;
+  /** [depot_id, manifest_id] for each of the build's three depots. */
+  depots: [number, string][];
+}
+
+export async function ddSkyrimBuilds(): Promise<SkyrimBuildInfo[]> {
+  return invoke("dd_skyrim_builds");
+}
+
+/** Apply a Skyrim build whose three depots were downloaded with DepotDownloader. */
+export async function ddApplySkyrimBuild(
+  gameId: string,
+  bottleName: string,
+  target: string
+): Promise<DowngradeStatus> {
+  return invoke("dd_apply_skyrim_build", { gameId, bottleName, target });
 }
 
 export async function listGameVersions(
@@ -1189,10 +1239,14 @@ export async function findCrashLogs(
   return invoke("find_crash_logs_cmd", { gameId, bottleName });
 }
 
+/** Analyze a crash log by the `filename` from `findCrashLogs`; the backend
+ * resolves it inside the game's script-extender log directory. */
 export async function analyzeCrashLog(
-  logPath: string
+  gameId: string,
+  bottleName: string,
+  filename: string
 ): Promise<CrashReport> {
-  return invoke("analyze_crash_log_cmd", { logPath });
+  return invoke("analyze_crash_log_cmd", { gameId, bottleName, filename });
 }
 
 // NexusMods Browse
