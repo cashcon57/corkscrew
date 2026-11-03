@@ -1788,92 +1788,102 @@ pub fn fix_skse_plugin_conflicts(
 }
 
 // ---------------------------------------------------------------------------
-// EngineFixes Wine compatibility
+// Retired SSE Engine Fixes for Wine: migration back to stock Engine Fixes
 // ---------------------------------------------------------------------------
+//
+// Corkscrew used to deploy a Wine fork of SSE Engine Fixes
+// (cashcon57/SSEEngineFixesForWine), because the stock d3dx9_42.dll
+// preloader crashed under Wine. Depending on the version, Corkscrew
+// downloaded `0_SSEEngineFixesForWine.dll` into `Data/SKSE/Plugins`, renamed
+// the stock `EngineFixes.dll` / `d3dx9_42.dll` to `.disabled` (in Data, the
+// game root and every mod's staging folder) or withheld them from the
+// deployment, and switched every patch in `EngineFixes.toml` off.
+//
+// The fork was retired on 2026-11-03: stock Engine Fixes 7.0.21+ (which uses
+// SKSE's preloader on Skyrim 1.7+) loads under Wine/CrossOver/NotProton with
+// every patch, including the TBB memory manager, and the fork only ever
+// supported Skyrim 1.6.1170. [`migrate_from_engine_fixes_wine`] undoes all of
+// the above after every deploy and before launch; on an install the fork
+// never touched it finds nothing to do and changes nothing.
 
-/// Stock SSE Engine Fixes files that crash under Wine and are replaced by
-/// SSE Engine Fixes for Wine: `(relative_path, deploy_target)`.
-///
-/// 1. `SKSE/Plugins/EngineFixes.dll` (Data) — the original SKSE plugin; it
-///    also force-closes the game when its preloader is missing.
-/// 2. `d3dx9_42.dll` (game root) — the preloader, which hooks during DLL load
-///    and crashes Wine ~63s into launch.
+/// Stock SSE Engine Fixes files that older versions renamed or withheld:
+/// `(relative_path, deploy_target)`.
 const STOCK_ENGINE_FIXES_FILES: &[(&str, &str)] = &[
     ("SKSE/Plugins/EngineFixes.dll", "data"),
     ("d3dx9_42.dll", "root"),
 ];
 
-/// The stock Engine Fixes config. Patched (deployed copy only) while the Wine
-/// fork is active; re-linked from staging when it isn't.
+/// The stock Engine Fixes config, which older versions patched.
 const STOCK_ENGINE_FIXES_TOML: (&str, &str) = ("SKSE/Plugins/EngineFixes.toml", "data");
 
-/// Skyrim runtimes the Wine fork's SKSE plugin declares compatibility with.
-/// Must match `CompatibleVersions` in SSEEngineFixesForWine `src/main.cpp`
-/// (currently `RUNTIME_SSE_1_6_1170` only). SKSE refuses to load the fork on
-/// any other runtime — notably 1.7.x, which also rejects the stock plugin.
-const ENGINE_FIXES_WINE_SUPPORTED_RUNTIMES: &[&str] = &["1.6.1170"];
+/// Files Corkscrew's fork installer put in `Data/SKSE/Plugins`: the plugin,
+/// its pre-1.3.0 name, its default config and Corkscrew's version marker.
+/// The fork wrote its logs to the SKSE log folder, not Data.
+const LEGACY_WINE_FORK_FILES: &[&str] = &[
+    "0_SSEEngineFixesForWine.dll",
+    "SSEEngineFixesForWine.dll",
+    "SSEEngineFixesForWine.toml",
+    "SSEEngineFixesForWine.version",
+];
 
-/// Whether the Wine fork can load on the given Skyrim runtime version
-/// (as reported by [`downgrader::detect_skyrim_version`], e.g. `1.6.1170`).
-pub fn engine_fixes_wine_supports_runtime(version: &str) -> bool {
-    let version = version.trim();
-    ENGINE_FIXES_WINE_SUPPORTED_RUNTIMES.iter().any(|v| {
-        version == *v
-            || version
-                .strip_prefix(v)
-                .is_some_and(|rest| rest.starts_with('.') || rest.starts_with(' '))
-    })
-}
+/// Settings that are on in the stock `EngineFixes.toml` and that the old Wine
+/// patch always switched off (alongside setting `bDisableTBB = true`). All of
+/// them off together with TBB disabled identifies a config Corkscrew patched;
+/// nobody tunes Engine Fixes that way by hand.
+const LEGACY_WINE_TOML_SIGNATURE: &[&str] = &[
+    "bOverrideMemoryManager",
+    "bOverrideScrapHeap",
+    "bReplaceImports",
+    "bFormCaching",
+    "bMaxStdIO",
+    "bSafeExit",
+    "bMemoryAccessErrors",
+];
 
-/// Detect the Skyrim runtime version for Engine Fixes gating. `None` when the
-/// executable can't be found or classified.
-pub fn skyrim_runtime_version(game_path: &Path) -> Option<String> {
-    downgrader::detect_skyrim_version(game_path)
-        .map(|s| s.current_version)
-        .map_err(|e| debug!("Engine Fixes: could not detect Skyrim version: {}", e))
-        .ok()
-}
-
-/// What [`prepare_engine_fixes`] decided and did.
+/// What [`migrate_from_engine_fixes_wine`] found and did.
 #[derive(Debug, Default, Clone)]
-pub struct EngineFixesPlan {
-    /// The caller should now deploy SSE Engine Fixes for Wine
-    /// (`install_engine_fixes_wine{,_blocking}`).
-    pub install_wine_fork: bool,
-    /// Informational: which stock files were withheld or restored this run.
-    pub notice: Option<String>,
-    /// User-actionable problem (e.g. unsupported game runtime).
-    pub warning: Option<String>,
+pub struct EngineFixesMigration {
+    /// Something the user has to fix (e.g. reinstall Engine Fixes).
+    pub warnings: Vec<String>,
+    /// Informational: what was removed or restored this run.
+    pub notices: Vec<String>,
 }
 
-/// Apply the "SSE Engine Fixes for Wine" option to the current deployment.
+impl EngineFixesMigration {
+    /// User-facing messages, warnings first.
+    pub fn into_messages(self) -> Vec<String> {
+        let mut messages = self.warnings;
+        messages.extend(self.notices);
+        messages
+    }
+}
+
+/// Undo everything the retired SSE Engine Fixes for Wine integration changed,
+/// so the stock SSE Engine Fixes is deployed exactly as its mod ships it.
 ///
-/// Called after every deploy and before launch so the deployed state never
-/// depends on which code path ran last. Staging is never modified.
+/// Runs after deploys and before launch (callers hold the deploy context);
+/// it is idempotent and only touches files the integration created or
+/// changed:
 ///
-/// - **Option on + supported runtime (1.6.1170, macOS):** the stock
-///   `EngineFixes.dll` and `d3dx9_42.dll` preloader are withheld from the
-///   deployment (deployed copies removed, manifest rows dropped; staging
-///   intact). The caller then installs the Wine fork.
-/// - **Option on + unsupported/unknown runtime:** the fork can't load, so
-///   nothing is withheld or installed and a warning is returned.
-/// - **Option off (or Linux, where the fork isn't needed):** the fork DLL is
-///   removed and the stock files are re-deployed from their mod's staging
-///   copy, so turning the option off restores stock behaviour.
+/// - `.disabled` renames of `EngineFixes.dll` / `d3dx9_42.dll` in staging and
+///   in the game folder are renamed back (a stale duplicate is dropped).
+/// - Withheld stock files are re-deployed from their mod's staging copy and
+///   recorded in the deployment manifest.
+/// - The fork's files in `Data/SKSE/Plugins` are deleted unless a mod the
+///   user installed owns them (manifest-tracked).
+/// - A deployed `EngineFixes.toml` that Corkscrew patched is re-linked from
+///   the mod's staging copy. A staging copy patched by older versions can't
+///   be recovered, so the user is told to reinstall Engine Fixes.
 ///
-/// Also undoes the staging mutation of earlier versions, which renamed the
-/// stock DLLs to `.dll.disabled` inside every mod's staging directory.
-pub fn prepare_engine_fixes(
+/// No mod changes state, so no rollback snapshot is taken.
+pub fn migrate_from_engine_fixes_wine(
     db: &Arc<ModDatabase>,
     game_id: &str,
     bottle_name: &str,
     data_dir: &Path,
     game_path: &Path,
-    wine_fork_requested: bool,
-    game_version: Option<&str>,
-) -> EngineFixesPlan {
-    let mut plan = EngineFixesPlan::default();
-    let mut notices: Vec<String> = Vec::new();
+) -> EngineFixesMigration {
+    let mut out = EngineFixesMigration::default();
 
     let healed = restore_legacy_disabled_in_staging(db, game_id, bottle_name);
     if healed > 0 {
@@ -1883,163 +1893,53 @@ pub fn prepare_engine_fixes(
         );
     }
 
-    // The fork targets macOS CrossOver Wine bugs; Proton/native Wine on
-    // Linux doesn't need it (install is a no-op there).
-    let wine_host = cfg!(not(target_os = "linux"));
-    let fork_active = wine_fork_requested
-        && wine_host
-        && match game_version {
-            Some(v) if engine_fixes_wine_supports_runtime(v) => true,
-            Some(v) => {
-                plan.warning = Some(format!(
-                    "SSE Engine Fixes for Wine was not deployed: it supports Skyrim {} only, \
-                     and this game is {}. The stock Engine Fixes files are deployed instead.",
-                    ENGINE_FIXES_WINE_SUPPORTED_RUNTIMES.join(", "),
-                    v
-                ));
-                false
-            }
-            None => {
-                plan.warning = Some(
-                    "SSE Engine Fixes for Wine was not deployed: Corkscrew could not detect the \
-                     Skyrim version. The stock Engine Fixes files are deployed instead."
-                        .to_string(),
-                );
-                false
-            }
-        };
-    if let Some(ref w) = plan.warning {
+    match remove_legacy_wine_fork(db, game_id, bottle_name, data_dir) {
+        ForkCleanup::Removed(files) => out.notices.push(format!(
+            "Removed the retired SSE Engine Fixes for Wine ({}). Stock SSE Engine Fixes now \
+             works under Wine and is used instead.",
+            files.join(", ")
+        )),
+        ForkCleanup::OwnedByMod => out.warnings.push(
+            "SSE Engine Fixes for Wine is installed as a mod. It is no longer needed (stock \
+             SSE Engine Fixes now works under Wine) and shouldn't load alongside it: disable \
+             or uninstall it."
+                .to_string(),
+        ),
+        ForkCleanup::NotPresent => {}
+    }
+
+    match crate::deployer::ensure_paths_deployed(
+        db,
+        game_id,
+        bottle_name,
+        data_dir,
+        game_path,
+        STOCK_ENGINE_FIXES_FILES,
+    ) {
+        Ok(restored) if !restored.is_empty() => out.notices.push(format!(
+            "Restored stock Engine Fixes file(s): {}",
+            restored.join(", ")
+        )),
+        Ok(_) => {}
+        Err(e) => warn!("Engine Fixes: could not restore stock files: {}", e),
+    }
+    let unrenamed = restore_untracked_stock_engine_fixes(data_dir, game_path);
+    if !unrenamed.is_empty() {
+        out.notices.push(format!(
+            "Re-enabled stock Engine Fixes file(s): {}",
+            unrenamed.join(", ")
+        ));
+    }
+
+    repair_engine_fixes_toml(db, game_id, bottle_name, data_dir, game_path, &mut out);
+
+    for w in &out.warnings {
         warn!("Engine Fixes: {}", w);
     }
-
-    if fork_active {
-        match crate::deployer::exclude_deployed_paths(
-            db,
-            game_id,
-            bottle_name,
-            data_dir,
-            game_path,
-            STOCK_ENGINE_FIXES_FILES,
-        ) {
-            Ok(removed) if !removed.is_empty() => notices.push(format!(
-                "SSE Engine Fixes for Wine is active, so the stock Engine Fixes files that crash \
-                 under Wine were not deployed ({}). Turn the option off in Settings to use them.",
-                removed.join(", ")
-            )),
-            Ok(_) => {}
-            Err(e) => warn!("Engine Fixes: could not withhold stock files: {}", e),
-        }
-        // Files Corkscrew doesn't track (manual installs, pre-manifest
-        // deploys) are renamed, recoverably, exactly as before.
-        let renamed = disable_untracked_stock_engine_fixes(data_dir, game_path);
-        if !renamed.is_empty() {
-            notices.push(format!(
-                "Renamed untracked stock Engine Fixes file(s) to .disabled: {}",
-                renamed.join(", ")
-            ));
-        }
-
-        // Deployed copy only: patch_engine_fixes_toml writes temp + rename,
-        // which replaces the hardlink instead of writing through it.
-        let deployed_toml = data_dir.join(STOCK_ENGINE_FIXES_TOML.0);
-        if deployed_toml.is_file() {
-            match patch_engine_fixes_toml(&deployed_toml) {
-                Ok(true) => info!("Engine Fixes: patched {}", deployed_toml.display()),
-                Ok(false) => {}
-                Err(e) => warn!("Engine Fixes: failed to patch {}: {}", deployed_toml.display(), e),
-            }
-        }
-
-        // SkyrimSoulsRE doesn't recognise the fork's DLL name and shows a
-        // false "Engine Fixes not installed" dialog that blocks startup.
-        patch_skyrim_souls_re_ini(data_dir);
-        plan.install_wine_fork = true;
-    } else {
-        if !wine_fork_requested && remove_engine_fixes_wine(db, game_id, bottle_name, data_dir) {
-            notices.push(
-                "Removed SSE Engine Fixes for Wine (option is off); using the stock Engine Fixes."
-                    .to_string(),
-            );
-        }
-        // The fork isn't active, so the stock files must be deployed exactly
-        // as their mod ships them (undoing any earlier withholding/patching).
-        let mut paths: Vec<(&str, &str)> = STOCK_ENGINE_FIXES_FILES.to_vec();
-        paths.push(STOCK_ENGINE_FIXES_TOML);
-        match crate::deployer::ensure_paths_deployed(
-            db,
-            game_id,
-            bottle_name,
-            data_dir,
-            game_path,
-            &paths,
-        ) {
-            Ok(restored) if !restored.is_empty() => notices.push(format!(
-                "Restored stock Engine Fixes file(s): {}",
-                restored.join(", ")
-            )),
-            Ok(_) => {}
-            Err(e) => warn!("Engine Fixes: could not restore stock files: {}", e),
-        }
-        let unrenamed = restore_untracked_stock_engine_fixes(data_dir, game_path);
-        if !unrenamed.is_empty() {
-            notices.push(format!(
-                "Re-enabled stock Engine Fixes file(s): {}",
-                unrenamed.join(", ")
-            ));
-        }
+    for n in &out.notices {
+        info!("Engine Fixes: {}", n);
     }
-
-    if !notices.is_empty() {
-        let notice = notices.join(" ");
-        info!("Engine Fixes: {}", notice);
-        plan.notice = Some(notice);
-    }
-    plan
-}
-
-/// Blocking post-deploy / pre-launch entry point: read the option, detect the
-/// runtime (unless `game_version` is supplied), apply
-/// [`prepare_engine_fixes`], and install the Wine fork when it should be
-/// active. `context` prefixes log lines ("Redeploy", "Pre-launch", …).
-///
-/// Returns user-facing messages (warnings first, then notices).
-pub fn apply_engine_fixes_blocking(
-    db: &Arc<ModDatabase>,
-    game_id: &str,
-    bottle_name: &str,
-    data_dir: &Path,
-    game_path: &Path,
-    game_version: Option<&str>,
-    context: &str,
-) -> Vec<String> {
-    let requested = config::engine_fixes_wine_enabled();
-    let detected;
-    let version = match game_version {
-        Some(v) => Some(v),
-        None if requested => {
-            detected = skyrim_runtime_version(game_path);
-            detected.as_deref()
-        }
-        None => None,
-    };
-    let plan = prepare_engine_fixes(
-        db, game_id, bottle_name, data_dir, game_path, requested, version,
-    );
-    let mut messages: Vec<String> = plan.warning.into_iter().collect();
-    if plan.install_wine_fork {
-        match install_engine_fixes_wine_blocking(data_dir) {
-            Ok(true) => info!("{}: deployed SSE Engine Fixes for Wine", context),
-            Ok(false) => debug!("{}: SSE Engine Fixes for Wine already up to date", context),
-            Err(e) => {
-                warn!("{}: could not deploy SSE Engine Fixes for Wine: {}", context, e);
-                messages.push(format!("Could not deploy SSE Engine Fixes for Wine: {}", e));
-            }
-        }
-    } else if !requested {
-        debug!("{}: SSE Engine Fixes for Wine is off; stock Engine Fixes in use", context);
-    }
-    messages.extend(plan.notice);
-    messages
+    out
 }
 
 /// Deployed locations of the stock Engine Fixes files.
@@ -2062,31 +1962,9 @@ fn disabled_sibling(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-/// Rename stock Engine Fixes files that Corkscrew does NOT track (still on
-/// disk after the tracked copies were withheld) to `.dll.disabled`.
-fn disable_untracked_stock_engine_fixes(data_dir: &Path, game_path: &Path) -> Vec<String> {
-    let mut renamed = Vec::new();
-    for path in stock_engine_fixes_deployed_paths(data_dir, game_path) {
-        match fs::symlink_metadata(&path) {
-            Ok(m) if m.file_type().is_file() => {}
-            _ => continue,
-        }
-        let disabled = disabled_sibling(&path);
-        match fs::rename(&path, &disabled) {
-            Ok(()) => {
-                info!("Engine Fixes: disabled untracked {}", path.display());
-                renamed.push(path.file_name().unwrap_or_default().to_string_lossy().into_owned());
-            }
-            Err(e) => warn!("Engine Fixes: failed to disable {}: {}", path.display(), e),
-        }
-    }
-    renamed
-}
-
-/// Undo [`disable_untracked_stock_engine_fixes`] (and the deployed-side
-/// renames of earlier versions): bring `.dll.disabled` back when nothing is
-/// deployed at the original path; drop it when it's a stale duplicate of the
-/// file that is now deployed there.
+/// Undo the deployed-side `.dll.disabled` renames of earlier versions: bring
+/// the file back when nothing is deployed at the original path; drop it when
+/// it's a stale duplicate of the file that is now deployed there.
 fn restore_untracked_stock_engine_fixes(data_dir: &Path, game_path: &Path) -> Vec<String> {
     let mut restored = Vec::new();
     for path in stock_engine_fixes_deployed_paths(data_dir, game_path) {
@@ -2128,8 +2006,8 @@ fn files_identical(a: &Path, b: &Path) -> bool {
 }
 
 /// Earlier versions renamed the stock DLLs to `.dll.disabled` inside every
-/// mod's *staging* directory, which made turning the option off unable to
-/// restore them. Rename them back. Returns the number restored.
+/// mod's *staging* directory, so redeploys couldn't bring them back. Rename
+/// them back. Returns the number restored.
 fn restore_legacy_disabled_in_staging(
     db: &Arc<ModDatabase>,
     game_id: &str,
@@ -2167,108 +2045,190 @@ fn restore_legacy_disabled_in_staging(
     healed
 }
 
-/// Remove the deployed SSE Engine Fixes for Wine plugin (and its version
-/// marker; the user's TOML config is kept). Skipped when the user installed
-/// the fork as a regular, manifest-tracked mod. Returns true if removed.
-fn remove_engine_fixes_wine(
+/// Outcome of [`remove_legacy_wine_fork`].
+#[derive(Debug, PartialEq, Eq)]
+enum ForkCleanup {
+    NotPresent,
+    /// Deleted these files (names as found on disk).
+    Removed(Vec<String>),
+    /// The fork DLL belongs to a mod the user installed; left in place.
+    OwnedByMod,
+}
+
+/// Delete the fork's files from `Data/SKSE/Plugins` (looked up
+/// case-insensitively). Files recorded in the deployment manifest belong to
+/// a user-installed mod and are kept; if the plugin itself is one of them,
+/// nothing is touched. When the manifest can't be read nothing is deleted.
+fn remove_legacy_wine_fork(
     db: &Arc<ModDatabase>,
     game_id: &str,
     bottle_name: &str,
     data_dir: &Path,
-) -> bool {
-    let plugins_dir = data_dir.join("SKSE").join("Plugins");
-    let dll = plugins_dir.join(ENGINE_FIXES_WINE_DLL);
-    if !dll.is_file() {
-        return false;
+) -> ForkCleanup {
+    let Some(plugins_dir) = crate::fs_ci::find_dir_ci(data_dir, "SKSE")
+        .and_then(|skse| crate::fs_ci::find_dir_ci(&skse, "Plugins"))
+    else {
+        return ForkCleanup::NotPresent;
+    };
+    let present: Vec<PathBuf> = LEGACY_WINE_FORK_FILES
+        .iter()
+        .filter_map(|name| crate::fs_ci::find_file_ci(&plugins_dir, name))
+        .collect();
+    if present.is_empty() {
+        return ForkCleanup::NotPresent;
     }
-    let tracked = db
-        .get_deployment_manifest(game_id, bottle_name)
-        .map(|entries| {
-            entries.iter().any(|e| {
-                e.deploy_target == "data"
-                    && e.relative_path
-                        .replace('\\', "/")
-                        .eq_ignore_ascii_case(&format!("SKSE/Plugins/{}", ENGINE_FIXES_WINE_DLL))
-            })
-        })
-        .unwrap_or(true);
-    if tracked {
-        debug!("Engine Fixes: {} is a managed mod file; leaving it", ENGINE_FIXES_WINE_DLL);
-        return false;
-    }
-    match fs::remove_file(&dll) {
-        Ok(()) => {
-            let _ = fs::remove_file(plugins_dir.join(ENGINE_FIXES_WINE_VERSION));
-            info!("Engine Fixes: removed {}", dll.display());
-            true
-        }
+
+    let manifest = match db.get_deployment_manifest(game_id, bottle_name) {
+        Ok(m) => m,
         Err(e) => {
-            warn!("Engine Fixes: failed to remove {}: {}", dll.display(), e);
-            false
+            warn!(
+                "Engine Fixes: could not read the deployment manifest, leaving SSE Engine Fixes \
+                 for Wine files in place: {}",
+                e
+            );
+            return ForkCleanup::NotPresent;
         }
+    };
+    let owned_by_mod = |name: &str| {
+        let rel = format!("skse/plugins/{}", name.to_ascii_lowercase());
+        manifest.iter().any(|e| {
+            e.deploy_target == "data"
+                && e.relative_path.replace('\\', "/").to_ascii_lowercase() == rel
+        })
+    };
+    let file_name = |p: &Path| p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+
+    if present.iter().any(|p| {
+        let name = file_name(p);
+        name.eq_ignore_ascii_case(LEGACY_WINE_FORK_FILES[0]) && owned_by_mod(&name)
+    }) {
+        debug!("Engine Fixes: SSE Engine Fixes for Wine is a managed mod file; leaving it");
+        return ForkCleanup::OwnedByMod;
+    }
+
+    let mut removed = Vec::new();
+    for path in present {
+        let name = file_name(&path);
+        if owned_by_mod(&name) {
+            debug!("Engine Fixes: {} belongs to a mod; leaving it", name);
+            continue;
+        }
+        // remove_file deletes a symlink itself, never its target, so
+        // nothing outside Data can be deleted here.
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                info!("Engine Fixes: removed {}", path.display());
+                removed.push(name);
+            }
+            Err(e) => warn!("Engine Fixes: failed to remove {}: {}", path.display(), e),
+        }
+    }
+    if removed.is_empty() {
+        ForkCleanup::NotPresent
+    } else {
+        ForkCleanup::Removed(removed)
     }
 }
 
-/// Patch `SkyrimSoulsRE.ini` to set `bHideEngineFixesWarning = true`.
-///
-/// Our Wine fork uses a different DLL name (`0_SSEEngineFixesForWine.dll`)
-/// which SkyrimSoulsRE doesn't recognise, causing a false warning dialog
-/// that blocks game startup.  Returns 1 if patched, 0 otherwise.
-///
-/// Writes temp + rename so a hardlinked deployed copy is replaced rather
-/// than written through (which would modify the mod's staging file).
-fn patch_skyrim_souls_re_ini(data_dir: &Path) -> usize {
-    let ini_path = data_dir
-        .join("SKSE")
-        .join("Plugins")
-        .join("SkyrimSoulsRE.ini");
+/// Whether `content` is an `EngineFixes.toml` that Corkscrew's old Wine patch
+/// rewrote: `bDisableTBB = true` and every [`LEGACY_WINE_TOML_SIGNATURE`]
+/// setting off.
+fn is_legacy_wine_patched_toml(content: &str) -> bool {
+    let mut settings = std::collections::HashMap::new();
+    for line in content.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if let Some((key, value)) = line.split_once('=') {
+            settings.insert(key.trim(), value.trim());
+        }
+    }
+    settings.get("bDisableTBB") == Some(&"true")
+        && LEGACY_WINE_TOML_SIGNATURE
+            .iter()
+            .all(|k| settings.get(k) == Some(&"false"))
+}
 
-    if !ini_path.exists() {
-        return 0;
+fn is_legacy_wine_patched_toml_file(path: &Path) -> bool {
+    // A real EngineFixes.toml is a few KB; don't read anything unexpected.
+    const MAX_LEN: u64 = 256 * 1024;
+    match fs::metadata(path) {
+        Ok(m) if m.is_file() && m.len() <= MAX_LEN => {}
+        _ => return false,
+    }
+    fs::read_to_string(path)
+        .map(|c| is_legacy_wine_patched_toml(&c))
+        .unwrap_or(false)
+}
+
+/// `<base>/SKSE/Plugins/EngineFixes.toml`, resolved case-insensitively.
+fn find_engine_fixes_toml(base: &Path) -> Option<PathBuf> {
+    let skse = crate::fs_ci::find_dir_ci(base, "SKSE")?;
+    let plugins = crate::fs_ci::find_dir_ci(&skse, "Plugins")?;
+    crate::fs_ci::find_file_ci(&plugins, "EngineFixes.toml")
+}
+
+/// Re-link a Corkscrew-patched deployed `EngineFixes.toml` from its mod's
+/// staging copy, and warn when no unpatched copy exists to restore.
+fn repair_engine_fixes_toml(
+    db: &Arc<ModDatabase>,
+    game_id: &str,
+    bottle_name: &str,
+    data_dir: &Path,
+    game_path: &Path,
+    out: &mut EngineFixesMigration,
+) {
+    let deployed_patched =
+        || find_engine_fixes_toml(data_dir).is_some_and(|p| is_legacy_wine_patched_toml_file(&p));
+
+    if deployed_patched() {
+        // Only when Corkscrew patched it: a config the user edited by hand
+        // (copy deploys) is left alone.
+        match crate::deployer::ensure_paths_deployed(
+            db,
+            game_id,
+            bottle_name,
+            data_dir,
+            game_path,
+            &[STOCK_ENGINE_FIXES_TOML],
+        ) {
+            Ok(restored) if !restored.is_empty() => out.notices.push(
+                "Restored the stock EngineFixes.toml settings (an older Corkscrew version had \
+                 switched its patches off for SSE Engine Fixes for Wine)."
+                    .to_string(),
+            ),
+            Ok(_) => {}
+            Err(e) => warn!("Engine Fixes: could not restore EngineFixes.toml: {}", e),
+        }
     }
 
-    let contents = match fs::read_to_string(&ini_path) {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(
-                "SkyrimSoulsRE fix: failed to read {}: {}",
-                ini_path.display(),
-                e
-            );
-            return 0;
-        }
-    };
+    let patched_in_staging: Vec<String> = db
+        .list_mods(game_id, bottle_name)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|m| m.enabled)
+        .filter(|m| {
+            m.staging_path
+                .as_deref()
+                .and_then(|sp| find_engine_fixes_toml(Path::new(sp)))
+                .is_some_and(|p| is_legacy_wine_patched_toml_file(&p))
+        })
+        .map(|m| m.name)
+        .collect();
 
-    let needle = "bHideEngineFixesWarning = false";
-    let replacement = "bHideEngineFixesWarning = true";
-
-    if !contents.contains(needle) {
-        debug!(
-            "SkyrimSoulsRE fix: already patched or key not found in {}",
-            ini_path.display()
+    if !patched_in_staging.is_empty() {
+        out.warnings.push(format!(
+            "EngineFixes.toml in '{}' has every Engine Fixes patch switched off: an older \
+             Corkscrew version changed it for the retired SSE Engine Fixes for Wine, and the \
+             original settings can't be recovered. Reinstall SSE Engine Fixes to get them back.",
+            patched_in_staging.join("', '")
+        ));
+    } else if deployed_patched() {
+        out.warnings.push(
+            "EngineFixes.toml in Data/SKSE/Plugins has every Engine Fixes patch switched off \
+             (an older Corkscrew version changed it for the retired SSE Engine Fixes for Wine) \
+             and there is no original copy to restore. Reinstall SSE Engine Fixes to get its \
+             default settings back."
+                .to_string(),
         );
-        return 0;
-    }
-
-    let patched = contents.replace(needle, replacement);
-    let tmp = ini_path.with_extension("ini.tmp");
-    match fs::write(&tmp, patched).and_then(|()| fs::rename(&tmp, &ini_path)) {
-        Ok(()) => {
-            info!(
-                "SkyrimSoulsRE fix: set bHideEngineFixesWarning = true in {}",
-                ini_path.display()
-            );
-            1
-        }
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            warn!(
-                "SkyrimSoulsRE fix: failed to write {}: {}",
-                ini_path.display(),
-                e
-            );
-            0
-        }
     }
 }
 
@@ -2376,531 +2336,107 @@ pub fn reenable_wine_plugin(data_dir: &Path, dll_name: &str) -> std::result::Res
     }
 }
 
-/// All boolean keys in EngineFixes.toml that must be set to `false` under Wine.
-/// Every [Fixes], [Patches], [MemoryManager], and [Warnings] boolean is included
-/// because Engine Fixes' hooking mechanism itself crashes under Wine.
-const WINE_DISABLE_KEYS: &[&str] = &[
-    // [Fixes]
-    "bArcheryDownwardAiming",
-    "bAnimationLoadSignedCrash",
-    "bBethesdaNetCrash",
-    "bBGSKeywordFormLoadCrash",
-    "bBSLightingAmbientSpecular",
-    "bBSLightingShaderForceAlphaTest",
-    "bBSLightingShaderParallaxBug",
-    "bBSLightingShaderPropertyShadowMap",
-    "bBSTempEffectNiRTTI",
-    "bCalendarSkipping",
-    "bCellInit",
-    "bClimateLoad",
-    "bConjurationEnchantAbsorbs",
-    "bCreateArmorNodeNullPtrCrash",
-    "bDoublePerkApply",
-    "bESLCELLLoadBug",
-    "bEquipShoutEventSpam",
-    "bFaceGenMorphDataHeadNullPtrCrash",
-    "bGetKeywordItemCount",
-    "bGHeapLeakDetectionCrash",
-    "bGlobalTime",
-    "bInitializeHitDataNullPtrCrash",
-    "bLipSync",
-    "bMemoryAccessErrors",
-    "bMO5STypo",
-    "bMusicOverlap",
-    "bNiControllerNoTarget",
-    "bNullProcessCrash",
-    "bPerkFragmentIsRunning",
-    "bPrecomputedPaths",
-    "bRemovedSpellBook",
-    "bSaveScreenshots",
-    "bSavedHavokDataLoadInit",
-    "bShadowSceneNodeNullPtrCrash",
-    "bTextureLoadCrash",
-    "bTorchLandscape",
-    "bTreeReflections",
-    "bVerticalLookSensitivity",
-    "bWeaponBlockScaling",
-    // [Patches]
-    "bDisableChargenPrecache",
-    "bDisableSnowFlag",
-    "bEnableAchievementsWithMods",
-    "bFormCaching",
-    "bINISettingCollection",
-    "bMaxStdIO",
-    "bRegularQuicksaves",
-    "bSafeExit",
-    "bSaveAddedSoundCategories",
-    "bScrollingDoesntSwitchPOV",
-    "bTreeLodReferenceCaching",
-    "bWaterflowAnimation",
-    // [MemoryManager]
-    "bOverrideMemoryManager",
-    "bOverrideScrapHeap",
-    "bOverrideScaleformAllocator",
-    "bOverrideRenderPassCache",
-    "bOverrideHavokMemorySystem",
-    "bReplaceImports",
-    // [Warnings]
-    "bTextureLoadFailed",
-    "bPrecomputedPathHasErrors",
-    "bRefHandleLimit",
-];
-
-/// Patch a single EngineFixes.toml for Wine compatibility:
-///   - Set all boolean `[Fixes]`/`[Patches]`/`[MemoryManager]`/`[Warnings]` keys to false
-///   - Set `bDisableTBB = true` in `[Debug]` (force CRT allocator instead of TBB)
-///
-/// Returns `Ok(true)` if the file was modified, `Ok(false)` if already correct.
-fn patch_engine_fixes_toml(path: &Path) -> std::result::Result<bool, String> {
-    let content =
-        std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
-
-    let mut new_content = content.clone();
-    let mut changed = false;
-
-    for key in WINE_DISABLE_KEYS {
-        let pattern = format!("{} = true", key);
-        if new_content.contains(&pattern) {
-            let replacement = format!("{} = false", key);
-            new_content = new_content.replacen(&pattern, &replacement, 1);
-            changed = true;
-        }
-    }
-
-    // Force CRT allocator — TBB is Wine-incompatible
-    if new_content.contains("bDisableTBB = false") {
-        new_content = new_content.replacen("bDisableTBB = false", "bDisableTBB = true", 1);
-        changed = true;
-    }
-
-    if changed {
-        // Atomic write: temp file + rename
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, &new_content)
-            .map_err(|e| format!("write {}: {}", tmp.display(), e))?;
-        std::fs::rename(&tmp, path)
-            .map_err(|e| format!("rename {} -> {}: {}", tmp.display(), path.display(), e))?;
-    }
-
-    Ok(changed)
-}
-
-// ---------------------------------------------------------------------------
-// SSE Engine Fixes for Wine — auto-download and deploy
-// ---------------------------------------------------------------------------
-
-/// GitHub repo for SSE Engine Fixes for Wine releases.
-const ENGINE_FIXES_WINE_REPO: &str = "cashcon57/SSEEngineFixesForWine";
-
-/// DLL name of the Wine-compatible Engine Fixes plugin.
-/// Prefixed with "0_" so SKSE loads it before all letter-named plugins,
-/// ensuring the editor ID cache fix runs before other plugins' kDataLoaded handlers.
-const ENGINE_FIXES_WINE_DLL: &str = "0_SSEEngineFixesForWine.dll";
-
-/// TOML config name for the Wine-compatible Engine Fixes plugin.
-const ENGINE_FIXES_WINE_TOML: &str = "SSEEngineFixesForWine.toml";
-
-/// Version marker file — stores the deployed release tag for auto-update.
-const ENGINE_FIXES_WINE_VERSION: &str = "SSEEngineFixesForWine.version";
-
-/// Check if SSE Engine Fixes for Wine is already deployed.
-pub fn is_engine_fixes_wine_installed(data_dir: &Path) -> bool {
-    data_dir
-        .join("SKSE")
-        .join("Plugins")
-        .join(ENGINE_FIXES_WINE_DLL)
-        .exists()
-}
-
-/// Download and deploy the latest SSE Engine Fixes for Wine release.
-///
-/// This is the Wine-compatible replacement for SSE Engine Fixes.
-/// It downloads the AE build (1.6.1170) from GitHub and deploys
-/// `0_SSEEngineFixesForWine.dll` + `SSEEngineFixesForWine.toml`
-/// to `Data/SKSE/Plugins/`.
-///
-/// Returns Ok(true) if newly installed, Ok(false) if already present.
-/// On Linux, this is a no-op — SSEEngineFixesForWine addresses macOS-specific
-/// Wine bugs that don't exist in Proton/native Linux Wine.
-pub async fn install_engine_fixes_wine(data_dir: &Path) -> Result<bool> {
-    #[cfg(target_os = "linux")]
-    {
-        info!("Skipping SSEEngineFixesForWine install on Linux (macOS-only fix)");
-        return Ok(false);
-    }
-    let plugins_dir = data_dir.join("SKSE").join("Plugins");
-
-    // Connect timeout matches the blocking twin (install_engine_fixes_wine_blocking):
-    // a stalled GitHub call must not hang a collection install indefinitely.
-    let client = reqwest::Client::builder()
-        .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| SkseError::Other(format!("HTTP client error: {}", e)))?;
-
-    // Fetch latest release from GitHub API
-    let url = format!(
-        "https://api.github.com/repos/{}/releases/latest",
-        ENGINE_FIXES_WINE_REPO
-    );
-    let release: serde_json::Value = client
-        .get(&url)
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(|e| SkseError::Other(format!("GitHub API request failed: {}", e)))?
-        .error_for_status()
-        .map_err(|e| SkseError::Other(format!("GitHub API error: {}", e)))?
-        .json()
-        .await
-        .map_err(|e| SkseError::Other(format!("GitHub API JSON parse error: {}", e)))?;
-
-    let tag = release["tag_name"].as_str().unwrap_or("unknown");
-
-    // Check if already deployed at the latest version
-    let version_file = plugins_dir.join(ENGINE_FIXES_WINE_VERSION);
-    if plugins_dir.join(ENGINE_FIXES_WINE_DLL).exists() {
-        if let Ok(deployed_tag) = fs::read_to_string(&version_file) {
-            if deployed_tag.trim() == tag {
-                debug!(
-                    "SSE Engine Fixes for Wine {} already deployed, skipping",
-                    tag
-                );
-                return Ok(false);
-            }
-            info!(
-                "SSE Engine Fixes for Wine update available: {} -> {}",
-                deployed_tag.trim(),
-                tag
-            );
-        } else {
-            info!(
-                "SSE Engine Fixes for Wine deployed without version marker, updating to {}",
-                tag
-            );
-        }
-    }
-
-    info!(
-        "Downloading SSE Engine Fixes for Wine {} from GitHub...",
-        tag
-    );
-
-    // Find the AE zip asset (SSEEngineFixesForWine-AE-1.6.1170.zip)
-    let assets = release["assets"]
-        .as_array()
-        .ok_or_else(|| SkseError::Other("No assets in release".into()))?;
-
-    let ae_asset = assets
-        .iter()
-        .find(|a| {
-            a["name"]
-                .as_str()
-                .map(|n| n.contains("AE") && n.ends_with(".zip"))
-                .unwrap_or(false)
-        })
-        .ok_or_else(|| SkseError::Other("No AE zip asset found in release".into()))?;
-
-    let download_url = ae_asset["browser_download_url"]
-        .as_str()
-        .ok_or_else(|| SkseError::Other("No download URL for asset".into()))?;
-
-    // Download the zip
-    let bytes = client
-        .get(download_url)
-        .send()
-        .await
-        .map_err(|e| SkseError::Other(format!("Download failed: {}", e)))?
-        .error_for_status()
-        .map_err(|e| SkseError::Other(format!("Download failed: {}", e)))?
-        .bytes()
-        .await
-        .map_err(|e| SkseError::Other(format!("Download failed: {}", e)))?;
-
-    info!(
-        "Downloaded SSE Engine Fixes for Wine ({} bytes), extracting...",
-        bytes.len()
-    );
-
-    // Extract to temp directory
-    let extract_dir = std::env::temp_dir().join("corkscrew_engine_fixes_wine");
-    if extract_dir.exists() {
-        fs::remove_dir_all(&extract_dir)?;
-    }
-    fs::create_dir_all(&extract_dir)?;
-
-    let tmp_zip = extract_dir.join("SSEEngineFixesForWine.zip");
-    fs::write(&tmp_zip, &bytes)?;
-
-    installer::extract_archive(&tmp_zip, &extract_dir)
-        .map_err(|e| SkseError::Extraction(format!("Failed to extract: {}", e)))?;
-    let _ = fs::remove_file(&tmp_zip);
-
-    // Find and copy the DLL and TOML into the game's plugins directory
-    fs::create_dir_all(&plugins_dir)?;
-
-    let mut found_dll = false;
-    let mut found_toml = false;
-
-    // Walk extracted directory to find our files (they're in SKSE/Plugins/ inside the zip)
-    for entry in walkdir::WalkDir::new(&extract_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.eq_ignore_ascii_case(ENGINE_FIXES_WINE_DLL) {
-                fs::copy(path, plugins_dir.join(ENGINE_FIXES_WINE_DLL))?;
-                found_dll = true;
-                info!("Deployed {}", ENGINE_FIXES_WINE_DLL);
-                // Clean up old-named DLL from pre-v1.3.0 (was SSEEngineFixesForWine.dll)
-                let old_dll = plugins_dir.join("SSEEngineFixesForWine.dll");
-                if old_dll.exists() {
-                    let _ = fs::remove_file(&old_dll);
-                    info!("Removed old SSEEngineFixesForWine.dll (renamed to 0_ prefix)");
-                }
-            } else if name.eq_ignore_ascii_case(ENGINE_FIXES_WINE_TOML) {
-                // Only copy TOML if it doesn't already exist (preserve user config)
-                let dest = plugins_dir.join(ENGINE_FIXES_WINE_TOML);
-                if !dest.exists() {
-                    fs::copy(path, &dest)?;
-                    info!("Deployed {} (default config)", ENGINE_FIXES_WINE_TOML);
-                } else {
-                    debug!(
-                        "{} already exists, preserving user config",
-                        ENGINE_FIXES_WINE_TOML
-                    );
-                }
-                found_toml = true;
-            }
-        }
-    }
-
-    // Clean up
-    if let Err(e) = fs::remove_dir_all(&extract_dir) {
-        warn!("Failed to clean up extraction dir: {}", e);
-    }
-
-    if !found_dll {
-        return Err(SkseError::Other(
-            "0_SSEEngineFixesForWine.dll not found in release archive".into(),
-        ));
-    }
-
-    if !found_toml {
-        warn!(
-            "SSEEngineFixesForWine.toml not found in release archive; DLL deployed without config"
-        );
-    }
-
-    // Write version marker for future update checks
-    if let Err(e) = fs::write(&version_file, tag) {
-        warn!("Failed to write Engine Fixes Wine version marker: {}", e);
-    }
-
-    info!("SSE Engine Fixes for Wine {} installed successfully", tag);
-    Ok(true)
-}
-
-/// Blocking variant of `install_engine_fixes_wine` for use in sync contexts
-/// (pre-launch, deploy commands). Uses reqwest::blocking internally.
-///
-/// Returns Ok(true) if newly installed, Ok(false) if already present.
-pub fn install_engine_fixes_wine_blocking(data_dir: &Path) -> Result<bool> {
-    #[cfg(target_os = "linux")]
-    {
-        info!("Skipping SSEEngineFixesForWine install on Linux (macOS-only fix)");
-        return Ok(false);
-    }
-
-    let plugins_dir = data_dir.join("SKSE").join("Plugins");
-
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(format!("Corkscrew/{}", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| SkseError::Other(format!("HTTP client error: {}", e)))?;
-
-    let url = format!(
-        "https://api.github.com/repos/{}/releases/latest",
-        ENGINE_FIXES_WINE_REPO
-    );
-    let release: serde_json::Value = client
-        .get(&url)
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .map_err(|e| SkseError::Other(format!("GitHub API request failed: {}", e)))?
-        .error_for_status()
-        .map_err(|e| SkseError::Other(format!("GitHub API error: {}", e)))?
-        .json()
-        .map_err(|e| SkseError::Other(format!("GitHub API JSON parse error: {}", e)))?;
-
-    let tag = release["tag_name"].as_str().unwrap_or("unknown");
-
-    // Check if already deployed at the latest version
-    let version_file = plugins_dir.join(ENGINE_FIXES_WINE_VERSION);
-    if plugins_dir.join(ENGINE_FIXES_WINE_DLL).exists() {
-        if let Ok(deployed_tag) = fs::read_to_string(&version_file) {
-            if deployed_tag.trim() == tag {
-                debug!(
-                    "SSE Engine Fixes for Wine {} already deployed, skipping",
-                    tag
-                );
-                return Ok(false);
-            }
-            info!(
-                "SSE Engine Fixes for Wine update available: {} -> {}",
-                deployed_tag.trim(),
-                tag
-            );
-        } else {
-            // DLL exists but no version marker — legacy install, re-deploy to update
-            info!(
-                "SSE Engine Fixes for Wine deployed without version marker, updating to {}",
-                tag
-            );
-        }
-    }
-
-    info!(
-        "Downloading SSE Engine Fixes for Wine {} from GitHub (blocking)...",
-        tag
-    );
-
-    let assets = release["assets"]
-        .as_array()
-        .ok_or_else(|| SkseError::Other("No assets in release".into()))?;
-
-    let ae_asset = assets
-        .iter()
-        .find(|a| {
-            a["name"]
-                .as_str()
-                .map(|n| n.contains("AE") && n.ends_with(".zip"))
-                .unwrap_or(false)
-        })
-        .ok_or_else(|| SkseError::Other("No AE zip asset found in release".into()))?;
-
-    let download_url = ae_asset["browser_download_url"]
-        .as_str()
-        .ok_or_else(|| SkseError::Other("No download URL for asset".into()))?;
-    info!(
-        "Downloading SSE Engine Fixes for Wine {} from {}",
-        tag, download_url
-    );
-
-    let bytes = client
-        .get(download_url)
-        .send()
-        .map_err(|e| SkseError::Other(format!("Download failed: {}", e)))?
-        .error_for_status()
-        .map_err(|e| SkseError::Other(format!("Download failed: {}", e)))?
-        .bytes()
-        .map_err(|e| SkseError::Other(format!("Download failed: {}", e)))?;
-
-    info!(
-        "Downloaded SSE Engine Fixes for Wine ({} bytes), extracting...",
-        bytes.len()
-    );
-
-    let extract_dir = std::env::temp_dir().join("corkscrew_engine_fixes_wine");
-    if extract_dir.exists() {
-        fs::remove_dir_all(&extract_dir)?;
-    }
-    fs::create_dir_all(&extract_dir)?;
-
-    let tmp_zip = extract_dir.join("SSEEngineFixesForWine.zip");
-    fs::write(&tmp_zip, &bytes)?;
-
-    installer::extract_archive(&tmp_zip, &extract_dir)
-        .map_err(|e| SkseError::Extraction(format!("Failed to extract: {}", e)))?;
-    let _ = fs::remove_file(&tmp_zip);
-
-    fs::create_dir_all(&plugins_dir)?;
-
-    let mut found_dll = false;
-    let mut found_toml = false;
-
-    for entry in walkdir::WalkDir::new(&extract_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.eq_ignore_ascii_case(ENGINE_FIXES_WINE_DLL) {
-                fs::copy(path, plugins_dir.join(ENGINE_FIXES_WINE_DLL))?;
-                found_dll = true;
-                info!("Deployed {}", ENGINE_FIXES_WINE_DLL);
-                // Clean up old-named DLL from pre-v1.3.0
-                let old_dll = plugins_dir.join("SSEEngineFixesForWine.dll");
-                if old_dll.exists() {
-                    let _ = fs::remove_file(&old_dll);
-                    info!("Removed old SSEEngineFixesForWine.dll (renamed to 0_ prefix)");
-                }
-            } else if name.eq_ignore_ascii_case(ENGINE_FIXES_WINE_TOML) {
-                let dest = plugins_dir.join(ENGINE_FIXES_WINE_TOML);
-                if !dest.exists() {
-                    fs::copy(path, &dest)?;
-                    info!("Deployed {} (default config)", ENGINE_FIXES_WINE_TOML);
-                }
-                found_toml = true;
-            }
-        }
-    }
-
-    if let Err(e) = fs::remove_dir_all(&extract_dir) {
-        warn!("Failed to clean up extraction dir: {}", e);
-    }
-
-    if !found_dll {
-        return Err(SkseError::Other(
-            "0_SSEEngineFixesForWine.dll not found in release archive".into(),
-        ));
-    }
-
-    if !found_toml {
-        warn!(
-            "SSEEngineFixesForWine.toml not found in release archive; DLL deployed without config"
-        );
-    }
-
-    // Write version marker for future update checks
-    if let Err(e) = fs::write(&version_file, tag) {
-        warn!("Failed to write Engine Fixes Wine version marker: {}", e);
-    }
-
-    info!("SSE Engine Fixes for Wine {} installed successfully", tag);
-    Ok(true)
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod engine_fixes_policy_tests {
+mod engine_fixes_migration_tests {
     use super::*;
     use crate::deployer;
     use tempfile::TempDir;
 
-    #[test]
-    fn wine_fork_runtime_gate_matches_compatible_versions() {
-        assert!(engine_fixes_wine_supports_runtime("1.6.1170"));
-        assert!(engine_fixes_wine_supports_runtime("1.6.1170.0"));
-        assert!(!engine_fixes_wine_supports_runtime("1.7.104"));
-        assert!(!engine_fixes_wine_supports_runtime("1.5.97"));
-        assert!(!engine_fixes_wine_supports_runtime("1.6.640"));
-        assert!(!engine_fixes_wine_supports_runtime("1.6.11700"));
-        assert!(!engine_fixes_wine_supports_runtime("1.6.x (Anniversary Edition, ~37.1 MB)"));
+    /// Trimmed-down stock EngineFixes.toml (same layout as upstream 7.0.x).
+    const STOCK_TOML: &str = "\
+[Fixes]
+bArcheryDownwardAiming = true                   # fixes a bug
+bMemoryAccessErrors = true                      # fixes errors
+bStuckMouseButtons = true                       # added in 7.x
+[Patches]
+bDisableChargenPrecache = false                 # off by default
+bFormCaching = true                             # speedup
+bMaxStdIO = true                                # handles
+bSafeExit = true                                # no hang on exit
+[MemoryManager]
+bOverrideMemoryManager = true                   # malloc/free
+bOverrideScrapHeap = true                       # malloc/free
+bReplaceImports = true                          # CRT imports
+[Debug]
+bDisableTBB = false                             # use CRT allocator instead of tbb
+";
+
+    /// What the retired Wine patch made of [`STOCK_TOML`]: every listed
+    /// boolean off (keys it didn't know, like bStuckMouseButtons, untouched)
+    /// and TBB disabled.
+    fn wine_patched(toml: &str) -> String {
+        let mut s = toml.to_string();
+        for key in [
+            "bArcheryDownwardAiming",
+            "bMemoryAccessErrors",
+            "bFormCaching",
+            "bMaxStdIO",
+            "bSafeExit",
+            "bOverrideMemoryManager",
+            "bOverrideScrapHeap",
+            "bReplaceImports",
+        ] {
+            s = s.replacen(&format!("{key} = true"), &format!("{key} = false"), 1);
+        }
+        s.replacen("bDisableTBB = false", "bDisableTBB = true", 1)
+    }
+
+    /// Write via temp + rename so a hardlinked deployed copy is replaced,
+    /// not written through to staging (as the old patcher did).
+    fn replace_file(path: &Path, content: &[u8]) {
+        let tmp = path.with_extension("tmp");
+        fs::write(&tmp, content).unwrap();
+        fs::rename(&tmp, path).unwrap();
     }
 
     struct Fixture {
-        _tmp: TempDir,
+        tmp: TempDir,
         db: Arc<ModDatabase>,
         data: PathBuf,
         root: PathBuf,
         ef_staging: PathBuf,
         ef_mod: i64,
+    }
+
+    impl Fixture {
+        fn add_mod(&self, name: &str, files: &[(&str, &[u8])], target: &str) -> (i64, PathBuf) {
+            let id = self
+                .db
+                .add_mod("skyrimse", "Gaming", None, name, "1", "a.zip", &[])
+                .unwrap();
+            let staging = self.tmp.path().join("staging").join(format!("{id}"));
+            for (rel, bytes) in files {
+                let p = staging.join(rel);
+                fs::create_dir_all(p.parent().unwrap()).unwrap();
+                fs::write(p, bytes).unwrap();
+            }
+            self.db.set_staging_path(id, staging.to_str().unwrap()).unwrap();
+            let base = if target == "root" { &self.root } else { &self.data };
+            let list = crate::staging::list_staging_files(&staging).unwrap();
+            deployer::deploy_mod(&self.db, "skyrimse", "Gaming", id, &staging, base, &list, target)
+                .unwrap();
+            (id, staging)
+        }
+
+        fn recorded(&self, rel: &str) -> bool {
+            self.db
+                .get_deployment_manifest("skyrimse", "Gaming")
+                .unwrap()
+                .iter()
+                .any(|e| e.relative_path.eq_ignore_ascii_case(rel))
+        }
+
+        fn migrate(&self) -> EngineFixesMigration {
+            migrate_from_engine_fixes_wine(&self.db, "skyrimse", "Gaming", &self.data, &self.root)
+        }
+
+        fn plugins(&self) -> PathBuf {
+            self.data.join("SKSE/Plugins")
+        }
     }
 
     /// One "Engine Fixes" mod (SKSE plugin + toml, Data target) and one
@@ -2911,104 +2447,162 @@ mod engine_fixes_policy_tests {
         let root = tmp.path().join("game");
         let data = root.join("Data");
         fs::create_dir_all(&data).unwrap();
-
-        let mk = |name: &str, files: &[(&str, &[u8])]| -> (i64, PathBuf) {
-            let id = db
-                .add_mod("skyrimse", "Gaming", None, name, "1", "a.zip", &[])
-                .unwrap();
-            let staging = tmp.path().join("staging").join(format!("{id}"));
-            for (rel, bytes) in files {
-                let p = staging.join(rel);
-                fs::create_dir_all(p.parent().unwrap()).unwrap();
-                fs::write(p, bytes).unwrap();
-            }
-            db.set_staging_path(id, staging.to_str().unwrap()).unwrap();
-            (id, staging)
-        };
-        let (ef_mod, ef_staging) = mk(
+        let mut f = Fixture { tmp, db, data, root, ef_staging: PathBuf::new(), ef_mod: 0 };
+        let (ef_mod, ef_staging) = f.add_mod(
             "Engine Fixes",
             &[
                 ("SKSE/Plugins/EngineFixes.dll", b"stock plugin"),
-                ("SKSE/Plugins/EngineFixes.toml", b"bMemoryManager = true\n"),
+                ("SKSE/Plugins/EngineFixes.toml", STOCK_TOML.as_bytes()),
             ],
+            "data",
         );
-        let (pre_mod, pre_staging) = mk("Engine Fixes part 2", &[("d3dx9_42.dll", b"preloader")]);
-
-        let files = crate::staging::list_staging_files(&ef_staging).unwrap();
-        deployer::deploy_mod(&db, "skyrimse", "Gaming", ef_mod, &ef_staging, &data, &files, "data")
-            .unwrap();
-        let files = crate::staging::list_staging_files(&pre_staging).unwrap();
-        deployer::deploy_mod(&db, "skyrimse", "Gaming", pre_mod, &pre_staging, &root, &files, "root")
-            .unwrap();
-
-        Fixture { _tmp: tmp, db, data, root, ef_staging, ef_mod }
+        f.add_mod("Engine Fixes part 2", &[("d3dx9_42.dll", b"preloader")], "root");
+        f.ef_mod = ef_mod;
+        f.ef_staging = ef_staging;
+        f
     }
 
-    fn recorded(f: &Fixture, rel: &str) -> bool {
-        f.db.get_deployment_manifest("skyrimse", "Gaming")
-            .unwrap()
-            .iter()
-            .any(|e| e.relative_path.eq_ignore_ascii_case(rel))
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    #[test]
-    fn option_off_after_on_redeploys_stock_engine_fixes() {
-        let f = fixture();
-        let plugin = f.data.join("SKSE/Plugins/EngineFixes.dll");
-
-        // On, supported runtime: stock files withheld, staging untouched.
-        let plan = prepare_engine_fixes(
-            &f.db, "skyrimse", "Gaming", &f.data, &f.root, true, Some("1.6.1170"),
-        );
-        assert!(plan.install_wine_fork);
-        assert!(plan.notice.is_some(), "withholding must be reported");
-        assert!(!plugin.exists());
-        assert!(!f.root.join("d3dx9_42.dll").exists());
-        assert!(!recorded(&f, "SKSE/Plugins/EngineFixes.dll"), "record must be dropped");
-        assert!(f.ef_staging.join("SKSE/Plugins/EngineFixes.dll").is_file(), "staging untouched");
-        assert!(!f.ef_staging.join("SKSE/Plugins/EngineFixes.dll.disabled").exists());
-        assert_eq!(
-            fs::read(f.ef_staging.join("SKSE/Plugins/EngineFixes.toml")).unwrap(),
-            b"bMemoryManager = true\n",
-            "staging TOML must not be patched"
-        );
-
-        // Pretend the fork was installed by the caller.
-        let fork = f.data.join("SKSE/Plugins").join(ENGINE_FIXES_WINE_DLL);
-        fs::write(&fork, b"fork").unwrap();
-
-        // Off: stock files come back from staging, fork removed.
-        let plan = prepare_engine_fixes(&f.db, "skyrimse", "Gaming", &f.data, &f.root, false, None);
-        assert!(!plan.install_wine_fork);
-        assert_eq!(fs::read(&plugin).unwrap(), b"stock plugin");
-        assert!(recorded(&f, "SKSE/Plugins/EngineFixes.dll"));
-        assert_eq!(fs::read(f.root.join("d3dx9_42.dll")).unwrap(), b"preloader");
-        assert!(!fork.exists(), "fork must not load alongside stock Engine Fixes");
-
-        // And it's stable: a second pass changes nothing.
-        let plan = prepare_engine_fixes(&f.db, "skyrimse", "Gaming", &f.data, &f.root, false, None);
-        assert!(plan.notice.is_none(), "{:?}", plan.notice);
-
-        // A full redeploy keeps the root preloader in the game root.
-        deployer::redeploy_all(&f.db, "skyrimse", "Gaming", &f.data, &f.root).unwrap();
-        assert!(f.root.join("d3dx9_42.dll").exists());
-        assert!(!f.data.join("d3dx9_42.dll").exists());
-    }
-
-    #[test]
-    fn unsupported_runtime_keeps_stock_files_and_warns() {
-        let f = fixture();
-        let plan = prepare_engine_fixes(
-            &f.db, "skyrimse", "Gaming", &f.data, &f.root, true, Some("1.7.104"),
-        );
-        assert!(!plan.install_wine_fork);
-        let warning = plan.warning.unwrap_or_default();
-        if cfg!(not(target_os = "linux")) {
-            assert!(warning.contains("1.7.104"), "{warning}");
+    /// The deployed state the "option on" path of earlier versions left
+    /// behind: stock DLLs withheld (deleted, records dropped), deployed TOML
+    /// patched, fork files installed.
+    fn simulate_wine_fork_deployed(f: &Fixture) {
+        let manifest = f.db.get_deployment_manifest("skyrimse", "Gaming").unwrap();
+        let mut ids = Vec::new();
+        for e in &manifest {
+            let rel = e.relative_path.to_ascii_lowercase();
+            if rel == "skse/plugins/enginefixes.dll" || rel == "d3dx9_42.dll" {
+                let base = if e.deploy_target == "root" { &f.root } else { &f.data };
+                fs::remove_file(base.join(&e.relative_path)).unwrap();
+                ids.push(e.id);
+            }
         }
-        assert!(f.data.join("SKSE/Plugins/EngineFixes.dll").exists());
-        assert!(f.root.join("d3dx9_42.dll").exists());
+        assert_eq!(ids.len(), 2);
+        f.db.remove_deployment_entries_by_ids(&ids).unwrap();
+        replace_file(
+            &f.plugins().join("EngineFixes.toml"),
+            wine_patched(STOCK_TOML).as_bytes(),
+        );
+        for name in LEGACY_WINE_FORK_FILES {
+            fs::write(f.plugins().join(name), b"fork").unwrap();
+        }
+    }
+
+    #[test]
+    fn signature_matches_only_the_wine_patched_toml() {
+        assert!(!is_legacy_wine_patched_toml(STOCK_TOML));
+        assert!(is_legacy_wine_patched_toml(&wine_patched(STOCK_TOML)));
+        // A user who only switched TBB off is not mistaken for the patch.
+        assert!(!is_legacy_wine_patched_toml(
+            &STOCK_TOML.replacen("bDisableTBB = false", "bDisableTBB = true", 1)
+        ));
+        assert!(!is_legacy_wine_patched_toml(""));
+    }
+
+    #[test]
+    fn fork_is_removed_and_stock_engine_fixes_restored() {
+        let f = fixture();
+        simulate_wine_fork_deployed(&f);
+
+        let out = f.migrate();
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+        assert!(!out.notices.is_empty(), "the cleanup must be reported");
+
+        for name in LEGACY_WINE_FORK_FILES {
+            assert!(!f.plugins().join(name).exists(), "{name} must be removed");
+        }
+        assert_eq!(fs::read(f.plugins().join("EngineFixes.dll")).unwrap(), b"stock plugin");
+        assert_eq!(fs::read(f.root.join("d3dx9_42.dll")).unwrap(), b"preloader");
+        assert!(!f.data.join("d3dx9_42.dll").exists(), "preloader stays in the game root");
+        assert!(f.recorded("SKSE/Plugins/EngineFixes.dll"));
+        assert!(f.recorded("d3dx9_42.dll"));
+        assert_eq!(
+            fs::read_to_string(f.plugins().join("EngineFixes.toml")).unwrap(),
+            STOCK_TOML,
+            "patched deployed TOML re-linked from staging"
+        );
+        assert_eq!(
+            fs::read_to_string(f.ef_staging.join("SKSE/Plugins/EngineFixes.toml")).unwrap(),
+            STOCK_TOML,
+            "staging untouched"
+        );
+        let toml_rows = f
+            .db
+            .get_deployment_entries_for_mod(f.ef_mod)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.relative_path.eq_ignore_ascii_case("SKSE/Plugins/EngineFixes.toml"))
+            .count();
+        assert_eq!(toml_rows, 1, "exactly one manifest row for the TOML");
+
+        // Idempotent: a second pass finds nothing to do.
+        let again = f.migrate();
+        assert!(again.notices.is_empty(), "{:?}", again.notices);
+        assert!(again.warnings.is_empty(), "{:?}", again.warnings);
+    }
+
+    #[test]
+    fn untouched_install_is_left_alone() {
+        let f = fixture();
+        let out = f.migrate();
+        assert!(out.notices.is_empty() && out.warnings.is_empty(), "{out:?}");
+        assert_eq!(fs::read(f.plugins().join("EngineFixes.dll")).unwrap(), b"stock plugin");
+    }
+
+    #[test]
+    fn fork_installed_as_a_mod_is_kept_with_a_warning() {
+        let f = fixture();
+        f.add_mod(
+            "SSE Engine Fixes for Wine",
+            &[
+                ("SKSE/Plugins/0_SSEEngineFixesForWine.dll", b"fork"),
+                ("SKSE/Plugins/SSEEngineFixesForWine.toml", b"cfg"),
+            ],
+            "data",
+        );
+        let out = f.migrate();
+        assert!(f.plugins().join("0_SSEEngineFixesForWine.dll").is_file());
+        assert!(f.plugins().join("SSEEngineFixesForWine.toml").is_file());
+        assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
+        assert!(out.warnings[0].contains("installed as a mod"));
+    }
+
+    #[test]
+    fn fork_files_are_found_case_insensitively() {
+        let f = fixture();
+        let dll = f.plugins().join("0_sseenginefixesforwine.DLL");
+        fs::write(&dll, b"fork").unwrap();
+        let out = f.migrate();
+        assert!(!dll.exists());
+        assert_eq!(out.notices.len(), 1, "{:?}", out.notices);
+    }
+
+    #[test]
+    fn toml_patched_in_staging_warns_to_reinstall() {
+        let f = fixture();
+        // Older versions patched the staging copy too; the original is gone.
+        let staged = f.ef_staging.join("SKSE/Plugins/EngineFixes.toml");
+        let deployed = f.plugins().join("EngineFixes.toml");
+        replace_file(&staged, wine_patched(STOCK_TOML).as_bytes());
+        replace_file(&deployed, wine_patched(STOCK_TOML).as_bytes());
+
+        let out = f.migrate();
+        assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
+        assert!(out.warnings[0].contains("'Engine Fixes'"), "{}", out.warnings[0]);
+        assert!(out.warnings[0].contains("Reinstall"), "{}", out.warnings[0]);
+        // Nothing is invented: both copies stay as they are.
+        assert!(is_legacy_wine_patched_toml_file(&staged));
+        assert!(is_legacy_wine_patched_toml_file(&deployed));
+    }
+
+    #[test]
+    fn user_edited_toml_is_not_overwritten() {
+        let f = fixture();
+        let deployed = f.plugins().join("EngineFixes.toml");
+        let edited = STOCK_TOML.replacen("bSafeExit = true", "bSafeExit = false", 1);
+        replace_file(&deployed, edited.as_bytes());
+        let out = f.migrate();
+        assert!(out.notices.is_empty() && out.warnings.is_empty(), "{out:?}");
+        assert_eq!(fs::read_to_string(&deployed).unwrap(), edited);
     }
 
     #[test]
@@ -3016,13 +2610,13 @@ mod engine_fixes_policy_tests {
         let f = fixture();
         // State left by older versions: deployed copy AND staging copy renamed,
         // manifest row still pointing at EngineFixes.dll.
-        let deployed = f.data.join("SKSE/Plugins/EngineFixes.dll");
+        let deployed = f.plugins().join("EngineFixes.dll");
         let staged = f.ef_staging.join("SKSE/Plugins/EngineFixes.dll");
         fs::rename(&deployed, disabled_sibling(&deployed)).unwrap();
         fs::rename(&staged, disabled_sibling(&staged)).unwrap();
-        assert!(recorded(&f, "SKSE/Plugins/EngineFixes.dll"));
+        assert!(f.recorded("SKSE/Plugins/EngineFixes.dll"));
 
-        prepare_engine_fixes(&f.db, "skyrimse", "Gaming", &f.data, &f.root, false, None);
+        f.migrate();
         assert!(staged.is_file(), "staging copy restored");
         assert!(!disabled_sibling(&staged).exists());
         assert_eq!(fs::read(&deployed).unwrap(), b"stock plugin");
@@ -3036,6 +2630,34 @@ mod engine_fixes_policy_tests {
             1,
             "exactly one manifest row for the plugin"
         );
+
+        // A full redeploy keeps the root preloader in the game root.
+        deployer::redeploy_all(&f.db, "skyrimse", "Gaming", &f.data, &f.root).unwrap();
+        assert!(f.root.join("d3dx9_42.dll").exists());
+        assert!(!f.data.join("d3dx9_42.dll").exists());
+    }
+
+    /// The fork is retired: nothing in the backend may fetch its releases.
+    #[test]
+    fn no_code_downloads_the_wine_fork() {
+        let needles = [
+            ["SSEEngineFixes", "ForWine/releases"].concat(),
+            ["install_engine_fixes", "_wine"].concat(),
+        ];
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        for entry in walkdir::WalkDir::new(&src).into_iter().filter_map(|e| e.ok()) {
+            if entry.path().extension().is_some_and(|e| e == "rs") {
+                let text = fs::read_to_string(entry.path()).unwrap();
+                for needle in &needles {
+                    assert!(
+                        !text.contains(needle.as_str()),
+                        "{} still references `{}`",
+                        entry.path().display(),
+                        needle
+                    );
+                }
+            }
+        }
     }
 }
 

@@ -44,7 +44,7 @@ It works by reading and writing directly to your Wine bottle's filesystem — th
 - [Install](#install) — Download links and build-from-source instructions
 - [Features](#features) — Core features, NexusMods, load order, Wabbajack, shader compat, AI assistant
 - [Supported Platforms](#supported-platforms) — Wine sources (CrossOver, Proton, Lutris, etc.) and game list
-- [SSE Engine Fixes for Wine](#sse-engine-fixes-for-wine) — Companion SKSE plugin for large modlists under Wine
+- [SSE Engine Fixes](#sse-engine-fixes) — Stock Engine Fixes under Wine; the retired Wine fork
 - [Architecture](#architecture) — Tech stack, project structure, how mods are installed
 - [Contributing](#contributing) — Setup, help wanted, how to add game support
 - [Acknowledgments](#acknowledgments) — Projects and authors I build on
@@ -60,14 +60,14 @@ Corkscrew has been **tested extensively with Skyrim Special Edition** on macOS (
 - **NexusMods Collections** — Small-to-medium collections work. [Immersive & Pure](https://next.nexusmods.com/skyrimspecialedition/collections/vaakhi) by Canliberk is the reference tested collection (premium: fully automated; free: guided manual download). FOMOD replay, binary patches, INI tweaks, plugin sync, delta updates.
 - **Plugin load order** — LOOT-powered sorting via [libloot](https://github.com/loot/libloot), drag-and-drop reorder, custom rules
 - **SKSE auto-install** — Detects your game version, downloads the right SKSE build from GitHub
-- **[SSE Engine Fixes for Wine](https://github.com/corkscrewmodding/SSEEngineFixesForWine)** — Auto-deployed before every launch (see [below](#sse-engine-fixes-for-wine))
+- **[SSE Engine Fixes](https://github.com/aers/EngineFixesSkyrim64)** — the stock plugin works under Wine/CrossOver/NotProton (7.0.21+; see [below](#sse-engine-fixes))
 - NXM protocol handling (click "Download with Mod Manager" on Nexus → mod appears in Corkscrew)
 - Profiles, crash log analysis, INI editor with presets, mod tools management
 - NexusMods OAuth sign-in + API key fallback
 - Optional anonymous crash reporting via [Sentry](https://sentry.io/) (opt-in, disabled by default — see [Privacy Policy](PRIVACY.md))
 
 ### Known Issues
-- **Large modlists don't work yet.** Gate to Sovngarde (1700+ plugins) installs and reaches main menu but freezes on New Game due to hash table corruption in Skyrim's engine under Wine. **This is the current bottleneck** — I am actively iterating on [SSE Engine Fixes for Wine](https://github.com/corkscrewmodding/SSEEngineFixesForWine) to solve this. Smaller modlists like [Immersive & Pure](https://next.nexusmods.com/skyrimspecialedition/collections/vaakhi) work end-to-end including New Game and gameplay.
+- **Large modlists don't work yet.** Gate to Sovngarde (1700+ plugins) installs and reaches main menu but freezes on New Game due to hash table corruption in Skyrim's engine under Wine. **This is the current bottleneck.** Smaller modlists like [Immersive & Pure](https://next.nexusmods.com/skyrimspecialedition/collections/vaakhi) work end-to-end including New Game and gameplay.
 - **Wabbajack modlists** — The install pipeline is built (multi-source downloads, BSDiff patching, BSA packing, directive processing), but game file source extraction is incomplete. Complex modlists that depend on vanilla game files as patch sources will partially fail. This is the other main blocker for v1.0.
 
 ### Untested
@@ -442,24 +442,11 @@ GameHub games are started through GameHub, so script extenders (SKSE etc.) and m
 
 ---
 
-## SSE Engine Fixes for Wine
+## SSE Engine Fixes
 
-[SSE Engine Fixes for Wine](https://github.com/corkscrewmodding/SSEEngineFixesForWine) is a companion SKSE plugin maintained alongside Corkscrew. It's a Wine-compatible replacement for the original [SSE Engine Fixes](https://github.com/aers/EngineFixesSkyrim64), which crashes under Wine due to Intel TBB and d3dx9_42.dll preloader incompatibilities.
+Use the stock [SSE Engine Fixes](https://github.com/aers/EngineFixesSkyrim64) (7.0.21 or newer). On Skyrim 1.7.x it loads through SKSE's preloader (`EngineFixes_preload.txt`). It has been verified under CrossOver and NotProton on Skyrim 1.7.104 with SKSE 2.3.1, with every patch on, including the TBB memory manager. Proton never needed a replacement.
 
-**What it does:**
-- Fixes a Wine-specific bug that silently skips all form loading when plugin count exceeds ~600
-- Provides a sentinel page architecture + Vectored Exception Handler for null-pointer and corrupted-vtable crashes
-- Installs inline code-cave patches at hot crash sites for ~2ns validation vs ~50us per VEH fault
-- Includes a watchdog thread that re-applies patches silently reverted by Wine's page management
-
-**How Corkscrew uses it:**
-Before every Skyrim SE launch on Wine, Corkscrew automatically:
-1. Disables the original Engine Fixes (preloader + SKSE plugin + config hooks)
-2. Downloads SSE Engine Fixes for Wine from GitHub if not present
-3. Auto-updates the DLL when a new release is available
-4. Preserves user config (`SSEEngineFixesForWine.toml`) across updates
-
-This enables large modlists to load under Wine — 1700+ plugin lists reach main menu in ~2 minutes with 287K forms. However, very large modlists (Gate to Sovngarde scale) currently freeze on New Game due to hash table corruption in Skyrim's engine under Wine. Fixing this is active work.
+Earlier Corkscrew versions offered SSE Engine Fixes for Wine, a fork made because the old `d3dx9_42.dll` preloader crashed under Wine. The fork only supported Skyrim 1.6.1170 and was retired on 2026-11-03. Corkscrew removes it automatically after the next deploy or launch and restores the stock Engine Fixes files and settings. If an older version switched off the patches in your Engine Fixes mod's `EngineFixes.toml`, Corkscrew tells you to reinstall Engine Fixes.
 
 ---
 
@@ -533,7 +520,7 @@ src-tauri/src/                Rust backend (~92K lines, 101 modules, 938 tests)
 ├── oauth.rs                  OAuth 2.0 + PKCE authentication
 ├── depot_downloader.rs       Steam game version rollback
 ├── loot.rs                   libloot integration
-├── skse.rs                   Script extender management + Engine Fixes deploy
+├── skse.rs                   Script extender management + Engine Fixes migration
 ├── llm_chat.rs               Local LLM chat engine
 ├── vortex_runtime.rs         QuickJS sandbox for Vortex game extensions
 └── plugins/                  Game-specific plugins (Skyrim SE, FO4)

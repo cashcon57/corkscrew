@@ -1765,7 +1765,7 @@ pub fn deploy_incremental(
 }
 
 // ---------------------------------------------------------------------------
-// Targeted exclude / restore (used by game-specific deploy policies)
+// Targeted restore (used by game-specific deploy policies)
 // ---------------------------------------------------------------------------
 
 /// Resolve `rel_path` under `base` component-by-component, case-insensitively,
@@ -1790,60 +1790,6 @@ fn resolve_case_insensitive(base: &Path, rel_path: &str) -> Option<String> {
         parts.push(found);
     }
     (!parts.is_empty()).then(|| parts.join("/"))
-}
-
-/// Stop deploying specific paths: delete their deployed copies and drop
-/// their manifest rows. Staging is never touched, so the files come back as
-/// soon as the caller stops excluding them (and any full redeploy re-adds
-/// them until the caller's policy runs again).
-///
-/// `paths` is a list of `(relative_path, deploy_target)`; paths match
-/// case-insensitively, targets exactly. Returns the relative paths removed.
-pub fn exclude_deployed_paths(
-    db: &ModDatabase,
-    game_id: &str,
-    bottle_name: &str,
-    data_dir: &Path,
-    game_path: &Path,
-    paths: &[(&str, &str)],
-) -> Result<Vec<String>> {
-    let wanted: std::collections::HashSet<(String, &str)> =
-        paths.iter().map(|(p, t)| (manifest_key(p), *t)).collect();
-    let manifest = db
-        .get_deployment_manifest(game_id, bottle_name)
-        .map_err(|e| DeployerError::Database(e.to_string()))?;
-
-    let mut removed = Vec::new();
-    let mut clear_ids = Vec::new();
-    for entry in manifest.iter().filter(|e| {
-        e.deploy_method != "direct"
-            && wanted.contains(&(manifest_key(&e.relative_path), e.deploy_target.as_str()))
-    }) {
-        let base = deploy_base(&entry.deploy_target, data_dir, game_path);
-        let staging_dir =
-            (!entry.staging_path.is_empty()).then(|| Path::new(entry.staging_path.as_str()));
-        match remove_recorded_file(
-            game_id,
-            &entry.relative_path,
-            &entry.deploy_target,
-            base,
-            staging_dir,
-            None,
-        ) {
-            RemoveOutcome::Removed => {
-                removed.push(entry.relative_path.clone());
-                clear_ids.push(entry.id);
-            }
-            RemoveOutcome::AlreadyGone | RemoveOutcome::KeptVanilla => clear_ids.push(entry.id),
-            RemoveOutcome::Failed(e) => warn!(
-                "Exclude: could not remove {} ({}); keeping its record",
-                entry.relative_path, e
-            ),
-        }
-    }
-    db.remove_deployment_entries_by_ids(&clear_ids)
-        .map_err(|e| DeployerError::Database(e.to_string()))?;
-    Ok(removed)
 }
 
 /// Make sure each `(relative_path, deploy_target)` is deployed from the

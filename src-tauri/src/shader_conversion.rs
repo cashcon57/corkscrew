@@ -279,8 +279,7 @@ const ESSENTIAL_SKSE_PLUGINS: &[&str] = &[
     "address library for skse plugins.dll",
     "jcontainers64.dll",
     "papyrusutil.dll",
-    "skseengineFixesforwine.dll",
-    "0_sseenginefixesforwine.dll",
+    "enginefixes.dll",
     "consoleutil.dll",
     "powerofthree's tweaks.dll",
 ];

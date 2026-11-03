@@ -1291,8 +1291,6 @@ pub fn run() {
             commands::deployment::check_deployment_health,
             commands::deployment::get_verification_level,
             commands::deployment::set_verification_level,
-            commands::deployment::set_use_original_engine_fixes,
-            commands::deployment::set_use_wine_engine_fixes,
             commands::deployment::purge_deployment_cmd,
             commands::deployment::verify_mod_integrity,
             commands::deployment::get_deployment_health,
