@@ -32,7 +32,36 @@ pub struct Bottle {
     pub source: String,
 }
 
+/// Source label for Steam Play prefixes created by Proton on Linux.
+pub const PROTON_SOURCE: &str = "Proton";
+/// Source label for Steam Play prefixes created by NotProton on macOS.
+pub const NOTPROTON_SOURCE: &str = "NotProton";
+
 impl Bottle {
+    /// True for a Steam Play prefix (`steamapps/compatdata/<appid>/pfx`)
+    /// made by Proton (Linux) or NotProton (macOS). Such a prefix belongs to
+    /// exactly one Steam app, whose files live in the host Steam library.
+    pub fn is_steam_compat_prefix(&self) -> bool {
+        self.source == PROTON_SOURCE || self.source == NOTPROTON_SOURCE
+    }
+
+    /// The Steam app ID of a Steam Play prefix, read from its path
+    /// (`.../steamapps/compatdata/<appid>/pfx`). `None` for other bottles.
+    pub fn steam_compat_app_id(&self) -> Option<u32> {
+        if !self.is_steam_compat_prefix() || self.path.file_name()? != "pfx" {
+            return None;
+        }
+        let app_dir = self.path.parent()?;
+        if app_dir.parent()?.file_name()? != "compatdata" {
+            return None;
+        }
+        let app_id = app_dir.file_name()?.to_str()?;
+        if app_id.is_empty() || !app_id.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        app_id.parse().ok()
+    }
+
     /// Path to the virtual C: drive inside this bottle.
     pub fn drive_c(&self) -> PathBuf {
         self.path.join("drive_c")
@@ -255,7 +284,7 @@ struct SearchLocation {
 /// Build the list of directories to scan on macOS.
 #[cfg(target_os = "macos")]
 fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
-    vec![
+    let mut locations = vec![
         // CrossOver (unsandboxed — direct install from CodeWeavers website)
         SearchLocation {
             source: "CrossOver",
@@ -314,7 +343,39 @@ fn platform_search_locations(home: &Path) -> Vec<SearchLocation> {
                 .join("io.getmythic.Mythic")
                 .join("Bottles"),
         },
-    ]
+    ];
+    // NotProton (Steam Play for macOS) prefixes in every macOS Steam library.
+    locations.extend(steam_compatdata_locations(
+        &crate::proton::macos_steam_root(home),
+        NOTPROTON_SOURCE,
+    ));
+    locations
+}
+
+/// `steamapps/compatdata` of a Steam root and of every secondary library its
+/// `libraryfolders.vdf` lists, each real directory once. Missing directories
+/// are kept for the root (the scan skips them) and dropped for libraries.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn steam_compatdata_locations(steam_root: &Path, source: &'static str) -> Vec<SearchLocation> {
+    let mut locations = vec![SearchLocation {
+        source,
+        path: steam_root.join("steamapps").join("compatdata"),
+    }];
+    for vdf_name in ["steamapps/libraryfolders.vdf", "config/libraryfolders.vdf"] {
+        let Ok(content) = fs::read_to_string(steam_root.join(vdf_name)) else {
+            continue;
+        };
+        for line in content.lines() {
+            let Some(root) = steam_library_root_from_vdf_line(line) else {
+                continue;
+            };
+            let compatdata = root.join("steamapps").join("compatdata");
+            if compatdata.is_dir() && !locations.iter().any(|l| same_dir(&l.path, &compatdata)) {
+                locations.push(SearchLocation { source, path: compatdata });
+            }
+        }
+    }
+    locations
 }
 
 /// Build the list of directories to scan on Linux.
@@ -663,7 +724,6 @@ fn preferred_bottle_roots(home: &Path, xdg_data_home: Option<&OsStr>) -> Vec<Pat
 /// The value comes from an external file, so only absolute paths without
 /// `..` components or NUL bytes are accepted. This also filters out numeric
 /// app-size entries such as `"228980"		"0"` in modern `"apps"` blocks.
-#[cfg(target_os = "linux")]
 fn steam_library_root_from_vdf_line(line: &str) -> Option<PathBuf> {
     let rest = line.trim().strip_prefix('"')?;
     let (key, rest) = rest.split_once('"')?;
@@ -856,9 +916,8 @@ fn collect_bottles_from(location: &SearchLocation, bottles: &mut Vec<Bottle>) {
     //   compatdata/{appid}/pfx/drive_c    (the actual Wine prefix)
     // Other bottle managers use:
     //   bottles/{name}/drive_c
-    #[cfg(target_os = "linux")]
-    if location.source == "Proton" {
-        collect_proton_bottles(&location.path, bottles);
+    if location.source == PROTON_SOURCE || location.source == NOTPROTON_SOURCE {
+        collect_proton_bottles(&location.path, location.source, bottles);
         return;
     }
 
@@ -899,8 +958,7 @@ fn collect_bottles_from(location: &SearchLocation, bottles: &mut Vec<Bottle>) {
 /// is the actual Wine prefix containing `drive_c/`.  We cross-reference the app
 /// ID against `appmanifest_{appid}.acf` in the parent `steamapps/` to get a
 /// human-readable game name for the bottle.
-#[cfg(target_os = "linux")]
-fn collect_proton_bottles(compatdata_dir: &Path, bottles: &mut Vec<Bottle>) {
+fn collect_proton_bottles(compatdata_dir: &Path, source: &str, bottles: &mut Vec<Bottle>) {
     if !compatdata_dir.is_dir() {
         return;
     }
@@ -942,18 +1000,17 @@ fn collect_proton_bottles(compatdata_dir: &Path, bottles: &mut Vec<Bottle>) {
                 let manifest = sa.join(format!("appmanifest_{}.acf", app_id_str));
                 parse_appmanifest_name(&manifest)
             })
-            .unwrap_or_else(|| format!("Proton {}", app_id_str));
+            .unwrap_or_else(|| format!("{source} {app_id_str}"));
 
         bottles.push(Bottle {
             name,
             path: pfx_dir,
-            source: "Proton".to_string(),
+            source: source.to_string(),
         });
     }
 }
 
 /// Extract the game name from a Steam appmanifest .acf file.
-#[cfg(target_os = "linux")]
 fn parse_appmanifest_name(path: &Path) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;
     for line in content.lines() {
@@ -1404,6 +1461,104 @@ pub fn find_bottle_by_name(name: &str) -> Option<Bottle> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- NotProton (Steam Play for macOS) ----
+
+    fn make_prefix(compatdata: &Path, app_id: &str) -> PathBuf {
+        let pfx = compatdata.join(app_id).join("pfx");
+        fs::create_dir_all(pfx.join("drive_c/users/steamuser")).unwrap();
+        pfx
+    }
+
+    #[test]
+    fn notproton_prefixes_are_collected_with_their_own_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let steamapps = tmp.path().join("steamapps");
+        let compatdata = steamapps.join("compatdata");
+        let pfx = make_prefix(&compatdata, "489830");
+        make_prefix(&compatdata, "233860");
+        // NotProton's template prefix is not an app and must be skipped.
+        fs::create_dir_all(compatdata.join("notproton-template/26.3/pfx/drive_c")).unwrap();
+        fs::write(
+            steamapps.join("appmanifest_489830.acf"),
+            "\"AppState\"\n{\n\t\"appid\"\t\t\"489830\"\n\t\"name\"\t\t\"The Elder Scrolls V: Skyrim Special Edition\"\n}\n",
+        )
+        .unwrap();
+
+        let mut bottles = Vec::new();
+        collect_bottles_from(
+            &SearchLocation { source: NOTPROTON_SOURCE, path: compatdata },
+            &mut bottles,
+        );
+
+        assert_eq!(bottles.len(), 2);
+        assert!(bottles.iter().all(|b| b.source == NOTPROTON_SOURCE));
+        let skyrim = bottles.iter().find(|b| b.path == pfx).unwrap();
+        assert_eq!(skyrim.name, "The Elder Scrolls V: Skyrim Special Edition");
+        assert!(skyrim.is_steam_compat_prefix());
+        assert_eq!(skyrim.steam_compat_app_id(), Some(489830));
+        // No appmanifest: falls back to "<source> <appid>".
+        assert!(bottles.iter().any(|b| b.name == "NotProton 233860"));
+    }
+
+    #[test]
+    fn steam_compat_app_id_requires_compatdata_appid_pfx_shape() {
+        let bottle = |source: &str, path: &str| Bottle {
+            name: "x".into(),
+            path: PathBuf::from(path),
+            source: source.into(),
+        };
+        assert_eq!(
+            bottle("NotProton", "/lib/steamapps/compatdata/72850/pfx").steam_compat_app_id(),
+            Some(72850)
+        );
+        assert_eq!(
+            bottle("Proton", "/lib/steamapps/compatdata/72850/pfx").steam_compat_app_id(),
+            Some(72850)
+        );
+        assert_eq!(bottle("CrossOver", "/lib/steamapps/compatdata/72850/pfx").steam_compat_app_id(), None);
+        assert_eq!(bottle("NotProton", "/lib/steamapps/compatdata/abc/pfx").steam_compat_app_id(), None);
+        assert_eq!(bottle("NotProton", "/lib/steamapps/compatdata/72850").steam_compat_app_id(), None);
+        assert_eq!(bottle("NotProton", "/lib/steamapps/other/72850/pfx").steam_compat_app_id(), None);
+    }
+
+    #[test]
+    fn steam_compatdata_locations_include_secondary_libraries_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Steam");
+        let library = tmp.path().join("External Games");
+        fs::create_dir_all(root.join("steamapps/compatdata")).unwrap();
+        fs::create_dir_all(library.join("steamapps/compatdata")).unwrap();
+        fs::create_dir_all(root.join("config")).unwrap();
+        let vdf = format!(
+            "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n\t\"2\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n}}\n",
+            root.display(),
+            library.display(),
+            tmp.path().join("missing").display()
+        );
+        // Steam keeps the same file in both places; each library counts once.
+        fs::write(root.join("steamapps/libraryfolders.vdf"), &vdf).unwrap();
+        fs::write(root.join("config/libraryfolders.vdf"), &vdf).unwrap();
+
+        let paths: Vec<PathBuf> = steam_compatdata_locations(&root, NOTPROTON_SOURCE)
+            .into_iter()
+            .inspect(|l| assert_eq!(l.source, NOTPROTON_SOURCE))
+            .map(|l| l.path)
+            .collect();
+        assert_eq!(
+            paths,
+            vec![root.join("steamapps/compatdata"), library.join("steamapps/compatdata")]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_scans_notproton_compatdata() {
+        let home = Path::new("/Users/tester");
+        let locations = platform_search_locations(home);
+        assert!(locations.iter().any(|l| l.source == NOTPROTON_SOURCE
+            && l.path == home.join("Library/Application Support/Steam/steamapps/compatdata")));
+    }
     use std::fs;
 
     /// Helper: create a minimal fake bottle on disk and return its path.

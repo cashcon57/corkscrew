@@ -1810,6 +1810,17 @@ pub async fn launch_game_cmd(
     let game_path = PathBuf::from(&game.game_path);
     let data_dir_check = PathBuf::from(&game.data_dir);
 
+    // NotProton games start through the macOS Steam client (see
+    // `launcher::launch_via_steam`), which runs the game's own executable.
+    // Script extenders and custom executables need a different exe and aren't
+    // wired up for NotProton yet.
+    let via_steam = bottle.source == crate::bottles::NOTPROTON_SOURCE;
+    if via_steam && use_skse {
+        return Err("Launching through a script extender isn't supported for NotProton games yet. \
+                    Turn off the script extender option to start the game through Steam."
+            .to_string());
+    }
+
     // Pre-launch self-healing: check if deployment is consistent, auto-fix if not
     {
         let t = Instant::now();
@@ -1839,7 +1850,7 @@ pub async fn launch_game_cmd(
 
     // When SKSE is requested, it takes priority over custom executables.
     // Otherwise, check for a custom default executable first.
-    if !use_skse {
+    if !use_skse && !via_steam {
         let custom_exe =
             executables::get_default_executable(&db, &game_id, &bottle_name).unwrap_or(None);
 
@@ -2122,8 +2133,12 @@ pub async fn launch_game_cmd(
 
     log::info!("Pre-launch: total pre-launch pipeline: {}ms", launch_start.elapsed().as_millis());
 
-    let mut result = launcher::launch_game(&bottle, &exe_path, Some(&game_path), Some(&game_id), None)
-        .map_err(|e| format!("Launch failed ({}): {}", bottle.source, e))?;
+    let mut result = if via_steam {
+        launcher::launch_via_steam(&bottle)
+    } else {
+        launcher::launch_game(&bottle, &exe_path, Some(&game_path), Some(&game_id), None)
+    }
+    .map_err(|e| format!("Launch failed ({}): {}", bottle.source, e))?;
 
     // Cursor fix is now handled by Wine registry keys (set in auto_fix_display
     // above via fix_cursor_grab). No runtime Dock/Hot Corner/event tap needed.

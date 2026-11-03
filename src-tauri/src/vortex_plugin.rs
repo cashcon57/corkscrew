@@ -172,7 +172,7 @@ fn find_game_in_bottle(bottle: &Bottle, reg: &VortexGameRegistration) -> Option<
     // 2. Additional Steam libraries. Proton prefixes only resolve the owning
     // app's host install — their libraryfolders.vdf maps onto host libraries
     // holding other apps, so it is never scanned there.
-    if bottle.source == "Proton" {
+    if bottle.is_steam_compat_prefix() {
         let mut candidates = vec![steam_dir];
         if !reg.name.eq_ignore_ascii_case(steam_dir) {
             candidates.push(&reg.name);

@@ -194,7 +194,7 @@ const STEAM_COMMON: &[&str] = &["Program Files (x86)", "Steam", "steamapps", "co
 /// through the owner-validated [`find_proton_prefix_game`]. Every default
 /// Steam lookup (registry and per-game plugins) must go through here.
 pub(crate) fn default_steam_common(bottle: &Bottle) -> Option<PathBuf> {
-    if bottle.source == "Proton" {
+    if bottle.is_steam_compat_prefix() {
         return None;
     }
     bottle.find_path(STEAM_COMMON)
@@ -485,7 +485,7 @@ struct ProtonPrefixOwner {
 /// Returns `None` for anything that isn't shaped like
 /// `.../steamapps/compatdata/<digits>/pfx`.
 fn proton_prefix_owner(bottle: &Bottle) -> Option<ProtonPrefixOwner> {
-    if bottle.source != "Proton" {
+    if !bottle.is_steam_compat_prefix() {
         return None;
     }
 
@@ -803,7 +803,7 @@ pub(crate) fn collect_steam_library_paths(bottle: &Bottle) -> Vec<PathBuf> {
     // libraryfolders.vdf inside it) can map onto host Steam libraries holding
     // other apps, so it never gets a generic library scan — only its owner
     // lookup ([`find_proton_prefix_game`] / [`manifest_scan_targets`]).
-    if bottle.source == "Proton" {
+    if bottle.is_steam_compat_prefix() {
         return Vec::new();
     }
 

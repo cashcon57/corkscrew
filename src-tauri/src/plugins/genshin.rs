@@ -294,7 +294,7 @@ fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
     // for a non-Steam shortcut is found by the in-prefix HoYoPlay/standalone
     // checks instead. Never scan the prefix's libraryfolders.vdf — it maps
     // onto host libraries holding other apps.
-    if bottle.source == "Proton" {
+    if bottle.is_steam_compat_prefix() {
         return None;
     }
 
