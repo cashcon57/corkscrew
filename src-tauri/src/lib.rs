@@ -45,6 +45,7 @@ pub mod instruction_validator;
 pub mod integrity;
 pub mod launch_fixes;
 pub mod launcher;
+pub mod launcher_swap;
 pub mod llm_chat;
 pub mod llm_parser;
 pub mod loot;
