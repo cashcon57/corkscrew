@@ -421,6 +421,14 @@
 
   // Update check state
   let modUpdates = $state<ModUpdateInfo[]>([]);
+
+  // modUpdates is iterated by derived state (updateMap, badge counts), so it
+  // must always be an array. Report anything else instead of storing it.
+  function asUpdateList(value: unknown, source: string): ModUpdateInfo[] {
+    if (Array.isArray(value)) return value as ModUpdateInfo[];
+    console.error(`[mods] ${source} returned a non-array update list:`, value);
+    return [];
+  }
   let checkingUpdates = $state(false);
   let updatingAll = $state(false);
 
@@ -1320,7 +1328,7 @@
         .catch((err) => console.error('Failed to load conflicts:', err));
       // Background: stored results of the last Nexus update check
       getModUpdateResults(game.game_id, (wineCtx(game)?.bottle_name ?? ""))
-        .then(u => { if (thisLoad === loadGeneration) modUpdates = u; })
+        .then(u => { if (thisLoad === loadGeneration) modUpdates = asUpdateList(u, 'get_mod_update_results'); })
         .catch((err) => console.error('Failed to load stored update results:', err));
       // Background: endorsements
       loadEndorsements(game.nexus_slug);
@@ -1990,7 +1998,10 @@
     if (!game) return;
     checkingUpdates = true;
     try {
-      modUpdates = await checkModUpdates(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
+      modUpdates = asUpdateList(
+        await checkModUpdates(game.game_id, (wineCtx(game)?.bottle_name ?? "")),
+        "check_mod_updates",
+      );
       if (modUpdates.length === 0) {
         showSuccess("All mods are up to date");
       } else {
@@ -2181,7 +2192,10 @@
     const game = pickedGame ?? $selectedGame;
     if (!game || !mod.nexus_mod_id) return;
     try {
-      const updates = await checkModUpdates(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
+      const updates = asUpdateList(
+        await checkModUpdates(game.game_id, (wineCtx(game)?.bottle_name ?? "")),
+        "check_mod_updates",
+      );
       modUpdates = updates;
       const update = updates.find(u => u.mod_id === mod.id);
       if (update) {
