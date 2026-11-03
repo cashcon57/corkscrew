@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { getDiskBudget } from "$lib/api";
   import { formatBytes } from "$lib/format";
   import type { DiskBudget } from "$lib/types";
@@ -41,19 +42,32 @@
     budget?.uses_hardlinks ? "Hardlinks" : "Copies"
   );
 
-  async function load() {
+  // Guards against an older request (previous game/bottle) resolving after a
+  // newer one and overwriting its result or clearing its spinner.
+  let loadGeneration = 0;
+
+  async function load(game: string, bottle: string) {
+    const gen = ++loadGeneration;
     loading = true;
     try {
-      budget = await getDiskBudget(gameId, bottleName);
-    } catch {
-      budget = null;
+      const result = await getDiskBudget(game, bottle);
+      if (gen === loadGeneration) budget = result;
+    } catch (err) {
+      console.error(`Failed to load disk budget for ${game}/${bottle}:`, err);
+      if (gen === loadGeneration) budget = null;
     } finally {
-      loading = false;
+      if (gen === loadGeneration) loading = false;
     }
   }
 
+  function refresh() {
+    void load(gameId, bottleName);
+  }
+
   $effect(() => {
-    if (gameId && bottleName) load();
+    const game = gameId;
+    const bottle = bottleName;
+    if (game && bottle) untrack(() => load(game, bottle));
   });
 </script>
 
@@ -178,7 +192,7 @@
 
         <!-- Refresh -->
         <div class="budget-actions">
-          <button class="btn-budget-refresh" onclick={load} disabled={loading} type="button">
+          <button class="btn-budget-refresh" onclick={refresh} disabled={loading} type="button">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21 2v6h-6M3 12a9 9 0 0 1 15-6.7L21 8M3 22v-6h6M21 12a9 9 0 0 1-15 6.7L3 16" />
             </svg>
@@ -188,7 +202,7 @@
       {:else}
         <div class="budget-empty">
           <p class="budget-empty-text">Could not retrieve disk usage information.</p>
-          <button class="btn-budget-refresh" onclick={load} type="button">
+          <button class="btn-budget-refresh" onclick={refresh} type="button">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21 2v6h-6M3 12a9 9 0 0 1 15-6.7L21 8M3 22v-6h6M21 12a9 9 0 0 1-15 6.7L3 16" />
             </svg>
