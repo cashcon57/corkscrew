@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-pub const TARGET_VERSION: u32 = 24;
+pub const TARGET_VERSION: u32 = 25;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -164,6 +164,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 23 {
         migrate_v23_to_v24(conn)?;
         version = 24;
+    }
+
+    if version == 24 {
+        migrate_v24_to_v25(conn)?;
+        version = 25;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -1259,6 +1264,43 @@ fn migrate_v23_to_v24(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Migration v24 → v25: persist each mod's deploy target on `installed_mods`.
+///
+/// **Why.** The per-mod target (`data` / `root` / `custom`) used to be read
+/// back from the mod's own `deployment_manifest` rows. Those rows are deleted
+/// whenever the mod is undeployed — on disable, and for every mod at the
+/// start of `redeploy_all`'s purge — so the target silently reset to `data`
+/// and root-deployed files (SKSE loader, `d3dx9_42.dll`, ENB binaries) were
+/// redeployed into `Data/`. The column outlives the manifest rows.
+///
+/// NULL means "unknown": readers fall back to the manifest, then `data`.
+/// Backfill prefers a non-`data` target when a mod has mixed rows.
+fn migrate_v24_to_v25(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    match tx.execute_batch("ALTER TABLE installed_mods ADD COLUMN deploy_target TEXT") {
+        Ok(()) => {}
+        Err(e) if e.to_string().contains("duplicate column") => {}
+        Err(e) => return Err(MigrationError::Sqlite(e)),
+    }
+
+    tx.execute_batch(
+        "UPDATE installed_mods
+            SET deploy_target = (
+                SELECT dm.deploy_target FROM deployment_manifest dm
+                 WHERE dm.mod_id = installed_mods.id
+                 ORDER BY (dm.deploy_target = 'data') ASC
+                 LIMIT 1)
+          WHERE deploy_target IS NULL;",
+    )?;
+
+    tx.execute("UPDATE schema_version SET version = 25", [])?;
+
+    tx.commit()?;
+    log::info!("Migration 24 → 25 complete (installed_mods.deploy_target)");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1677,6 +1719,42 @@ mod tests {
                 .unwrap();
             assert!(exists, "missing index after v24 rebuild: {}", idx);
         }
+    }
+
+    #[test]
+    fn v25_backfills_installed_mods_deploy_target_preferring_non_data() {
+        let conn = memory_db();
+        migrate(&conn).unwrap();
+        // Roll back to v24 shape: drop the column's values and re-run the step.
+        conn.execute_batch(
+            "INSERT INTO installed_mods
+                (id, game_id, bottle_name, name, version, archive_name, installed_files, installed_at)
+             VALUES (1, 'skyrimse', 'b', 'Root', '1', 'a.zip', '[]', '2026-01-01'),
+                    (2, 'skyrimse', 'b', 'Data', '1', 'b.zip', '[]', '2026-01-01'),
+                    (3, 'skyrimse', 'b', 'Undeployed', '1', 'c.zip', '[]', '2026-01-01');
+             INSERT INTO deployment_manifest
+                (game_id, bottle_name, mod_id, relative_path, staging_path, deploy_method, deployed_at, deploy_target)
+             VALUES ('skyrimse', 'b', 1, 'a.esp', '/s', 'hardlink', 't', 'data'),
+                    ('skyrimse', 'b', 1, 'd3dx9_42.dll', '/s', 'hardlink', 't', 'root'),
+                    ('skyrimse', 'b', 2, 'b.esp', '/s', 'hardlink', 't', 'data');
+             UPDATE installed_mods SET deploy_target = NULL;
+             UPDATE schema_version SET version = 24;",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), TARGET_VERSION);
+        let target = |id: i64| -> Option<String> {
+            conn.query_row(
+                "SELECT deploy_target FROM installed_mods WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(target(1).as_deref(), Some("root"));
+        assert_eq!(target(2).as_deref(), Some("data"));
+        assert_eq!(target(3), None);
     }
 
     #[test]

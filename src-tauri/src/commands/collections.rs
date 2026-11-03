@@ -94,6 +94,15 @@ pub async fn switch_collection_cmd(
     tokio::task::spawn_blocking(move || {
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
 
+        // Switching rewrites every mod's enabled flag; snapshot first so the
+        // previous enabled-set (including deliberate disables) can be restored.
+        auto_snapshot_before_destructive(
+            &db,
+            &game_id,
+            &bottle_name,
+            &format!("Before switching to collection: {}", collection_name),
+        );
+
         let journal_id = deploy_journal::begin(
             &game_id, &bottle_name, deploy_journal::JournalOp::RedeployAll, &[],
         ).unwrap_or_default();
@@ -156,11 +165,12 @@ pub async fn switch_collection_cmd(
 
         // 5. Sync plugins if Skyrim SE
         // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
-        let _ = crate::sync_plugins_for_game(&game, &bottle);
+        let plugins_sync_error = crate::sync_plugins_logged(&game, &bottle, "collection switch");
 
         Ok(serde_json::json!({
             "deployed_count": result.deployed_count,
             "active_collection": collection_name,
+            "plugins_sync_error": plugins_sync_error,
         }))
     })
     .await
@@ -490,7 +500,7 @@ pub async fn delete_collection_cmd(
         );
 
         // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
-        let _ = crate::sync_plugins_for_game(&game, &bottle);
+        crate::sync_plugins_logged(&game, &bottle, "collection delete");
 
         // Clean up game-specific framework files deployed outside data_dir.
         // For Hogwarts Legacy: remove UE4SS from Phoenix/Binaries/Win64/ if no
@@ -775,7 +785,7 @@ pub async fn uninstall_wabbajack_modlist(
         );
 
         // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
-        let _ = crate::sync_plugins_for_game(&game, &bottle);
+        crate::sync_plugins_logged(&game, &bottle, "modlist uninstall");
 
         // Clean up HL-specific framework files (UE4SS) if no remaining mods need them
         if game_id == "hogwartslegacy" {
@@ -884,6 +894,7 @@ pub async fn restore_mod_snapshot(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
+    let _guard = DeployGuard::try_acquire(state.deploy_in_progress.clone(), app.clone())?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
@@ -903,12 +914,13 @@ pub async fn restore_mod_snapshot(
         );
 
         // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
-        let _ = crate::sync_plugins_for_game(&game, &bottle);
+        let plugins_sync_error = crate::sync_plugins_logged(&game, &bottle, "snapshot restore");
 
         Ok(serde_json::json!({
             "mods_enabled": result.mods_enabled,
             "mods_disabled": result.mods_disabled,
             "mods_not_found": result.mods_not_found,
+            "plugins_sync_error": plugins_sync_error,
         }))
     })
     .await
@@ -917,12 +929,14 @@ pub async fn restore_mod_snapshot(
 
 #[tauri::command]
 pub async fn return_to_vanilla(
+    app: AppHandle,
     game_id: String,
     bottle_name: String,
     clean_orphans: bool,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
+    let _guard = DeployGuard::try_acquire(state.deploy_in_progress.clone(), app.clone())?;
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
@@ -970,9 +984,10 @@ pub async fn return_to_vanilla(
         };
 
         // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
-        let _ = crate::sync_plugins_for_game(&game, &bottle);
+        let plugins_sync_error = crate::sync_plugins_logged(&game, &bottle, "return to vanilla");
 
         Ok(serde_json::json!({
+            "plugins_sync_error": plugins_sync_error,
             "mods_disabled": mods_disabled,
             "files_removed": files_removed,
             "orphans_cleaned": orphans_cleaned,

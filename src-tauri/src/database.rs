@@ -106,6 +106,26 @@ pub struct DeploymentEntry {
     pub deploy_target: String,
 }
 
+/// Map a `deployment_manifest` row, selected in the canonical column order
+/// used by `get_deployment_manifest`, into a [`DeploymentEntry`].
+fn deployment_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeploymentEntry> {
+    Ok(DeploymentEntry {
+        id: row.get(0)?,
+        game_id: row.get(1)?,
+        bottle_name: row.get(2)?,
+        mod_id: row.get(3)?,
+        relative_path: row.get(4)?,
+        staging_path: row.get(5)?,
+        deploy_method: row.get(6)?,
+        sha256: row.get(7)?,
+        deployed_at: row.get(8)?,
+        mod_name: row.get(9)?,
+        deploy_target: row
+            .get::<_, String>(10)
+            .unwrap_or_else(|_| "data".to_string()),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // DownloadRecord
 // ---------------------------------------------------------------------------
@@ -1003,9 +1023,14 @@ impl ModDatabase {
         Ok(paths)
     }
 
-    /// Set deploy_target for all deployment entries of a mod.
+    /// Set deploy_target for a mod: persisted on `installed_mods` (so it
+    /// survives undeploy/purge) and applied to its current manifest rows.
     pub fn set_deploy_target_for_mod(&self, mod_id: i64, target: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE installed_mods SET deploy_target = ?1 WHERE id = ?2",
+            params![target, mod_id],
+        )?;
         conn.execute(
             "UPDATE deployment_manifest SET deploy_target = ?1 WHERE mod_id = ?2",
             params![target, mod_id],
@@ -1013,13 +1038,38 @@ impl ModDatabase {
         Ok(())
     }
 
-    /// Get the deploy_target for a mod (from its deployment manifest entries).
-    /// Returns "data" if no entries exist.
+    /// Remember a mod's deploy target on `installed_mods` without touching
+    /// its manifest rows. Called on every deploy so the target survives the
+    /// manifest rows being dropped by undeploy/purge.
+    pub fn remember_deploy_target_for_mod(&self, mod_id: i64, target: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE installed_mods SET deploy_target = ?1
+              WHERE id = ?2 AND (deploy_target IS NULL OR deploy_target != ?1)",
+            params![target, mod_id],
+        )?;
+        Ok(())
+    }
+
+    /// Get the deploy_target for a mod: the persisted per-mod value, else
+    /// one of its deployment manifest rows, else "data".
     pub fn get_deploy_target_for_mod(&self, mod_id: i64) -> Result<String> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let persisted: Option<String> = conn
+            .query_row(
+                "SELECT deploy_target FROM installed_mods WHERE id = ?1",
+                params![mod_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten();
+        if let Some(target) = persisted {
+            return Ok(target);
+        }
         let result: Option<String> = conn
             .query_row(
-                "SELECT deploy_target FROM deployment_manifest WHERE mod_id = ?1 LIMIT 1",
+                "SELECT deploy_target FROM deployment_manifest WHERE mod_id = ?1
+                 ORDER BY (deploy_target = 'data') ASC LIMIT 1",
                 params![mod_id],
                 |row| row.get(0),
             )
@@ -1045,29 +1095,57 @@ impl ModDatabase {
              ORDER BY dm.relative_path",
         )?;
 
-        let rows = stmt.query_map(params![game_id, bottle_name], |row| {
-            Ok(DeploymentEntry {
-                id: row.get(0)?,
-                game_id: row.get(1)?,
-                bottle_name: row.get(2)?,
-                mod_id: row.get(3)?,
-                relative_path: row.get(4)?,
-                staging_path: row.get(5)?,
-                deploy_method: row.get(6)?,
-                sha256: row.get(7)?,
-                deployed_at: row.get(8)?,
-                mod_name: row.get(9)?,
-                deploy_target: row
-                    .get::<_, String>(10)
-                    .unwrap_or_else(|_| "data".to_string()),
-            })
-        })?;
+        let rows = stmt.query_map(params![game_id, bottle_name], deployment_entry_from_row)?;
 
         let mut entries = Vec::new();
         for row in rows {
             entries.push(row?);
         }
         Ok(entries)
+    }
+
+    /// Get all deployment manifest rows owned by a single mod (with row ids,
+    /// staging path and deploy target), without deleting them.
+    pub fn get_deployment_entries_for_mod(&self, mod_id: i64) -> Result<Vec<DeploymentEntry>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT dm.id, dm.game_id, dm.bottle_name, dm.mod_id, dm.relative_path,
+                    dm.staging_path, dm.deploy_method, dm.sha256, dm.deployed_at,
+                    COALESCE(im.name, 'Unknown') as mod_name,
+                    dm.deploy_target
+             FROM deployment_manifest dm
+             LEFT JOIN installed_mods im ON dm.mod_id = im.id
+             WHERE dm.mod_id = ?1
+             ORDER BY dm.relative_path",
+        )?;
+        let rows = stmt.query_map(params![mod_id], deployment_entry_from_row)?;
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row?);
+        }
+        Ok(entries)
+    }
+
+    /// Delete specific deployment manifest rows by primary key in one
+    /// transaction. Undeploy/purge use this so rows for files that could NOT
+    /// be removed from disk stay tracked — a dropped row for a file still on
+    /// disk turns it into an "unmanaged" file that later deploys refuse to
+    /// overwrite.
+    pub fn remove_deployment_entries_by_ids(&self, ids: &[i64]) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.unchecked_transaction()?;
+        let mut removed = 0usize;
+        {
+            let mut stmt = tx.prepare_cached("DELETE FROM deployment_manifest WHERE id = ?1")?;
+            for id in ids {
+                removed += stmt.execute(params![id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(removed)
     }
 
     /// Get the deployment entry for a specific file path.

@@ -612,7 +612,7 @@ pub async fn install_mod_cmd(
                     detail: Some("Syncing plugin load order...".to_string()),
                 },
             );
-            let _ = crate::sync_plugins_for_game(&game, &bottle);
+            crate::sync_plugins_logged(&game, &bottle, "mod install");
         }
 
         // Set source type if provided
@@ -699,7 +699,7 @@ pub async fn uninstall_mod(
 
         // Sync Skyrim plugins if applicable
         // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
-        let _ = crate::sync_plugins_for_game(&game, &bottle);
+        crate::sync_plugins_logged(&game, &bottle, "mod uninstall");
 
         // Post-undeploy hook (e.g. sync Mods.txt for HL Lua mods)
         games::with_plugin(&game_id, |plugin| {
@@ -800,7 +800,7 @@ pub async fn toggle_mod(
 
             // Sync Skyrim plugins if applicable
             // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
-            let _ = crate::sync_plugins_for_game(&game, &bottle);
+            crate::sync_plugins_logged(&game, &bottle, "mod toggle");
         }
         // Legacy mods (no staging_path): only the DB flag changes
 
@@ -830,6 +830,12 @@ pub async fn batch_toggle_mods(
 
         let total = mod_ids.len();
         let action = if enabled { "Enabling" } else { "Disabling" };
+
+        // A bulk toggle overwrites every selected mod's enabled flag, which
+        // erases deliberate per-mod choices (e.g. a mod disabled on purpose
+        // before a bulk disable comes back on with the bulk re-enable).
+        // Snapshot the full enabled-set first so it can be restored.
+        snapshot_before_bulk_toggle(&db, &game_id, &bottle_name, total, enabled);
 
         const BATCH_REDEPLOY_THRESHOLD: usize = 5;
 
@@ -902,7 +908,9 @@ pub async fn batch_toggle_mods(
                         "message": "Syncing plugins.txt...",
                     }),
                 );
-                let _ = crate::sync_plugins_for_game(&game, &bottle);
+                if let Some(e) = crate::sync_plugins_logged(&game, &bottle, "bulk toggle") {
+                    errors.push(format!("plugins.txt sync failed: {}", e));
+                }
             }
 
             let count = toggled.len();
@@ -999,7 +1007,9 @@ pub async fn batch_toggle_mods(
             }
 
             // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
-            let _ = crate::sync_plugins_for_game(&game, &bottle);
+            if let Some(e) = crate::sync_plugins_logged(&game, &bottle, "batch toggle") {
+                errors.push(format!("plugins.txt sync failed: {}", e));
+            }
 
             if errors.is_empty() {
                 Ok(format!("{}", count))
@@ -1015,6 +1025,32 @@ pub async fn batch_toggle_mods(
     })
     .await
     .map_err(crate::format_join_error)?
+}
+
+/// Snapshot every mod's enabled flag + priority before a bulk toggle so the
+/// previous enabled-set (including deliberate per-mod disables) can be
+/// brought back with `restore_mod_snapshot`. Best-effort: failures are
+/// logged by `auto_snapshot_before_destructive` and never block the toggle.
+pub(crate) fn snapshot_before_bulk_toggle(
+    db: &crate::database::ModDatabase,
+    game_id: &str,
+    bottle_name: &str,
+    count: usize,
+    enabled: bool,
+) {
+    let label = format!(
+        "Before bulk {} of {} mod{}",
+        if enabled { "enable" } else { "disable" },
+        count,
+        if count == 1 { "" } else { "s" }
+    );
+    log::info!(
+        "Bulk toggle: snapshotting current enabled-set for {}/{} ({})",
+        game_id,
+        bottle_name,
+        label
+    );
+    crate::auto_snapshot_before_destructive(db, game_id, bottle_name, &label);
 }
 
 #[tauri::command]
@@ -1205,7 +1241,7 @@ pub async fn download_from_nexus(
         let _ = db.set_deploy_target_for_mod(mod_id, deploy_target_str);
 
         // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
-        let _ = crate::sync_plugins_for_game(&game, &bottle);
+        crate::sync_plugins_logged(&game, &bottle, "archive install");
 
         // Auto-delete archive if setting is enabled
         if cfg
@@ -1792,6 +1828,39 @@ pub fn base64_encode(input: &[u8]) -> String {
     out
 }
 
+/// User-facing summary of a pre-launch self-heal, or `None` when nothing
+/// needed attention.
+fn self_heal_warning(report: &deployer::SelfHealReport) -> Option<String> {
+    fn sample(paths: &[String]) -> String {
+        const SHOWN: usize = 3;
+        let mut s = paths.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", ");
+        if paths.len() > SHOWN {
+            s.push_str(&format!(", and {} more", paths.len() - SHOWN));
+        }
+        s
+    }
+    let mut parts = Vec::new();
+    if !report.restored.is_empty() {
+        parts.push(format!(
+            "Restored {} missing mod file{} before launch ({}). Corkscrew re-deploys files it \
+             manages; to remove one for good, disable or uninstall its mod.",
+            report.restored.len(),
+            if report.restored.len() == 1 { "" } else { "s" },
+            sample(&report.restored)
+        ));
+    }
+    if !report.unrecoverable.is_empty() {
+        parts.push(format!(
+            "{} managed mod file{} missing and could not be restored from staging ({}). \
+             Reinstall the affected mod to fix this.",
+            report.unrecoverable.len(),
+            if report.unrecoverable.len() == 1 { " is" } else { "s are" },
+            sample(&report.unrecoverable)
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
 #[tauri::command]
 pub async fn launch_game_cmd(
     game_id: String,
@@ -1821,30 +1890,58 @@ pub async fn launch_game_cmd(
             .to_string());
     }
 
-    // Pre-launch self-healing: check if deployment is consistent, auto-fix if not
+    let mut launch_warnings: Vec<String> = Vec::new();
+
+    // Detect game version once for Engine Fixes gating, the SKSE compat
+    // check and the version guard below.
+    let detected_version = if game_id == "skyrimse" {
+        downgrader::detect_skyrim_version(&game_path).ok()
+    } else {
+        None
+    };
+
+    // SSE Engine Fixes for Wine policy. Runs BEFORE the self-heal so stock
+    // Engine Fixes files that are deliberately withheld (or were renamed in
+    // staging by older versions) aren't reported as "missing".
+    if game_id == "skyrimse" {
+        let t = Instant::now();
+        let messages = skse::apply_engine_fixes_blocking(
+            &db,
+            &game_id,
+            &bottle_name,
+            &data_dir_check,
+            &game_path,
+            detected_version.as_ref().map(|s| s.current_version.as_str()),
+            "Pre-launch",
+        );
+        log::info!("Pre-launch: Engine Fixes policy ({}ms)", t.elapsed().as_millis());
+        launch_warnings.extend(messages);
+    }
+
+    // Pre-launch self-heal: restore only managed files that went missing,
+    // each resolved against its real deploy target, and tell the user.
     {
         let t = Instant::now();
-        let manifest = db.get_deployment_manifest(&game_id, &bottle_name).unwrap_or_default();
-        if !manifest.is_empty() {
-            let missing: usize = manifest.iter()
-                .filter(|e| !data_dir_check.join(&e.relative_path).exists())
-                .count();
-            if missing > 0 {
-                log::warn!(
-                    "Pre-launch: {} deployed files missing — triggering self-heal redeploy",
-                    missing
+        match deployer::restore_missing_files(
+            &db, &game_id, &bottle_name, &data_dir_check, &game.game_path,
+        ) {
+            Ok(report) => {
+                log::info!(
+                    "Pre-launch: deployment integrity check ({} files, {} missing, {} restored, {}ms)",
+                    report.checked,
+                    report.missing,
+                    report.restored.len(),
+                    t.elapsed().as_millis()
                 );
-                match deployer::redeploy_all(
-                    &db, &game_id, &bottle_name, &data_dir_check, &game.game_path,
-                ) {
-                    Ok(_) => log::info!("Pre-launch: self-heal redeploy succeeded ({}ms)", t.elapsed().as_millis()),
-                    Err(e) => log::error!("Pre-launch: self-heal redeploy failed: {}", e),
+                if let Some(msg) = self_heal_warning(&report) {
+                    log::warn!("Pre-launch: {}", msg);
+                    launch_warnings.push(msg);
                 }
-            } else {
-                log::info!("Pre-launch: deployment integrity OK ({} files, {}ms)", manifest.len(), t.elapsed().as_millis());
             }
-        } else {
-            log::info!("Pre-launch: no deployment manifest ({}ms)", t.elapsed().as_millis());
+            Err(e) => {
+                log::error!("Pre-launch: deployment integrity check failed: {}", e);
+                launch_warnings.push(format!("Could not verify deployed mod files: {}", e));
+            }
         }
     }
 
@@ -1937,12 +2034,6 @@ pub async fn launch_game_cmd(
         use_skse
     );
 
-    // Detect game version once for both SKSE compat check and version guard
-    let detected_version = if game_id == "skyrimse" {
-        downgrader::detect_skyrim_version(&game_path).ok()
-    } else {
-        None
-    };
 
     // Pre-launch SKSE compatibility check — warn on version mismatch
     let mut skse_warning: Option<String> = None;
@@ -2066,12 +2157,16 @@ pub async fn launch_game_cmd(
     // plugins as enabled.  This catches any staleness from the game itself
     // rewriting the file on a previous exit/crash.
     let t = Instant::now();
-    let _ = crate::sync_plugins_for_game(&game, &bottle);
+    if let Some(e) = crate::sync_plugins_logged(&game, &bottle, "pre-launch") {
+        launch_warnings.push(format!(
+            "plugins.txt could not be updated, so the game may start with a stale load order: {}",
+            e
+        ));
+    }
     log::info!("Pre-launch: plugin sync ({}ms)", t.elapsed().as_millis());
 
     // Pre-launch SKSE plugin DLL version fix — swap incompatible plugins
     // for compatible alternatives from other installed mods' staging dirs.
-    let mut wine_plugin_warning: Option<String> = None;
     if game_id == "skyrimse" {
         let skyrim_prelaunch_start = Instant::now();
         let data_dir = PathBuf::from(&game.data_dir);
@@ -2084,19 +2179,6 @@ pub async fn launch_game_cmd(
             &game_path,
         );
         log::info!("Pre-launch: SKSE plugin conflict fix ({} swapped, {}ms)", skse_fixes, t.elapsed().as_millis());
-
-        // Check if user wants Wine fork of Engine Fixes
-        let use_wine_ef = config::engine_fixes_wine_enabled();
-
-        if use_wine_ef {
-            // EngineFixes Wine compatibility: disable all patches (they crash under Wine)
-            let t = Instant::now();
-            let ef_fixes =
-                skse::fix_engine_fixes_for_wine(&data_dir, &db, &game_id, &bottle_name);
-            log::info!("Pre-launch: EngineFixes TOML patch ({} patched, {}ms)", ef_fixes, t.elapsed().as_millis());
-        } else {
-            log::info!("Pre-launch: skipping Wine EngineFixes (user chose original)");
-        }
 
         // Disable Wine-incompatible SKSE plugins (CrashLogger, etc.)
         let t = Instant::now();
@@ -2113,20 +2195,7 @@ pub async fn launch_game_cmd(
                 "Disabled Wine-incompatible plugin(s): {}. See Settings > Game > Wine-Incompatible Plugins to manage.",
                 names.join(", ")
             );
-            wine_plugin_warning = Some(msg);
-        }
-
-        if use_wine_ef {
-            // Auto-deploy SSE Engine Fixes for Wine (Wine-safe replacement)
-            let t = Instant::now();
-            match skse::install_engine_fixes_wine_blocking(&data_dir) {
-                Ok(true) => log::info!("Pre-launch: auto-deployed SSE Engine Fixes for Wine ({}ms)", t.elapsed().as_millis()),
-                Ok(false) => log::info!("Pre-launch: SSE Engine Fixes for Wine already deployed ({}ms)", t.elapsed().as_millis()),
-                Err(e) => log::warn!(
-                    "Pre-launch: could not auto-deploy SSE Engine Fixes for Wine: {} ({}ms)",
-                    e, t.elapsed().as_millis()
-                ),
-            }
+            launch_warnings.push(msg);
         }
         log::info!("Pre-launch: Skyrim-specific fixes total: {}ms", skyrim_prelaunch_start.elapsed().as_millis());
     }
@@ -2143,17 +2212,15 @@ pub async fn launch_game_cmd(
     // Cursor fix is now handled by Wine registry keys (set in auto_fix_display
     // above via fix_cursor_grab). No runtime Dock/Hot Corner/event tap needed.
 
-    // Attach Wine-incompatible plugin warning
-    if let Some(w) = wine_plugin_warning {
-        result.warning = Some(match result.warning {
-            Some(existing) => format!("{}\n{}", existing, w),
-            None => w,
-        });
-    }
-
-    // Attach any SKSE compatibility warning to the launch result
+    // Attach every pre-launch warning (SKSE/version compatibility first),
+    // keeping any warning the launcher itself produced.
     if let Some(warning) = skse_warning {
-        result.warning = Some(warning);
+        launch_warnings.insert(0, warning);
+    }
+    if !launch_warnings.is_empty() {
+        let mut all: Vec<String> = result.warning.take().into_iter().collect();
+        all.extend(launch_warnings);
+        result.warning = Some(all.join("\n"));
     }
 
     // Register game lock so frontend can show "game is running" banner
@@ -2720,5 +2787,62 @@ pub async fn backfill_categories(
     })
     .await
     .map_err(crate::format_join_error)?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bulk_toggle_snapshot_preserves_deliberate_disables() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::database::ModDatabase::new(&tmp.path().join("t.db")).unwrap();
+        crate::rollback::init_schema(&db).unwrap();
+        let ids: Vec<i64> = ["A", "B", "C", "D", "E"]
+            .iter()
+            .map(|n| {
+                db.add_mod("skyrimse", "Gaming", None, n, "1.0", "x.zip", &[])
+                    .unwrap()
+            })
+            .collect();
+
+        // A is disabled on purpose before the bulk operation.
+        db.set_enabled(ids[0], false).unwrap();
+
+        // Bulk-disable A..E (what batch_toggle_mods does, after snapshotting).
+        snapshot_before_bulk_toggle(&db, "skyrimse", "Gaming", ids.len(), false);
+        for id in &ids {
+            db.set_enabled(*id, false).unwrap();
+        }
+
+        let snaps = crate::rollback::list_snapshots(&db, "skyrimse", "Gaming").unwrap();
+        assert_eq!(snaps.len(), 1, "bulk toggle must leave exactly one snapshot");
+        assert!(snaps[0].name.contains("bulk disable of 5 mods"));
+
+        crate::rollback::restore_snapshot(&db, snaps[0].id, "skyrimse", "Gaming").unwrap();
+        let enabled = |id: i64| db.get_mod(id).unwrap().unwrap().enabled;
+        assert!(!enabled(ids[0]), "deliberately disabled mod must stay disabled");
+        for id in &ids[1..] {
+            assert!(enabled(*id));
+        }
+    }
+
+    #[test]
+    fn self_heal_warning_summarises_restored_and_unrecoverable() {
+        let quiet = deployer::SelfHealReport::default();
+        assert!(self_heal_warning(&quiet).is_none());
+
+        let report = deployer::SelfHealReport {
+            checked: 10,
+            missing: 5,
+            restored: vec!["a.esp".into(), "b.esp".into(), "c.esp".into(), "d.esp".into()],
+            unrecoverable: vec!["e.esp".into()],
+            stale_dropped: 0,
+        };
+        let msg = self_heal_warning(&report).unwrap();
+        assert!(msg.contains("Restored 4 missing mod files"), "{msg}");
+        assert!(msg.contains("and 1 more"), "{msg}");
+        assert!(msg.contains("1 managed mod file is missing"), "{msg}");
+    }
 }
 

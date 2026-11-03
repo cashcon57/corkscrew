@@ -389,7 +389,7 @@ pub async fn download_and_install_nexus_mod(
 
     // Sync plugins if Skyrim
     // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
-    let _ = crate::sync_plugins_for_game(&game, &bottle);
+    crate::sync_plugins_logged(&game, &bottle, "Nexus install");
 
     // Auto-delete archive if setting enabled
     if dl_cfg

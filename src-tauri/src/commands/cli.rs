@@ -1334,7 +1334,9 @@ pub fn cli_launch(game_id: &str, bottle_name: &str, use_skse: bool, db: &Arc<Mod
         }
     }
 
-    let _ = crate::sync_plugins_for_game(&game, &bottle);
+    if let Some(e) = crate::sync_plugins_logged(&game, &bottle, "CLI launch") {
+        eprintln!("[corkscrew] Warning: plugins.txt sync failed: {}", e);
+    }
 
     if game_id == "skyrimse" {
         let data_dir = PathBuf::from(&game.data_dir);
@@ -1345,29 +1347,22 @@ pub fn cli_launch(game_id: &str, bottle_name: &str, use_skse: bool, db: &Arc<Mod
             println!("[corkscrew] Fixed {} SKSE plugin DLL(s)", fixes);
         }
 
-        let use_wine_ef = config::engine_fixes_wine_enabled();
-
-        if use_wine_ef {
-            let ef = skse::fix_engine_fixes_for_wine(&data_dir, db, game_id, bottle_name);
-            if ef > 0 {
-                println!("[corkscrew] Patched {} EngineFixes TOML(s) for Wine", ef);
-            }
-        } else {
-            println!("[corkscrew] Skipping Wine EngineFixes (not enabled — enable in Settings)");
+        for msg in skse::apply_engine_fixes_blocking(
+            db,
+            game_id,
+            bottle_name,
+            &data_dir,
+            &game_path,
+            None,
+            "CLI launch",
+        ) {
+            println!("[corkscrew] {}", msg);
         }
 
         let wine_disabled =
             skse::disable_wine_incompatible_plugins(&data_dir, db, game_id, bottle_name);
         for (name, _reason) in &wine_disabled {
             println!("[corkscrew] Disabled Wine-incompatible plugin: {}", name);
-        }
-
-        if use_wine_ef {
-            match skse::install_engine_fixes_wine_blocking(&data_dir) {
-                Ok(true) => println!("[corkscrew] Deployed SSE Engine Fixes for Wine"),
-                Ok(false) => println!("[corkscrew] SSE Engine Fixes for Wine already up to date"),
-                Err(e) => eprintln!("[corkscrew] Warning: Engine Fixes deploy failed: {}", e),
-            }
         }
     }
 
