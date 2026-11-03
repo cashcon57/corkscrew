@@ -32,6 +32,7 @@ pub mod fs_ci;
 pub mod fromsoft_saves;
 pub mod game_lock;
 pub mod game_registry;
+pub mod gamehub;
 pub mod games;
 pub mod graphics_backend;
 pub mod google_oauth;
