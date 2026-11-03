@@ -59,8 +59,14 @@ pub struct SkseStatus {
     pub installed: bool,
     /// Path to the SKSE loader executable, if found.
     pub loader_path: Option<String>,
-    /// Detected SKSE version (e.g. "2.2.6"), if a versioned DLL was found.
+    /// Detected SKSE version (e.g. "2.2.6"), read from the SKSE DLL's
+    /// version resource.
     pub version: Option<String>,
+    /// The Skyrim runtime the installed SKSE was built for (e.g. "1.6.1170"),
+    /// from its `skse64_<runtime>.dll` name. SKSE only starts on this exact
+    /// SkyrimSE.exe version.
+    #[serde(default)]
+    pub runtime: Option<String>,
     /// Whether the user has opted to use SKSE for launching.
     pub use_skse: bool,
 }
@@ -82,89 +88,127 @@ const SKSE_GITHUB_REPO: &str = "ianpatt/skse64";
 // SKSE Version ↔ Game Version Database
 // ---------------------------------------------------------------------------
 
-/// Static mapping of SKSE versions to their target Skyrim game versions.
-#[allow(dead_code)]
+/// Where an SKSE build can be downloaded from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SkseSource {
+    /// A release asset on GitHub (`ianpatt/skse64`), which Corkscrew can
+    /// download automatically.
+    GitHub,
+    /// Published only on Nexus Mods (mod 30379). Corkscrew never automates
+    /// Nexus downloads outside the Premium API, so the user downloads it and
+    /// installs it from the archive.
+    Nexus,
+    /// Tagged in the source repo but with no known public download.
+    Unpublished,
+}
+
+/// SKSE's Nexus Mods files page (the only download for builds after 2.2.6).
+pub const SKSE_NEXUS_FILES_URL: &str =
+    "https://www.nexusmods.com/skyrimspecialedition/mods/30379?tab=files";
+
+/// One SKSE build and the single Skyrim runtime it supports.
 struct SkseVersionEntry {
     /// SKSE tag (e.g., "v2.2.6")
     tag: &'static str,
-    /// Target Skyrim game version (e.g., "1.6.1170")
+    /// The Skyrim runtime this build was made for. SKSE's loader refuses to
+    /// start on any other SkyrimSE.exe version.
     game_version: &'static str,
-    /// Whether this is the GOG variant (separate asset)
-    has_gog_variant: bool,
+    source: SkseSource,
 }
 
-/// Known SKSE releases mapped to their target Skyrim versions.
-/// Ordered newest-first for priority matching.
+/// Known SKSE releases and the exact game version each targets, newest first.
+/// Targets come from `CURRENT_RELEASE_RUNTIME` in each tag's
+/// `skse64_common/skse_version.h` (ianpatt/skse64).
 const SKSE_VERSION_DB: &[SkseVersionEntry] = &[
+    SkseVersionEntry {
+        tag: "v2.3.1",
+        game_version: "1.7.104",
+        source: SkseSource::Nexus,
+    },
+    SkseVersionEntry {
+        tag: "v2.3.0",
+        game_version: "1.7.99",
+        source: SkseSource::Nexus,
+    },
+    SkseVersionEntry {
+        tag: "v2.2.8",
+        game_version: "1.6.1170",
+        source: SkseSource::Unpublished,
+    },
+    SkseVersionEntry {
+        tag: "v2.2.7",
+        game_version: "1.6.1170",
+        source: SkseSource::Unpublished,
+    },
     SkseVersionEntry {
         tag: "v2.2.6",
         game_version: "1.6.1170",
-        has_gog_variant: false,
+        source: SkseSource::GitHub,
     },
     SkseVersionEntry {
         tag: "v2.2.5",
         game_version: "1.6.1130",
-        has_gog_variant: false,
+        source: SkseSource::GitHub,
     },
     SkseVersionEntry {
         tag: "v2.2.4",
         game_version: "1.6.1130",
-        has_gog_variant: false,
+        source: SkseSource::GitHub,
     },
     SkseVersionEntry {
         tag: "v2.2.3",
         game_version: "1.6.640",
-        has_gog_variant: true,
+        source: SkseSource::GitHub,
     },
     SkseVersionEntry {
         tag: "v2.2.2",
         game_version: "1.6.640",
-        has_gog_variant: false,
+        source: SkseSource::GitHub,
     },
     SkseVersionEntry {
         tag: "v2.2.1",
         game_version: "1.6.640",
-        has_gog_variant: false,
+        source: SkseSource::GitHub,
     },
     SkseVersionEntry {
         tag: "v2.2.0",
         game_version: "1.6.629",
-        has_gog_variant: false,
+        source: SkseSource::GitHub,
     },
     SkseVersionEntry {
         tag: "v2.1.5",
         game_version: "1.6.353",
-        has_gog_variant: false,
+        source: SkseSource::GitHub,
     },
     SkseVersionEntry {
         tag: "v2.1.4",
         game_version: "1.6.342",
-        has_gog_variant: false,
+        source: SkseSource::GitHub,
     },
     SkseVersionEntry {
         tag: "v2.1.3",
         game_version: "1.6.323",
-        has_gog_variant: false,
+        source: SkseSource::GitHub,
     },
     SkseVersionEntry {
         tag: "v2.1.2",
         game_version: "1.6.318",
-        has_gog_variant: false,
+        source: SkseSource::GitHub,
     },
     SkseVersionEntry {
         tag: "v2.1.1",
         game_version: "1.6.318",
-        has_gog_variant: false,
+        source: SkseSource::GitHub,
     },
     SkseVersionEntry {
         tag: "v2.1.0",
         game_version: "1.6.317",
-        has_gog_variant: false,
+        source: SkseSource::GitHub,
     },
     SkseVersionEntry {
         tag: "v2.0.20",
         game_version: "1.5.97",
-        has_gog_variant: false,
+        source: SkseSource::GitHub,
     },
 ];
 
@@ -196,6 +240,10 @@ pub struct SkseBuild {
     pub filename: String,
     /// Whether this is the recommended build for the detected game version
     pub is_recommended: bool,
+    /// True when Corkscrew can download and install this build itself
+    /// (GitHub release). False for Nexus-only builds, whose `download_url`
+    /// is the Nexus files page.
+    pub auto_install: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -204,58 +252,60 @@ pub struct SkseBuild {
 
 /// Detect whether SKSE is installed in the given game directory.
 ///
-/// Scans for `skse64_loader.exe` (case-insensitive) and attempts to extract
-/// the version number from any `skse64_X_Y_Z.dll` file present.
+/// Looks for `skse64_loader.exe` (case-insensitive) and the runtime DLL
+/// `skse64_<X>_<Y>_<Z>.dll`, whose name gives the game version it supports
+/// and whose version resource gives the SKSE version.
 pub fn detect_skse(game_path: &Path) -> SkseStatus {
     let loader = find_file_case_insensitive(game_path, SKSE_LOADER);
-    let version = detect_skse_version(game_path);
-
-    let installed = loader.is_some();
-    let loader_path = loader.map(|p| p.to_string_lossy().into_owned());
+    let runtime_dll = find_skse_runtime_dll(game_path);
 
     SkseStatus {
-        installed,
-        loader_path,
-        version,
+        installed: loader.is_some(),
+        loader_path: loader.map(|p| p.to_string_lossy().into_owned()),
+        version: runtime_dll.as_ref().and_then(|(path, _)| skse_dll_version(path)),
+        runtime: runtime_dll.map(|(_, runtime)| runtime),
         use_skse: false, // Caller should overlay the preference from config.
     }
 }
 
-/// Detect the SKSE version by finding a `skse64_X_Y_Z.dll` file.
-///
-/// Specifically looks for DLLs matching the pattern `skse64_\d+_\d+_\d+.dll`
-/// but **excludes** the Steam loader variant (`skse64_steam_loader.dll`).
-#[allow(dead_code)]
-fn detect_skse_version(game_path: &Path) -> Option<String> {
+/// Find the SKSE runtime DLL (`skse64_1_6_1170.dll`) and the game version
+/// its name encodes ("1.6.1170").
+fn find_skse_runtime_dll(game_path: &Path) -> Option<(PathBuf, String)> {
     let entries = fs::read_dir(game_path).ok()?;
-
     for entry in entries.flatten() {
         if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
             continue;
         }
-
         let name = entry.file_name().to_string_lossy().to_lowercase();
-
-        // Skip the steam loader — we want the main SKSE DLL.
-        if name.contains("steam_loader") {
+        let Some(stem) = name
+            .strip_prefix("skse64_")
+            .and_then(|n| n.strip_suffix(".dll"))
+        else {
             continue;
-        }
-
-        // Match pattern: skse64_X_Y_Z.dll
-        if name.starts_with("skse64_") && name.ends_with(".dll") {
-            let stem = name.trim_start_matches("skse64_").trim_end_matches(".dll");
-
-            // Parse "X_Y_Z" into "X.Y.Z"
-            let parts: Vec<&str> = stem.split('_').collect();
-            if parts.len() == 3 && parts.iter().all(|p| p.parse::<u32>().is_ok()) {
-                let version = parts.join(".");
-                debug!("Detected SKSE version: {} from file: {}", version, name);
-                return Some(version);
-            }
+        };
+        let parts: Vec<&str> = stem.split('_').collect();
+        if parts.len() == 3 && parts.iter().all(|p| p.parse::<u32>().is_ok()) {
+            let runtime = parts.join(".");
+            debug!("Found SKSE runtime DLL {} (game {})", name, runtime);
+            return Some((entry.path(), runtime));
         }
     }
-
     None
+}
+
+/// SKSE version from a DLL's version resource. SKSE stamps FileVersion as
+/// `0.<major>.<minor>.<beta>` (SKSE 2.2.6 → 0.2.2.6).
+fn skse_dll_version(dll: &Path) -> Option<String> {
+    use pelite::pe64::{Pe, PeFile};
+    let bytes = fs::read(dll).ok()?;
+    let pe = PeFile::from_bytes(&bytes).ok()?;
+    let fixed = pe.resources().ok()?.version_info().ok()?.fixed()?;
+    let v = fixed.dwFileVersion;
+    if v.Major == 0 {
+        Some(format!("{}.{}.{}", v.Minor, v.Patch, v.Build))
+    } else {
+        Some(format!("{}.{}.{}", v.Major, v.Minor, v.Patch))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -404,76 +454,52 @@ fn parse_game_version(v: &str) -> Option<(u32, u32, u32)> {
 
 /// Get available SKSE builds for a given game version.
 ///
-/// Uses the static version database to find compatible builds.
-/// The recommended build is the newest SKSE that targets a game version
-/// less than or equal to the user's game version.
+/// SKSE supports exactly one game runtime per build, so the recommended build
+/// is the newest one whose target equals the game version. Older builds are
+/// listed but never recommended for a different runtime.
 pub fn get_available_skse_builds(game_version: &str) -> SkseAvailableBuilds {
-    let edition = if game_version.contains("1.5") {
-        "SE"
-    } else if game_version.contains("1.6") {
-        "AE"
-    } else {
-        "Unknown"
-    };
-
     let user_ver = parse_game_version(game_version);
-
-    // If the version string is unparseable (e.g. "1.6.x") but clearly AE,
-    // assume the latest game version so we recommend the newest SKSE for AE.
-    let effective_ver = user_ver.or_else(|| {
-        if edition == "AE" {
-            log::info!(
-                "Game version '{}' unparseable — assuming latest AE for SKSE matching",
-                game_version
-            );
-            Some((1, 6, u32::MAX))
-        } else {
-            None
-        }
-    });
+    let edition = match user_ver {
+        Some((1, 5, _)) => "SE",
+        Some((1, minor, _)) if minor >= 6 => "AE",
+        _ => "Unknown",
+    };
 
     let mut all_builds: Vec<SkseBuild> = Vec::new();
     let mut recommended: Option<SkseBuild> = None;
 
     for entry in SKSE_VERSION_DB {
-        let filename = match tag_to_asset_name(entry.tag) {
-            Some(f) => f,
-            None => continue,
+        if entry.source == SkseSource::Unpublished {
+            continue;
+        }
+        let Some(filename) = tag_to_asset_name(entry.tag) else {
+            continue;
+        };
+        let (download_url, auto_install) = match entry.source {
+            SkseSource::GitHub => (
+                format!(
+                    "https://github.com/{}/releases/download/{}/{}",
+                    SKSE_GITHUB_REPO, entry.tag, filename
+                ),
+                true,
+            ),
+            _ => (SKSE_NEXUS_FILES_URL.to_string(), false),
         };
 
-        let download_url = format!(
-            "https://github.com/{}/releases/download/{}/{}",
-            SKSE_GITHUB_REPO, entry.tag, filename
-        );
-
-        let version = entry.tag.strip_prefix('v').unwrap_or(entry.tag).to_string();
-
-        // Determine if this build is compatible with the user's game version.
-        // SKSE is forward-compatible within a version range, so we pick the
-        // newest SKSE whose target game version <= user's game version.
-        let target_ver = parse_game_version(entry.game_version);
-        let compatible = match (effective_ver, target_ver) {
-            (Some(u), Some(t)) => t <= u,
-            _ => false,
-        };
-
+        let exact = user_ver.is_some() && parse_game_version(entry.game_version) == user_ver;
         let build = SkseBuild {
             tag: entry.tag.to_string(),
-            version,
+            version: entry.tag.strip_prefix('v').unwrap_or(entry.tag).to_string(),
             target_game_version: entry.game_version.to_string(),
             download_url,
             filename,
-            is_recommended: false,
+            is_recommended: exact && recommended.is_none(),
+            auto_install,
         };
-
-        if compatible && recommended.is_none() {
-            let mut rec = build.clone();
-            rec.is_recommended = true;
-            recommended = Some(rec.clone());
-            all_builds.push(rec);
-        } else {
-            all_builds.push(build);
+        if build.is_recommended {
+            recommended = Some(build.clone());
         }
+        all_builds.push(build);
     }
 
     SkseAvailableBuilds {
@@ -492,10 +518,18 @@ pub async fn install_skse_auto(game_path: &Path, game_version: &str) -> Result<S
     let builds = get_available_skse_builds(game_version);
     let build = builds.recommended.ok_or_else(|| {
         SkseError::Other(format!(
-            "No compatible SKSE build found for game version {}",
-            game_version
+            "Corkscrew doesn't know an SKSE build for Skyrim {game_version}. \
+             SKSE only runs on the exact game version it was built for; check {SKSE_URL} \
+             for a matching build, then install it from the archive."
         ))
     })?;
+    if !build.auto_install {
+        return Err(SkseError::Other(format!(
+            "SKSE {} (for Skyrim {}) is only published on Nexus Mods. Download it from {} \
+             and use \"Install from archive\".",
+            build.version, game_version, build.download_url
+        )));
+    }
 
     info!(
         "Auto-downloading SKSE {} for game version {} from {}",
@@ -551,9 +585,17 @@ pub async fn install_skse_auto(game_path: &Path, game_version: &str) -> Result<S
 
     let status = detect_skse(game_path);
     info!(
-        "SKSE auto-install complete: installed={}, version={:?}",
-        status.installed, status.version
+        "SKSE auto-install complete: installed={}, version={:?}, runtime={:?}",
+        status.installed, status.version, status.runtime
     );
+    if status.runtime.as_deref().and_then(parse_game_version) != parse_game_version(game_version) {
+        return Err(SkseError::Other(format!(
+            "Installed SKSE {} is for Skyrim {}, not your game version {}.",
+            status.version.as_deref().unwrap_or("(unknown)"),
+            status.runtime.as_deref().unwrap_or("(unknown)"),
+            game_version
+        )));
+    }
 
     Ok(status)
 }
@@ -691,36 +733,16 @@ pub struct SkseCompatibility {
     pub severity: String,
 }
 
-/// Map a detected SKSE version to the Skyrim game version range it supports.
+/// The Skyrim game version a given SKSE version supports.
 ///
-/// Returns `Some((min_game_version, max_game_version))` for known SKSE builds.
+/// Returns `Some((game_version, game_version))` — each SKSE build supports a
+/// single runtime; the pair is kept for the existing min/max callers.
 pub fn skse_game_compatibility(skse_version: &str) -> Option<(&'static str, &'static str)> {
-    let parts: Vec<u32> = skse_version
-        .split('.')
-        .filter_map(|p| p.parse().ok())
-        .collect();
-
-    if parts.len() < 3 {
-        return None;
-    }
-
-    let (major, minor, patch) = (parts[0], parts[1], parts[2]);
-
-    match (major, minor) {
-        // SKSE 2.0.x and 2.1.x target Skyrim SE 1.5.97
-        (2, 0) | (2, 1) => Some(("1.5.97", "1.5.97")),
-        // SKSE 2.2.x targets AE versions
-        (2, 2) => {
-            if patch <= 2 {
-                // 2.2.0 – 2.2.2 → AE 1.6.317 – 1.6.659
-                Some(("1.6.317", "1.6.659"))
-            } else {
-                // 2.2.3+ → AE 1.6.1130+
-                Some(("1.6.1130", "1.6.1170"))
-            }
-        }
-        _ => None,
-    }
+    let wanted = parse_game_version(skse_version)?;
+    SKSE_VERSION_DB
+        .iter()
+        .find(|e| parse_game_version(e.tag.trim_start_matches('v')) == Some(wanted))
+        .map(|e| (e.game_version, e.game_version))
 }
 
 /// Classify whether "Skyrim SE 1.5.97" or "Anniversary Edition" from a
@@ -757,71 +779,55 @@ pub fn check_skse_compatibility(
         };
     }
 
-    // Case 2: SKSE is installed but we couldn't detect the version
-    let skse_ver = match &skse_status.version {
-        Some(v) => v.clone(),
-        None => {
-            return SkseCompatibility {
-                compatible: true,
-                skse_version: None,
-                game_version,
-                expected_game_versions: None,
-                message: "SKSE is installed but the version could not be determined. Verify manually that it matches your game version.".into(),
-                severity: "warning".into(),
-            };
-        }
+    // Case 2: SKSE is installed but its runtime DLL wasn't found.
+    let Some(runtime) = skse_status.runtime.clone() else {
+        return SkseCompatibility {
+            compatible: true,
+            skse_version: skse_status.version.clone(),
+            game_version,
+            expected_game_versions: None,
+            message: "SKSE is installed but its runtime DLL (skse64_<version>.dll) wasn't found. Verify manually that it matches your game version.".into(),
+            severity: "warning".into(),
+        };
     };
 
-    // Case 3: SKSE version detected — check against game version
-    let expected = skse_game_compatibility(&skse_ver);
-    let game_class = classify_game_version(&game_version).to_string();
+    // Case 3: SKSE only starts on the exact game version it was built for.
+    let skse_label = skse_status
+        .version
+        .as_deref()
+        .map(|v| format!("SKSE {v}"))
+        .unwrap_or_else(|| "SKSE".to_string());
+    let expected = Some((runtime.clone(), runtime.clone()));
+    let game = parse_game_version(&game_version);
+    if game.is_some() && game == parse_game_version(&runtime) {
+        return SkseCompatibility {
+            compatible: true,
+            skse_version: skse_status.version.clone(),
+            message: format!("{skse_label} matches your game version ({runtime})."),
+            game_version,
+            expected_game_versions: expected,
+            severity: "ok".into(),
+        };
+    }
 
-    match expected {
-        Some((min_ver, max_ver)) => {
-            let expected_class = if min_ver == "1.5.97" { "SE" } else { "AE" };
-
-            if game_class == expected_class || game_class == "Unknown" {
-                let message = format!(
-                    "SKSE {} is compatible with Skyrim {} ({} – {}).",
-                    skse_ver, game_class, min_ver, max_ver
-                );
-                SkseCompatibility {
-                    compatible: true,
-                    skse_version: Some(skse_ver),
-                    game_version,
-                    expected_game_versions: Some((min_ver.into(), max_ver.into())),
-                    message,
-                    severity: "ok".into(),
-                }
-            } else {
-                let message = format!(
-                    "SKSE {} targets Skyrim {} ({} – {}), but you have Skyrim {}. Install the correct SKSE build for your game version.",
-                    skse_ver, expected_class, min_ver, max_ver, game_class
-                );
-                SkseCompatibility {
-                    compatible: false,
-                    skse_version: Some(skse_ver),
-                    game_version,
-                    expected_game_versions: Some((min_ver.into(), max_ver.into())),
-                    message,
-                    severity: "error".into(),
-                }
-            }
-        }
-        None => {
-            let message = format!(
-                "SKSE {} is installed. Could not determine expected game version range — verify compatibility manually.",
-                skse_ver
-            );
-            SkseCompatibility {
-                compatible: true,
-                skse_version: Some(skse_ver),
-                game_version,
-                expected_game_versions: None,
-                message,
-                severity: "warning".into(),
-            }
-        }
+    let fix = match get_available_skse_builds(&game_version).recommended {
+        Some(b) if b.auto_install => format!(" Install SKSE {} instead.", b.version),
+        Some(b) => format!(
+            " Install SKSE {} instead (download it from {}).",
+            b.version, b.download_url
+        ),
+        None => format!(" Check {SKSE_URL} for a build that supports your game version."),
+    };
+    SkseCompatibility {
+        compatible: false,
+        skse_version: skse_status.version.clone(),
+        message: format!(
+            "{skse_label} is built for Skyrim {runtime}, but your game is {game_version}. \
+             SKSE won't start on a different game version.{fix}"
+        ),
+        game_version,
+        expected_game_versions: expected,
+        severity: "error".into(),
     }
 }
 
@@ -2351,7 +2357,8 @@ mod tests {
 
         // Create fake SKSE files.
         fs::write(game_dir.join("skse64_loader.exe"), b"fake loader").unwrap();
-        fs::write(game_dir.join("skse64_2_2_6.dll"), b"fake dll").unwrap();
+        // SKSE names its runtime DLL after the game version it supports.
+        fs::write(game_dir.join("skse64_1_6_1170.dll"), b"fake dll").unwrap();
         fs::write(
             game_dir.join("skse64_steam_loader.dll"),
             b"fake steam loader",
@@ -2361,7 +2368,9 @@ mod tests {
         let status = detect_skse(game_dir);
         assert!(status.installed);
         assert!(status.loader_path.is_some());
-        assert_eq!(status.version, Some("2.2.6".to_string()));
+        assert_eq!(status.runtime, Some("1.6.1170".to_string()));
+        // Not a real PE, so the SKSE version resource can't be read.
+        assert_eq!(status.version, None);
     }
 
     #[test]
@@ -2384,47 +2393,30 @@ mod tests {
 
         // Use different casing.
         fs::write(game_dir.join("SKSE64_Loader.exe"), b"fake").unwrap();
-        fs::write(game_dir.join("SKSE64_2_2_6.dll"), b"fake").unwrap();
+        fs::write(game_dir.join("SKSE64_1_7_104.dll"), b"fake").unwrap();
 
         let status = detect_skse(game_dir);
         assert!(status.installed);
-        assert_eq!(status.version, Some("2.2.6".to_string()));
+        assert_eq!(status.runtime, Some("1.7.104".to_string()));
     }
 
     #[test]
-    fn skse_compat_se_versions() {
-        // SKSE 2.0.x and 2.1.x should target SE 1.5.97
-        assert_eq!(
-            skse_game_compatibility("2.0.20"),
-            Some(("1.5.97", "1.5.97"))
-        );
-        assert_eq!(skse_game_compatibility("2.1.5"), Some(("1.5.97", "1.5.97")));
-    }
-
-    #[test]
-    fn skse_compat_ae_early_versions() {
-        // SKSE 2.2.0–2.2.2 should target AE 1.6.317–1.6.659
-        assert_eq!(
-            skse_game_compatibility("2.2.0"),
-            Some(("1.6.317", "1.6.659"))
-        );
-        assert_eq!(
-            skse_game_compatibility("2.2.2"),
-            Some(("1.6.317", "1.6.659"))
-        );
-    }
-
-    #[test]
-    fn skse_compat_ae_late_versions() {
-        // SKSE 2.2.3+ should target AE 1.6.1130+
-        assert_eq!(
-            skse_game_compatibility("2.2.3"),
-            Some(("1.6.1130", "1.6.1170"))
-        );
-        assert_eq!(
-            skse_game_compatibility("2.2.6"),
-            Some(("1.6.1130", "1.6.1170"))
-        );
+    fn skse_compat_maps_each_build_to_its_single_runtime() {
+        // Targets from CURRENT_RELEASE_RUNTIME in each tag's skse_version.h.
+        for (skse, game) in [
+            ("2.0.20", "1.5.97"),
+            ("2.1.0", "1.6.317"),
+            ("2.1.5", "1.6.353"),
+            ("2.2.0", "1.6.629"),
+            ("2.2.3", "1.6.640"),
+            ("2.2.5", "1.6.1130"),
+            ("2.2.6", "1.6.1170"),
+            ("2.2.8", "1.6.1170"),
+            ("2.3.0", "1.7.99"),
+            ("2.3.1", "1.7.104"),
+        ] {
+            assert_eq!(skse_game_compatibility(skse), Some((game, game)), "SKSE {skse}");
+        }
     }
 
     #[test]
@@ -2439,6 +2431,7 @@ mod tests {
             installed: false,
             loader_path: None,
             version: None,
+            runtime: None,
             use_skse: false,
         };
         let downgrade_status = crate::downgrader::DowngradeStatus {
@@ -2459,6 +2452,7 @@ mod tests {
             installed: true,
             loader_path: Some("/game/skse64_loader.exe".into()),
             version: Some("2.0.20".into()),
+            runtime: Some("1.5.97".into()),
             use_skse: true,
         };
         let downgrade_status = crate::downgrader::DowngradeStatus {
@@ -2479,6 +2473,7 @@ mod tests {
             installed: true,
             loader_path: Some("/game/skse64_loader.exe".into()),
             version: Some("2.2.6".into()),
+            runtime: Some("1.6.1170".into()),
             use_skse: true,
         };
         let downgrade_status = crate::downgrader::DowngradeStatus {
@@ -2491,6 +2486,98 @@ mod tests {
         let result = check_skse_compatibility(&skse_status, &downgrade_status);
         assert!(!result.compatible);
         assert_eq!(result.severity, "error");
+    }
+
+    /// Live check against a real SKSE install (not redistributable, so not a
+    /// fixture): `SKSE_TEST_DIR=<dir with skse64_loader.exe + skse64_*.dll>
+    /// cargo test --lib skse_live -- --ignored`.
+    #[test]
+    #[ignore]
+    fn skse_live_detects_real_version_and_runtime() {
+        let dir = std::env::var("SKSE_TEST_DIR").expect("set SKSE_TEST_DIR");
+        let status = detect_skse(Path::new(&dir));
+        eprintln!("{status:?}");
+        assert!(status.installed);
+        assert!(status.version.is_some() && status.runtime.is_some());
+        assert_eq!(
+            skse_game_compatibility(status.version.as_deref().unwrap()).map(|(g, _)| g.to_string()),
+            status.runtime
+        );
+    }
+
+    /// The reported case: SKSE 2.2.6 (for 1.6.1170) on a 1.7.104 game. The
+    /// old check classed 1.7.x as "Unknown" and called it compatible.
+    #[test]
+    fn check_compat_rejects_1_6_skse_on_1_7_game_and_names_the_nexus_build() {
+        let skse_status = SkseStatus {
+            installed: true,
+            loader_path: Some("/game/skse64_loader.exe".into()),
+            version: Some("2.2.6".into()),
+            runtime: Some("1.6.1170".into()),
+            use_skse: true,
+        };
+        let downgrade_status = crate::downgrader::DowngradeStatus {
+            current_version: "1.7.104".into(),
+            target_version: "1.5.97".into(),
+            is_downgraded: false,
+            downgrade_path: None,
+        };
+        let result = check_skse_compatibility(&skse_status, &downgrade_status);
+        assert!(!result.compatible);
+        assert_eq!(result.severity, "error");
+        assert!(result.message.contains("SKSE 2.3.1"), "{}", result.message);
+        assert!(result.message.contains(SKSE_NEXUS_FILES_URL), "{}", result.message);
+    }
+
+    #[test]
+    fn check_compat_accepts_exact_runtime_match_on_1_7() {
+        let skse_status = SkseStatus {
+            installed: true,
+            loader_path: Some("/game/skse64_loader.exe".into()),
+            version: Some("2.3.1".into()),
+            runtime: Some("1.7.104".into()),
+            use_skse: true,
+        };
+        let downgrade_status = crate::downgrader::DowngradeStatus {
+            current_version: "1.7.104".into(),
+            target_version: "1.5.97".into(),
+            is_downgraded: false,
+            downgrade_path: None,
+        };
+        let result = check_skse_compatibility(&skse_status, &downgrade_status);
+        assert!(result.compatible);
+        assert_eq!(result.severity, "ok");
+    }
+
+    #[test]
+    fn builds_for_1_7_104_recommend_nexus_only_2_3_1() {
+        let builds = get_available_skse_builds("1.7.104");
+        assert_eq!(builds.edition, "AE");
+        let rec = builds.recommended.expect("2.3.1 targets 1.7.104");
+        assert_eq!(rec.version, "2.3.1");
+        assert!(!rec.auto_install);
+        assert_eq!(rec.download_url, SKSE_NEXUS_FILES_URL);
+        // No GitHub build may be offered as a fallback for another runtime.
+        assert!(builds.all_builds.iter().filter(|b| b.is_recommended).count() == 1);
+    }
+
+    #[test]
+    fn builds_for_unlisted_runtime_recommend_nothing() {
+        // Before the fix, any newer game got the newest older SKSE (2.2.6).
+        assert!(get_available_skse_builds("1.7.200").recommended.is_none());
+        assert!(get_available_skse_builds("1.6.1171").recommended.is_none());
+    }
+
+    #[test]
+    fn auto_install_refuses_nexus_only_build_with_instructions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let err = rt
+            .block_on(install_skse_auto(tmp.path(), "1.7.104"))
+            .expect_err("2.3.1 is Nexus-only");
+        let msg = err.to_string();
+        assert!(msg.contains("Nexus") && msg.contains("Install from archive"), "{msg}");
+        assert!(fs::read_dir(tmp.path()).unwrap().next().is_none(), "nothing installed");
     }
 
     #[test]
@@ -2604,6 +2691,7 @@ mod tests {
             installed: true,
             loader_path: Some("/game/skse64_loader.exe".to_string()),
             version: Some("2.2.6".to_string()),
+            runtime: None,
             use_skse: true,
         };
 

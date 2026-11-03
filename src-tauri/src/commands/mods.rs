@@ -2175,6 +2175,7 @@ pub async fn check_skse(game_id: String, bottle_name: String) -> Result<SkseStat
                 installed: false,
                 loader_path: None,
                 version: None,
+                runtime: None,
                 use_skse: false,
             });
         }
