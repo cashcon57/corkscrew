@@ -421,6 +421,13 @@
 
   // Update check state
   let modUpdates = $state<ModUpdateInfo[]>([]);
+
+  /** Normalize an update-list IPC payload; never let a non-array reach `modUpdates`. */
+  function asUpdateList(value: unknown, source: string): ModUpdateInfo[] {
+    if (Array.isArray(value)) return value as ModUpdateInfo[];
+    console.warn(`[mods] ${source} returned a non-array update list; treating as empty:`, value);
+    return [];
+  }
   let checkingUpdates = $state(false);
   let updatingAll = $state(false);
 
@@ -1320,7 +1327,7 @@
         .catch((err) => console.error('Failed to load conflicts:', err));
       // Background: stored results of the last Nexus update check
       getModUpdateResults(game.game_id, (wineCtx(game)?.bottle_name ?? ""))
-        .then(u => { if (thisLoad === loadGeneration) modUpdates = u; })
+        .then(u => { if (thisLoad === loadGeneration) modUpdates = asUpdateList(u, "getModUpdateResults"); })
         .catch((err) => console.error('Failed to load stored update results:', err));
       // Background: endorsements
       loadEndorsements(game.nexus_slug);
@@ -1990,7 +1997,7 @@
     if (!game) return;
     checkingUpdates = true;
     try {
-      modUpdates = await checkModUpdates(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
+      modUpdates = asUpdateList(await checkModUpdates(game.game_id, (wineCtx(game)?.bottle_name ?? "")), "checkModUpdates");
       if (modUpdates.length === 0) {
         showSuccess("All mods are up to date");
       } else {
@@ -2181,7 +2188,7 @@
     const game = pickedGame ?? $selectedGame;
     if (!game || !mod.nexus_mod_id) return;
     try {
-      const updates = await checkModUpdates(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
+      const updates = asUpdateList(await checkModUpdates(game.game_id, (wineCtx(game)?.bottle_name ?? "")), "checkModUpdates");
       modUpdates = updates;
       const update = updates.find(u => u.mod_id === mod.id);
       if (update) {
