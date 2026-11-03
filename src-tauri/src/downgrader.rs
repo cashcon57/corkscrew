@@ -697,7 +697,18 @@ pub fn send_depot_command_to_steam(target: Option<&str>) -> std::result::Result<
 
         if output.status.success() {
             info!("Sent {} depot download commands to the Steam console", commands.len());
-            Ok(true)
+            // AppleScript "succeeds" even when the keystrokes never reach a
+            // console (console not open, another window focused). Only
+            // report success once Steam has started fetching a manifest.
+            let steam_root = dirs::home_dir()
+                .map(|h| crate::proton::macos_steam_root(&h))
+                .unwrap_or_default();
+            let build = downgrade_target(target);
+            let started = wait_for_any_manifest(&steam_root, build, std::time::Duration::from_secs(30));
+            if !started {
+                warn!("Steam didn't start any depot download within 30s; falling back to manual instructions");
+            }
+            Ok(started)
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             warn!("AppleScript automation failed: {}", stderr);
@@ -791,6 +802,32 @@ pub fn download_depot_commands(build: &SkyrimBuild) -> Vec<String> {
         .iter()
         .map(|(depot, manifest)| format!("download_depot {SKYRIM_APP_ID} {depot} {manifest}"))
         .collect()
+}
+
+/// Whether Steam has fetched any of `build`'s depot manifests into
+/// `<steam_root>/depotcache`, which it does as soon as `download_depot`
+/// starts. Polls until `timeout`.
+pub(crate) fn wait_for_any_manifest(
+    steam_root: &Path,
+    build: &SkyrimBuild,
+    timeout: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let fetched = build.manifests.iter().any(|(depot, manifest)| {
+            steam_root
+                .join("depotcache")
+                .join(format!("{depot}_{manifest}.manifest"))
+                .is_file()
+        });
+        if fetched {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
 }
 
 /// Seconds a depot folder must go without writes before it counts as
@@ -1227,6 +1264,20 @@ fn downgrade_config_key(game_path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manifest_wait_sees_a_started_download_and_times_out_otherwise() {
+        let tmp = tempfile::tempdir().unwrap();
+        let build = skyrim_build("1.6.1170").unwrap();
+        let short = std::time::Duration::from_millis(50);
+        assert!(!wait_for_any_manifest(tmp.path(), build, short));
+        write(&tmp.path().join("depotcache/489833_1914580699073641964.manifest"), "x");
+        assert!(wait_for_any_manifest(tmp.path(), build, short));
+        // A manifest of another build doesn't count.
+        let other = tempfile::tempdir().unwrap();
+        write(&other.path().join("depotcache/489833_4886117324142477814.manifest"), "x");
+        assert!(!wait_for_any_manifest(other.path(), build, short));
+    }
 
     // ---- Full (three-depot) downgrade ----
 
