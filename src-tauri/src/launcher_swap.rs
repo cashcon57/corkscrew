@@ -32,6 +32,7 @@ pub struct LauncherSwap {
 pub fn for_game(game_id: &str) -> Option<LauncherSwap> {
     let launcher = match game_id {
         "skyrimse" => "SkyrimSELauncher.exe",
+        "skyrim" => "SkyrimLauncher.exe",
         "fallout4" => "Fallout4Launcher.exe",
         "falloutnv" => "FalloutNVLauncher.exe",
         "fallout3" => "FalloutLauncher.exe",

@@ -148,9 +148,85 @@ pub fn detect_steam_installation() -> Option<SteamInfo> {
     find_steam_installation(&candidates)
 }
 
-#[cfg(not(target_os = "linux"))]
+/// The macOS Steam client (NotProton games run through it).
+#[cfg(target_os = "macos")]
+pub fn detect_steam_installation() -> Option<SteamInfo> {
+    let root = crate::proton::macos_steam_root(&dirs::home_dir()?);
+    if !root.join("steamapps").is_dir() {
+        return None;
+    }
+    let userdata_dirs = std::fs::read_dir(root.join("userdata"))
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir() && p.join("config").is_dir())
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(SteamInfo {
+        steam_root: root,
+        userdata_dirs,
+        is_steam_deck: false,
+    })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn detect_steam_installation() -> Option<SteamInfo> {
     None
+}
+
+/// Whether the Steam client is running. Steam rewrites `localconfig.vdf`
+/// while it runs (and on exit), so launch options can only be edited
+/// while it is closed.
+pub fn steam_running() -> bool {
+    let name = if cfg!(target_os = "macos") { "steam_osx" } else { "steam" };
+    std::process::Command::new("pgrep")
+        .args(["-x", name])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// The exe Steam starts for a game: its launcher when it has one, else the
+/// game exe. This is the name inside `%command%` that a launch option swaps.
+pub fn steam_launch_target(game_id: &str) -> Option<&'static str> {
+    crate::launcher_swap::for_game(game_id)
+        .map(|s| s.launcher)
+        .or_else(|| crate::games::game_executable(game_id))
+}
+
+/// The `%command%` replacement that makes Steam start `loader` in place of
+/// `target`. Works for Proton (Linux) and NotProton (macOS), which both run
+/// launch options through a POSIX shell.
+pub fn extender_launch_wrapper(target: &str, loader: &str) -> String {
+    format!(r#"bash -c 'exec "${{@/{target}/{loader}}}"' -- %command%"#)
+}
+
+/// Add the wrapper to existing launch options, keeping what was there
+/// (e.g. `WINEDLLOVERRIDES=... %command%` or plain game arguments).
+pub fn with_extender_wrapper(existing: Option<&str>, wrapper: &str) -> String {
+    match existing.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(cur) if cur.contains(wrapper) => cur.to_string(),
+        Some(cur) if cur.contains("%command%") => cur.replacen("%command%", wrapper, 1),
+        // Options without %command% are arguments Steam appends to the game.
+        Some(cur) => format!("{wrapper} {cur}"),
+        None => wrapper.to_string(),
+    }
+}
+
+/// Remove the wrapper (or the old `<loader> %command%` form older Corkscrew
+/// versions wrote), giving back the options that remain, if any.
+pub fn without_extender_wrapper(existing: &str, wrapper: &str, loader: &str) -> Option<String> {
+    let legacy = format!("{loader} %command%");
+    let restored = if existing.contains(wrapper) {
+        existing.replacen(wrapper, "%command%", 1)
+    } else if existing.trim() == legacy {
+        String::new()
+    } else {
+        existing.to_string()
+    };
+    let trimmed = restored.trim();
+    (!trimmed.is_empty() && trimmed != "%command%").then(|| trimmed.to_string())
 }
 
 /// Check if running on Steam Deck / SteamOS.
@@ -1151,10 +1227,12 @@ pub fn get_launch_options_status(steam_info: &SteamInfo) -> Vec<LaunchOptionsSta
             .as_ref()
             .and_then(|c| parse_text_vdf_launch_options(c, ext.steam_app_id));
 
-        let patched = current
-            .as_ref()
-            .map(|opts| opts.contains(&ext.exe_name))
-            .unwrap_or(false);
+        let wrapper = steam_launch_target(&ext.game_id)
+            .map(|t| extender_launch_wrapper(t, &ext.exe_name));
+        let patched = match (current.as_ref(), wrapper.as_ref()) {
+            (Some(opts), Some(w)) => opts.contains(w.as_str()),
+            _ => false,
+        };
 
         results.push(LaunchOptionsStatus {
             game_id: ext.game_id.clone(),
@@ -1170,9 +1248,8 @@ pub fn get_launch_options_status(steam_info: &SteamInfo) -> Vec<LaunchOptionsSta
 
 /// Patch Steam launch options so the game launches through the script extender.
 ///
-/// For Proton/Wine on Linux, this uses the standard `%command%` substitution:
-/// e.g., `skse64_loader.exe %command%` makes Steam launch SKSE instead of the
-/// default game executable.
+/// Inserts [`extender_launch_wrapper`] in place of `%command%`, keeping any
+/// options already there. Steam must be closed.
 pub fn patch_launch_options(
     steam_info: &SteamInfo,
     game_id: &str,
@@ -1181,6 +1258,17 @@ pub fn patch_launch_options(
         .into_iter()
         .find(|e| e.game_id == game_id)
         .ok_or_else(|| anyhow::anyhow!("No known script extender for game '{}'", game_id))?;
+    let target = steam_launch_target(game_id)
+        .ok_or_else(|| anyhow::anyhow!("Unknown Steam launch exe for '{}'", game_id))?;
+    let wrapper = extender_launch_wrapper(target, &extender.exe_name);
+    if steam_running() {
+        anyhow::bail!(
+            "Quit Steam first: it overwrites launch options while it's running. \
+             Corkscrew needs to set {}'s launch options once to start {}.",
+            extender.display_name,
+            extender.exe_name
+        );
+    }
 
     for user_dir in &steam_info.userdata_dirs {
         let config_path = user_dir.join("config").join("localconfig.vdf");
@@ -1188,18 +1276,22 @@ pub fn patch_launch_options(
             continue;
         }
 
-        // Backup
+        let content = std::fs::read_to_string(&config_path)
+            .context("Failed to read localconfig.vdf")?;
+        let current = parse_text_vdf_launch_options(&content, extender.steam_app_id);
+        // Drop an old-format `<loader> %command%` first, then add the wrapper.
+        let base = current
+            .as_deref()
+            .and_then(|c| without_extender_wrapper(c, &wrapper, &extender.exe_name));
+        let launch_opt = with_extender_wrapper(base.as_deref(), &wrapper);
+        if current.as_deref() == Some(launch_opt.as_str()) {
+            continue;
+        }
+
         let backup = config_path.with_extension("vdf.bak");
         std::fs::copy(&config_path, &backup)
             .context("Failed to back up localconfig.vdf")?;
-
-        let content = std::fs::read_to_string(&config_path)
-            .context("Failed to read localconfig.vdf")?;
-
-        // Set launch options to use the script extender
-        let launch_opt = format!("{} %command%", extender.exe_name);
         let updated = set_text_vdf_launch_options(&content, extender.steam_app_id, Some(&launch_opt))?;
-
         std::fs::write(&config_path, &updated)
             .context("Failed to write localconfig.vdf")?;
 
@@ -1214,7 +1306,8 @@ pub fn patch_launch_options(
     Ok(())
 }
 
-/// Remove script extender from Steam launch options (restore to default).
+/// Remove the script extender from Steam launch options, keeping any other
+/// options. Steam must be closed.
 pub fn unpatch_launch_options(
     steam_info: &SteamInfo,
     game_id: &str,
@@ -1223,6 +1316,12 @@ pub fn unpatch_launch_options(
         .into_iter()
         .find(|e| e.game_id == game_id)
         .ok_or_else(|| anyhow::anyhow!("No known script extender for game '{}'", game_id))?;
+    let target = steam_launch_target(game_id)
+        .ok_or_else(|| anyhow::anyhow!("Unknown Steam launch exe for '{}'", game_id))?;
+    let wrapper = extender_launch_wrapper(target, &extender.exe_name);
+    if steam_running() {
+        anyhow::bail!("Quit Steam first: it overwrites launch options while it's running.");
+    }
 
     for user_dir in &steam_info.userdata_dirs {
         let config_path = user_dir.join("config").join("localconfig.vdf");
@@ -1232,25 +1331,18 @@ pub fn unpatch_launch_options(
 
         let content = std::fs::read_to_string(&config_path)
             .context("Failed to read localconfig.vdf")?;
-
-        // Check if the current options contain our script extender
-        let current = parse_text_vdf_launch_options(&content, extender.steam_app_id);
-        if let Some(ref opts) = current {
-            if !opts.contains(&extender.exe_name) {
-                continue; // Not patched by us
-            }
-        } else {
-            continue; // No launch options set
+        let Some(current) = parse_text_vdf_launch_options(&content, extender.steam_app_id) else {
+            continue;
+        };
+        let remaining = without_extender_wrapper(&current, &wrapper, &extender.exe_name);
+        if remaining.as_deref() == Some(current.as_str()) {
+            continue; // Not patched by us
         }
 
-        // Backup
         let backup = config_path.with_extension("vdf.bak");
         std::fs::copy(&config_path, &backup)
             .context("Failed to back up localconfig.vdf")?;
-
-        // Remove our launch options (set to None to clear the key)
-        let updated = set_text_vdf_launch_options(&content, extender.steam_app_id, None)?;
-
+        let updated = set_text_vdf_launch_options(&content, extender.steam_app_id, remaining.as_deref())?;
         std::fs::write(&config_path, &updated)
             .context("Failed to write localconfig.vdf")?;
 
@@ -1271,6 +1363,47 @@ pub fn unpatch_launch_options(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extender_wrapper_targets_the_exe_steam_starts() {
+        assert_eq!(steam_launch_target("skyrimse"), Some("SkyrimSELauncher.exe"));
+        assert_eq!(steam_launch_target("skyrim"), Some("SkyrimLauncher.exe"));
+        assert_eq!(steam_launch_target("starfield"), Some("Starfield.exe"));
+        assert_eq!(
+            extender_launch_wrapper("Starfield.exe", "sfse_loader.exe"),
+            r#"bash -c 'exec "${@/Starfield.exe/sfse_loader.exe}"' -- %command%"#
+        );
+    }
+
+    #[test]
+    fn extender_wrapper_keeps_existing_options_and_round_trips() {
+        let w = extender_launch_wrapper("Starfield.exe", "sfse_loader.exe");
+        // Nothing set.
+        assert_eq!(with_extender_wrapper(None, &w), w);
+        assert_eq!(without_extender_wrapper(&w, &w, "sfse_loader.exe"), None);
+        // Env vars before %command% stay.
+        let env = r#"WINEDLLOVERRIDES="winhttp=n,b" %command%"#;
+        let patched = with_extender_wrapper(Some(env), &w);
+        assert_eq!(patched, format!(r#"WINEDLLOVERRIDES="winhttp=n,b" {w}"#));
+        assert_eq!(without_extender_wrapper(&patched, &w, "sfse_loader.exe").as_deref(), Some(env));
+        // Plain game arguments (no %command%) go after the command.
+        let args = with_extender_wrapper(Some("-windowed"), &w);
+        assert_eq!(args, format!("{w} -windowed"));
+        assert_eq!(
+            without_extender_wrapper(&args, &w, "sfse_loader.exe").as_deref(),
+            Some("%command% -windowed")
+        );
+        // Patching twice is a no-op.
+        assert_eq!(with_extender_wrapper(Some(&patched), &w), patched);
+        // The broken form older versions wrote is removed.
+        assert_eq!(without_extender_wrapper("sfse_loader.exe %command%", &w, "sfse_loader.exe"), None);
+        // Someone else's options are left alone.
+        assert_eq!(
+            without_extender_wrapper("gamemoderun %command%", &w, "sfse_loader.exe").as_deref(),
+            Some("gamemoderun %command%")
+        );
+    }
+
 
     fn exec_value(content: &str) -> &str {
         content
@@ -1850,5 +1983,20 @@ mod tests {
         let candidates = steam_root_candidates(home.path(), home.path(), None);
         let found = find_steam_installation(&candidates).expect("steam");
         assert!(same_dir(&found.steam_root, &native));
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    /// Read-only check of this machine's Steam client:
+    /// `cargo test --lib live_steam_launch_options -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn live_steam_launch_options() {
+        let info = super::detect_steam_installation().expect("Steam client");
+        eprintln!("root={} users={} running={}", info.steam_root.display(), info.userdata_dirs.len(), super::steam_running());
+        for s in super::get_launch_options_status(&info) {
+            eprintln!("{} ({}): patched={} current={:?}", s.game_id, s.steam_app_id, s.patched, s.current_options);
+        }
     }
 }

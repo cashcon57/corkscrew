@@ -2144,6 +2144,44 @@ fn self_heal_warning(report: &deployer::SelfHealReport) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
+/// Make sure Steam's launch options start the game's script extender
+/// (see `steam_integration::patch_launch_options`). Steam must be closed to
+/// change them, so this only fails when they aren't set yet and Steam is
+/// running.
+/// For a plain launch, take the script extender back out of Steam's launch
+/// options. Returns a note for the user when that isn't possible right now.
+fn clear_extender_launch_options(game_id: &str) -> Option<String> {
+    use crate::steam_integration as si;
+    let info = si::detect_steam_installation()?;
+    let patched = si::get_launch_options_status(&info)
+        .into_iter()
+        .any(|s| s.game_id == game_id && s.patched);
+    if !patched {
+        return None;
+    }
+    match si::unpatch_launch_options(&info, game_id) {
+        Ok(()) => None,
+        Err(_) => Some(
+            "Steam's launch options still start the script extender. Quit Steam and launch again \
+             to start the game without it."
+                .to_string(),
+        ),
+    }
+}
+
+fn ensure_extender_launch_options(game_id: &str) -> Result<(), String> {
+    use crate::steam_integration as si;
+    let info = si::detect_steam_installation()
+        .ok_or_else(|| "Couldn't find the Steam client to set launch options".to_string())?;
+    let already = si::get_launch_options_status(&info)
+        .into_iter()
+        .any(|s| s.game_id == game_id && s.patched);
+    if already {
+        return Ok(());
+    }
+    si::patch_launch_options(&info, game_id).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn launch_game_cmd(
     game_id: String,
@@ -2174,12 +2212,20 @@ pub async fn launch_game_cmd(
     } else {
         None
     };
+    let mut extender_note: Option<String> = None;
     if started_by_client {
         match (use_skse, launcher_swap) {
             (true, Some(swap)) => {
                 crate::launcher_swap::apply(&game_path, swap).map_err(|e| {
                     format!("Couldn't set up the script extender for a {} launch: {e}", bottle.source)
                 })?;
+            }
+            // No launcher to swap (e.g. Starfield): Steam starts the game
+            // exe itself, so a Steam launch option swaps in the loader.
+            (true, None) if via_steam
+                && crate::games::script_extender_loader(&game_id).is_some() =>
+            {
+                ensure_extender_launch_options(&game_id)?;
             }
             (true, None) => {
                 return Err(format!(
@@ -2191,6 +2237,9 @@ pub async fn launch_game_cmd(
             (false, Some(swap)) => {
                 crate::launcher_swap::restore(&game_path, swap)
                     .map_err(|e| format!("Couldn't restore {}: {e}", swap.launcher))?;
+            }
+            (false, None) if via_steam => {
+                extender_note = clear_extender_launch_options(&game_id);
             }
             (false, None) => {}
         }
@@ -2525,6 +2574,12 @@ pub async fn launch_game_cmd(
         launcher::launch_game(&bottle, &exe_path, Some(&game_path), Some(&game_id), None)
     }
     .map_err(|e| format!("Launch failed ({}): {}", bottle.source, e))?;
+    if let Some(note) = extender_note {
+        result.warning = Some(match result.warning.take() {
+            Some(w) => format!("{w}\n{note}"),
+            None => note,
+        });
+    }
     if use_skse && launcher_swap.is_some() {
         let note = "The script extender starts in place of the game's launcher. \
                     If Steam verifies or updates the game, Corkscrew sets it up again on the next launch.";
