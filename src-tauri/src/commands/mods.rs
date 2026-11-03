@@ -2025,14 +2025,16 @@ pub async fn launch_game_cmd(
         .map(|v| v == "true")
         .unwrap_or(false);
 
-    // Auto-apply display fix for Skyrim SE before launching to ensure fullscreen
+    // Pre-launch display fix for Skyrim SE: Wine input/registry fixes, and a
+    // SkyrimPrefs.ini correction that keeps the user's display mode.
     if game_id == "skyrimse" && !fixes_disabled {
-        match display_fix::auto_fix_display(&bottle) {
+        match display_fix::auto_fix_display(&bottle, Some(&data_dir_check)) {
             Ok(result) => {
                 if result.fixed {
                     log::info!(
-                        "Auto-applied display fix: {}x{} fullscreen (was {}x{} fs={} borderless={})",
+                        "Auto-applied display fix: {}x{} fs={} borderless={} (was {}x{} fs={} borderless={})",
                         result.applied.width, result.applied.height,
+                        result.applied.fullscreen, result.applied.borderless,
                         result.previous.width, result.previous.height,
                         result.previous.fullscreen, result.previous.borderless
                     );
@@ -2366,7 +2368,8 @@ pub async fn scan_skse_plugins_cmd(
             .map(|s| s.current_version)
             .unwrap_or_else(|_| "unknown".to_string());
 
-        Ok(skse::scan_skse_plugins(&data_dir, &version))
+        let skse_version = skse::detect_skse(&game_path).version;
+        Ok(skse::scan_skse_plugins(&data_dir, &version, skse_version.as_deref()))
     })
     .await
     .map_err(crate::format_join_error)?
@@ -2433,7 +2436,8 @@ pub async fn reenable_wine_plugin_cmd(
 pub async fn fix_skyrim_display(bottle_name: String) -> Result<display_fix::DisplayFixResult, String> {
     tokio::task::spawn_blocking(move || {
         let bottle = resolve_bottle(&bottle_name)?;
-        display_fix::auto_fix_display(&bottle)
+        // Explicit user action: force exclusive fullscreen at native resolution.
+        display_fix::force_exclusive_fullscreen(&bottle)
     })
     .await
     .map_err(crate::format_join_error)?

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use tauri::State;
 
 use crate::bottles::detect_bottles;
+use crate::crossover_install;
 use crate::crossover_shortcuts::{self, UnregisteredGame};
 use crate::game_registry::{save_custom_game, CustomGame};
 use crate::games::detect_all_games_with_custom;
@@ -294,6 +295,76 @@ fn validate_custom_game_paths(
         exe_path: canon_exe,
         data_dir: canon_data_dir,
     })
+}
+
+// --- Which CrossOver install runs a bottle ---
+
+/// CrossOver installs on this Mac and the one a bottle launches with.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct BottleCrossOverInfo {
+    pub installs: Vec<crossover_install::CrossOverInstall>,
+    /// The install a launch would use now (`None` if none can be chosen).
+    pub selected: Option<crossover_install::CrossOverSelection>,
+    /// The per-bottle override from Settings, if any.
+    pub override_path: Option<String>,
+    /// Why nothing could be selected.
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_bottle_crossover_info(bottle_name: String) -> Result<BottleCrossOverInfo, String> {
+    tokio::task::spawn_blocking(move || {
+        let bottle = crate::bottles::find_bottle_by_name(&bottle_name)
+            .ok_or_else(|| format!("Bottle not found: {bottle_name}"))?;
+        if bottle.source != "CrossOver" {
+            return Err(format!("'{bottle_name}' is not a CrossOver bottle"));
+        }
+        let installs = crossover_install::list_crossover_installs();
+        let (selected, error) =
+            match crossover_install::select_for_bottle_among(&installs, &bottle.name, &bottle.path) {
+                Ok(sel) => (Some(sel), None),
+                Err(e) => (None, Some(e.to_string())),
+            };
+        Ok(BottleCrossOverInfo {
+            installs,
+            selected,
+            override_path: crossover_install::override_for_bottle(&bottle.name)
+                .map(|p| p.to_string_lossy().into_owned()),
+            error,
+        })
+    })
+    .await
+    .map_err(crate::format_join_error)?
+}
+
+/// Pin a bottle to a CrossOver install (`app_path` = the `.app`), or return
+/// it to automatic selection (`None` / empty).
+#[tauri::command]
+pub async fn set_bottle_crossover_install(
+    bottle_name: String,
+    app_path: Option<String>,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let bottle = crate::bottles::find_bottle_by_name(&bottle_name)
+            .ok_or_else(|| format!("Bottle not found: {bottle_name}"))?;
+        let value = match app_path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            None => String::new(),
+            Some(p) => {
+                let app = Path::new(p);
+                if !app.is_absolute() || crossover_install::crossover_install_info(app).is_none() {
+                    return Err(format!("{p} is not a CrossOver install"));
+                }
+                p.to_string()
+            }
+        };
+        crate::config::set_config_value(
+            &format!("{}{}", crossover_install::OVERRIDE_KEY_PREFIX, bottle.name),
+            &value,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(crate::format_join_error)?
 }
 
 #[cfg(test)]

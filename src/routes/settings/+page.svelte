@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, findOrphanedDownloads, deleteOrphanedDownloads, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, setUseWineEngineFixes, getDepotDownloadCommand, startDepotDownload, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion, listDisabledWinePlugins, reenableWinePlugin, vortexListCachedExtensions, vortexFetchExtension, vortexRefreshExtension, vortexDeleteCachedExtension, vortexListAvailableExtensions, vortexGetExtensionDetail, ddStatus, ddEnsureUpdated, ddAuthenticate, ddDownloadDepot, ddApplyDepot, ddGetDepotVersions, getLaunchOptionsStatus, patchSteamLaunchOptions, unpatchSteamLaunchOptions } from "$lib/api";
-  import type { CleanReport, CleanResult, DowngradeStatus, DeploymentHealth, VerificationLevel, CachedVersion, DepotDownloadInfo, LaunchOptionsStatus } from "$lib/types";
+  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, findOrphanedDownloads, deleteOrphanedDownloads, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, setUseWineEngineFixes, getDepotDownloadCommand, startDepotDownload, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion, listDisabledWinePlugins, reenableWinePlugin, vortexListCachedExtensions, vortexFetchExtension, vortexRefreshExtension, vortexDeleteCachedExtension, vortexListAvailableExtensions, vortexGetExtensionDetail, ddStatus, ddEnsureUpdated, ddAuthenticate, ddDownloadDepot, ddApplyDepot, ddGetDepotVersions, getLaunchOptionsStatus, patchSteamLaunchOptions, unpatchSteamLaunchOptions, getBottleCrossOverInfo, setBottleCrossOverInstall } from "$lib/api";
+  import type { BottleCrossOverInfo, CrossOverSelectionReason, CleanReport, CleanResult, DowngradeStatus, DeploymentHealth, VerificationLevel, CachedVersion, DepotDownloadInfo, LaunchOptionsStatus } from "$lib/types";
   import { wineCtx } from "$lib/types";
   import type { SteamStatus } from "$lib/types";
   import { config, showError, showSuccess, selectedGame, skseStatus, currentPage, appVersion, updateReady, updateVersion, updateNotes, updateChecking, updateError, triggerUpdateCheck, controllerMode, nativeMode, nativeModeVisible } from "$lib/stores";
@@ -310,6 +310,43 @@
   const game = $derived($selectedGame);
   const skse = $derived($skseStatus);
   const isSkyrim = $derived(game?.game_id === "skyrimse");
+
+  // Which CrossOver install launches the selected game's bottle.
+  const crossOverBottle = $derived(
+    wineCtx(game)?.source === "CrossOver" ? wineCtx(game)?.bottle_name ?? null : null
+  );
+  let crossOverInfo = $state<BottleCrossOverInfo | null>(null);
+  let savingCrossOver = $state(false);
+  const crossOverReasonLabel: Record<CrossOverSelectionReason, string> = {
+    override: "chosen here",
+    live_wineserver: "its wineserver is running for this bottle",
+    bottle_version: "the bottle was created or last upgraded with it",
+    default: "first install found",
+  };
+
+  $effect(() => {
+    const bottle = crossOverBottle;
+    crossOverInfo = null;
+    if (!bottle) return;
+    getBottleCrossOverInfo(bottle)
+      .then((info) => {
+        if (crossOverBottle === bottle) crossOverInfo = info;
+      })
+      .catch((err) => console.error("Failed to load CrossOver installs:", err));
+  });
+
+  async function handleCrossOverChange(bottle: string, appPath: string) {
+    savingCrossOver = true;
+    try {
+      await setBottleCrossOverInstall(bottle, appPath === "" ? null : appPath);
+      crossOverInfo = await getBottleCrossOverInfo(bottle);
+      showSuccess(appPath === "" ? "CrossOver install: automatic" : "CrossOver install saved");
+    } catch (e: unknown) {
+      showError(`Failed to set CrossOver install: ${e}`);
+    } finally {
+      savingCrossOver = false;
+    }
+  }
 
   // Tool icon mapping (tool ID → icon path)
   const toolIcons: Record<string, string> = {
@@ -2013,7 +2050,13 @@
         <div class="card-row appearance-row">
           <div class="toggle-info">
             <span class="row-label">Disable Launch Fixes</span>
-            <span class="toggle-description">Not Recommended — disables Wine display and cursor fixes</span>
+            <span class="toggle-description">
+              Before each Skyrim launch Corkscrew applies Wine cursor/input fixes and repairs
+              SkyrimPrefs.ini display settings. Your display mode is kept (fullscreen, borderless,
+              or SSE Display Tweaks); only a plain window is switched to fullscreen and only an
+              off-screen resolution is corrected. Turn this on to leave all display settings alone.
+              Also available from the Play button's launch options menu.
+            </span>
           </div>
           <button
             class="toggle-switch"
@@ -2030,6 +2073,42 @@
           </button>
         </div>
         {/if}<!-- end !nativeMode: display/cursor fix toggle -->
+        {#if !$nativeMode && crossOverBottle}
+        <div class="card-row">
+          <div class="toggle-info">
+            <span class="row-label">CrossOver install</span>
+            <span class="toggle-description">
+              Which CrossOver runs the "{crossOverBottle}" bottle. A bottle must run under the
+              CrossOver build that owns it; Automatic picks the build whose wineserver is running
+              for the bottle, else the one that created it.
+              {#if crossOverInfo?.selected}
+                Now: {crossOverInfo.selected.install.name}{crossOverInfo.selected.install.version ? ` ${crossOverInfo.selected.install.version}` : ""}
+                ({crossOverReasonLabel[crossOverInfo.selected.reason]}).
+              {:else if crossOverInfo?.error}
+                {crossOverInfo.error}
+              {/if}
+            </span>
+          </div>
+          <div class="row-control">
+            <select
+              class="settings-select"
+              value={crossOverInfo?.override_path ?? ""}
+              onchange={(e) => handleCrossOverChange(crossOverBottle, e.currentTarget.value)}
+              disabled={savingCrossOver || !crossOverInfo}
+            >
+              <option value="">Automatic</option>
+              {#each crossOverInfo?.installs ?? [] as install (install.app_path)}
+                <option value={install.app_path}>
+                  {install.name}{install.version ? ` (${install.version})` : ""}
+                </option>
+              {/each}
+              {#if crossOverInfo?.override_path && !crossOverInfo.installs.some((i) => i.app_path === crossOverInfo?.override_path)}
+                <option value={crossOverInfo.override_path}>{crossOverInfo.override_path} (missing)</option>
+              {/if}
+            </select>
+          </div>
+        </div>
+        {/if}<!-- end CrossOver install picker -->
         <div class="card-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
           <div style="display: flex; align-items: center; justify-content: space-between;">
             <div>
