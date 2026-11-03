@@ -539,6 +539,37 @@ export interface ModUpdateInfo {
   latest_file_id: number;
 }
 
+/** How one pending update is fetched: Premium = API download, free = Nexus website. */
+export type UpdateRoute =
+  | { kind: "api_download" }
+  | { kind: "browser"; url: string };
+
+export interface RoutedUpdate {
+  mod_id: number;
+  mod_name: string;
+  route: UpdateRoute;
+}
+
+export interface UpdateOutcome {
+  mod_id: number;
+  mod_name: string;
+  ok: boolean;
+  new_version: string | null;
+  error: string | null;
+  note: string | null;
+}
+
+/** Result of `download_from_nexus` with `autoInstall = false`. */
+export interface NxmDownloadResult {
+  downloaded: string;
+  mod_name: string;
+  mod_version: string;
+  nexus_mod_id: number | null;
+  nexus_file_id: number | null;
+  replaces_mod_id: number | null;
+  install_note: string | null;
+}
+
 export interface IntegrityReport {
   modified_files: string[];
   unknown_files: string[];

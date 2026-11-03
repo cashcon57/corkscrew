@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-pub const TARGET_VERSION: u32 = 24;
+pub const TARGET_VERSION: u32 = 25;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -164,6 +164,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 23 {
         migrate_v23_to_v24(conn)?;
         version = 24;
+    }
+
+    if version == 24 {
+        migrate_v24_to_v25(conn)?;
+        version = 25;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -1256,6 +1261,43 @@ fn migrate_v23_to_v24(conn: &Connection) -> Result<()> {
     log::info!(
         "Migration 23 → 24 complete (deployment_manifest UNIQUE now includes deploy_target)"
     );
+    Ok(())
+}
+
+/// Migration 24 → 25: persist Nexus update-check results.
+///
+/// One row per checked mod. `latest_file_id` is NULL when the last check
+/// found the mod up to date, so `checked_at` still records that it was
+/// checked. Rows cascade away with their mod.
+///
+/// Also drops `nexus_url_cache`: nothing ever read or wrote it, and Nexus
+/// download links are short-lived and must not be cached.
+fn migrate_v24_to_v25(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS mod_update_checks (
+            mod_id            INTEGER PRIMARY KEY
+                              REFERENCES installed_mods(id) ON DELETE CASCADE,
+            game_id           TEXT    NOT NULL,
+            bottle_name       TEXT    NOT NULL,
+            nexus_mod_id      INTEGER NOT NULL,
+            installed_file_id INTEGER,
+            latest_file_id    INTEGER,
+            latest_version    TEXT,
+            latest_file_name  TEXT,
+            checked_at        TEXT    NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_mod_update_checks_game_bottle
+            ON mod_update_checks (game_id, bottle_name);
+
+        DROP TABLE IF EXISTS nexus_url_cache;",
+    )?;
+
+    tx.execute("UPDATE schema_version SET version = 25", [])?;
+    tx.commit()?;
+    log::info!("Migration 24 → 25 complete (mod_update_checks, dropped nexus_url_cache)");
     Ok(())
 }
 

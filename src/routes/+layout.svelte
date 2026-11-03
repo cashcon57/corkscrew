@@ -17,7 +17,7 @@
   import type { CollectionInstallCheckpoint, WabbajackInstallStatus } from "$lib/types";
   import { wineCtx } from "$lib/types";
   import { get } from "svelte/store";
-  import type { DetectedGame, QueueItem, KnownUninstalledGame } from "$lib/types";
+  import type { DetectedGame, QueueItem, KnownUninstalledGame, NxmDownloadResult } from "$lib/types";
   import NotificationLog from "$lib/components/mods/NotificationLog.svelte";
   import FirstRunWizard from "$lib/components/FirstRunWizard.svelte";
   import TelemetryBanner from "$lib/components/TelemetryBanner.svelte";
@@ -247,17 +247,15 @@
     getNotificationCount().then(c => notificationCount.set(c)).catch((err) => console.error('Failed to get notification count:', err));
   }
 
-  // Override showError/showSuccess to also persist
-  const originalShowError = showError;
-  const originalShowSuccess = showSuccess;
-  function wrappedShowError(msg: string) {
-    originalShowError(msg);
-    logToast("error", msg);
-  }
-  function wrappedShowSuccess(msg: string) {
-    originalShowSuccess(msg);
-    logToast("success", msg);
-  }
+  // Every toast, from any page, goes to the persistent notification log.
+  $effect(() => {
+    const msg = $errorMessage;
+    if (msg) logToast("error", msg);
+  });
+  $effect(() => {
+    const msg = $successMessage;
+    if (msg) logToast("success", msg);
+  });
 
   onMount(() => {
     initTheme();
@@ -269,7 +267,7 @@
     function handleUnhandledRejection(event: PromiseRejectionEvent) {
       const msg = event.reason?.message || event.reason?.toString?.() || 'Unknown promise rejection';
       console.error('[Unhandled Rejection]', event.reason);
-      wrappedShowError(`Unhandled error: ${msg}`);
+      showError(`Unhandled error: ${msg}`);
       captureError(event.reason instanceof Error ? event.reason : msg, { source: 'unhandledrejection' });
       recordErrorEvent('frontend', 'unhandled_rejection', msg.substring(0, 500))
         .catch((err) => console.error('Failed to record error event:', err));
@@ -277,7 +275,7 @@
     function handleGlobalError(event: ErrorEvent) {
       const msg = event.error?.message || event.message || 'Unknown error';
       console.error('[Unhandled Error]', event.error || event.message);
-      wrappedShowError(`Unhandled error: ${msg}`);
+      showError(`Unhandled error: ${msg}`);
       captureError(event.error instanceof Error ? event.error : msg, { source: 'window.onerror' });
       recordErrorEvent('frontend', 'unhandled_error', msg.substring(0, 500))
         .catch((err) => console.error('Failed to record error event:', err));
@@ -536,10 +534,10 @@
       try { modNames = await getCheckpointModNames(cp.id); } catch { /* fallback to Mod N */ }
       await resumeInstallTracking(cp.collection_name, cp.total_mods, cp.completed_mods, modStatuses, modNames);
       interruptedInstall = null;
-      resumeCollectionInstall(cp.id).catch((e: unknown) => wrappedShowError(`Resume failed: ${e}`));
+      resumeCollectionInstall(cp.id).catch((e: unknown) => showError(`Resume failed: ${e}`));
       goto("/collections/progress");
     } catch (e) {
-      wrappedShowError(`Failed to resume install: ${e}`);
+      showError(`Failed to resume install: ${e}`);
     } finally {
       resumingInstall = false;
     }
@@ -583,7 +581,7 @@
         // Auto-register on Steam Deck — it's the expected behavior
         try {
           await addToSteam();
-          wrappedShowSuccess("Added Corkscrew to your Steam library");
+          showSuccess("Added Corkscrew to your Steam library");
           controllerMode.set(true); // Auto-enable controller mode on Deck
         } catch (e) {
           // Silent — Steam auto-registration is best-effort
@@ -599,9 +597,9 @@
     showSteamPrompt = false;
     try {
       await addToSteam();
-      wrappedShowSuccess("Added Corkscrew to your Steam library");
+      showSuccess("Added Corkscrew to your Steam library");
     } catch (e) {
-      wrappedShowError(`Failed to add to Steam: ${e}`);
+      showError(`Failed to add to Steam: ${e}`);
     }
   }
 
@@ -798,17 +796,21 @@
 
     try {
       // Download only — don't auto-install
-      const result = await downloadFromNexus(nxmUrl, game.game_id, bottle, false);
-      const downloadInfo = result as unknown as { downloaded: string; mod_name: string; mod_version: string };
+      const downloadInfo = await downloadFromNexus(nxmUrl, game.game_id, bottle, false) as NxmDownloadResult;
 
-      // Show confirmation toast — user must click Install or Cancel
+      // Show confirmation toast — user must click Install or Cancel. The
+      // backend says whether this updates/reinstalls an installed mod.
       pendingNxmInstall.set({
         archivePath: downloadInfo.downloaded,
         modName: downloadInfo.mod_name,
         modVersion: downloadInfo.mod_version,
         gameId: game.game_id,
         bottleName: bottle,
-        nexusModId,
+        nexusModId: downloadInfo.nexus_mod_id ?? nexusModId,
+        nexusFileId: downloadInfo.nexus_file_id ?? undefined,
+        nexusSlug: nxmSlug,
+        replacesModId: downloadInfo.replaces_mod_id ?? undefined,
+        installNote: downloadInfo.install_note ?? undefined,
         nxmUrl,
       });
       // Clear the downloading toast
@@ -823,17 +825,22 @@
     if (!pending) return;
     nxmInstalling = true;
     try {
-      await installMod(
+      const installed = await installMod(
         pending.archivePath,
         pending.gameId,
         pending.bottleName,
         pending.modName,
         pending.modVersion,
         "nexus",
-        pending.nexusModId ? `https://www.nexusmods.com/mods/${pending.nexusModId}` : undefined,
+        pending.nexusModId
+          ? `https://www.nexusmods.com/${pending.nexusSlug}/mods/${pending.nexusModId}`
+          : undefined,
         pending.nexusModId,
+        pending.nexusFileId,
       );
-      showSuccess(`Installed "${pending.modName}" successfully!`);
+      showSuccess(pending.replacesModId != null
+        ? `Updated "${installed.name}" in place`
+        : `Installed "${installed.name}" successfully!`);
       pendingNxmInstall.set(null);
       // Signal mods page to reload
       nxmInstallComplete.update(n => n + 1);
@@ -1544,11 +1551,18 @@
             {#if $pendingNxmInstall.modVersion}
               <span class="toast-version">v{$pendingNxmInstall.modVersion}</span>
             {/if}
-            downloaded. Install this mod?
+            downloaded. {$pendingNxmInstall.replacesModId != null ? "Update the installed copy?" : "Install this mod?"}
+            {#if $pendingNxmInstall.installNote}
+              <span class="toast-note">{$pendingNxmInstall.installNote}</span>
+            {/if}
           </span>
           <div class="toast-actions">
             <button class="toast-action-btn toast-install-btn" onclick={confirmNxmInstall} disabled={nxmInstalling}>
-              {nxmInstalling ? "Installing..." : "Install"}
+              {#if nxmInstalling}
+                {$pendingNxmInstall.replacesModId != null ? "Updating..." : "Installing..."}
+              {:else}
+                {$pendingNxmInstall.replacesModId != null ? "Update" : "Install"}
+              {/if}
             </button>
             <button class="toast-action-btn toast-cancel-btn" onclick={cancelNxmInstall} disabled={nxmInstalling}>
               Cancel
@@ -2782,6 +2796,13 @@
     font-size: 11px;
     color: var(--text-tertiary);
     margin-left: 2px;
+  }
+
+  .toast-note {
+    display: block;
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--text-secondary);
   }
 
   .toast-actions {

@@ -307,6 +307,13 @@ export interface PendingNxmInstall {
   gameId: string;
   bottleName: string;
   nexusModId?: number;
+  nexusFileId?: number;
+  /** Nexus game domain from the nxm link. */
+  nexusSlug: string;
+  /** Set when installing will update/reinstall this installed mod in place. */
+  replacesModId?: number;
+  /** What the install will do (update, reinstall, sibling file), if notable. */
+  installNote?: string;
   nxmUrl: string;
 }
 export const pendingNxmInstall = writable<PendingNxmInstall | null>(null);

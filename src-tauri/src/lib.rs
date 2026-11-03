@@ -53,6 +53,7 @@ pub mod mod_dependencies;
 pub mod mod_recommendations;
 pub mod mod_tools;
 pub mod mod_types;
+pub mod mod_updates;
 pub mod modengine2_config;
 pub mod modlist_io;
 pub mod nexus;
@@ -1342,6 +1343,10 @@ pub fn run() {
             commands::profiles::restore_profile_saves,
             // Update Checking
             commands::notifications::check_mod_updates,
+            commands::notifications::get_mod_update_results,
+            commands::notifications::route_mod_updates,
+            commands::notifications::update_mods_from_nexus,
+            commands::notifications::cancel_mod_updates,
             // Mod Tools
             commands::tools::detect_mod_tools_cmd,
             commands::tools::install_mod_tool,
