@@ -575,10 +575,23 @@ pub(crate) fn xdg_steam_root(xdg_data_home: Option<&OsStr>) -> Option<PathBuf> {
     xdg_data_root(xdg_data_home).map(|base| base.join("Steam"))
 }
 
+/// The macOS Steam client's data root (libraries, `compatibilitytools.d`,
+/// `userdata`), where NotProton puts its tool and Steam keeps prefixes.
+pub(crate) fn macos_steam_root(home: &Path) -> PathBuf {
+    home.join("Library").join("Application Support").join("Steam")
+}
+
 /// All candidate Steam roots. Callers canonicalize/dedup, so a custom
 /// `$XDG_DATA_HOME` equal to the default collapses onto `~/.local/share/Steam`.
+/// On macOS the Steam client's root comes first (NotProton prefixes live in
+/// its libraries); the Linux layouts are kept so they are still found when
+/// present, e.g. in tests.
 pub(crate) fn steam_roots(home: &Path, xdg_data_home: Option<&OsStr>) -> Vec<PathBuf> {
-    let mut roots: Vec<PathBuf> = HOME_STEAM_ROOTS.iter().map(|r| home.join(r)).collect();
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if cfg!(target_os = "macos") {
+        roots.push(macos_steam_root(home));
+    }
+    roots.extend(HOME_STEAM_ROOTS.iter().map(|r| home.join(r)));
     roots.extend(xdg_steam_root(xdg_data_home));
     roots
 }

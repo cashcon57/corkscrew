@@ -276,7 +276,7 @@ fn check_user_documents_paths(bottle: &Bottle) -> Option<PathBuf> {
 fn check_steam_library_folders(bottle: &Bottle) -> Option<PathBuf> {
     // Proton prefixes: only the owning app's host install. Never scan the
     // prefix's libraryfolders.vdf — it maps onto host libraries holding other apps.
-    if bottle.source == "Proton" {
+    if bottle.is_steam_compat_prefix() {
         return STEAM_GAME_DIRS
             .iter()
             .find_map(|name| {

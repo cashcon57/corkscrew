@@ -299,7 +299,7 @@ fn check_steam_default(bottle: &Bottle, spec: &ThunderstoreGameSpec) -> Option<P
 fn check_steam_library_folders(bottle: &Bottle, spec: &ThunderstoreGameSpec) -> Option<PathBuf> {
     // Proton prefixes: only the owning app's host install. Never scan the
     // prefix's libraryfolders.vdf — it maps onto host libraries holding other apps.
-    if bottle.source == "Proton" {
+    if bottle.is_steam_compat_prefix() {
         return spec.steam_dirs.iter().find_map(|name| {
             crate::game_registry::find_proton_prefix_game(
                 bottle,

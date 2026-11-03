@@ -181,6 +181,82 @@ fn find_wine_binary_under(dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// NotProton's CrossOver runner, for running Windows programs in a NotProton
+/// prefix without Steam (mod tools such as xEdit). Mirrors the runner choice
+/// in NotProton's `run` script.
+#[derive(Debug, PartialEq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+struct NotProtonRunner {
+    cx_root: PathBuf,
+    wine: PathBuf,
+    wineserver: PathBuf,
+    /// `lib/wine/<arch>-unix`, the Unix-side DLL directory for `WINEDLLPATH`.
+    wine_unix: PathBuf,
+}
+
+/// Find the runner of an installed NotProton tool:
+/// `<steam_root>/compatibilitytools.d/notproton-*/{build,flavor}` names
+/// `<support_dir>/runners/crossover-<build>/CrossOver`. The newest tool name
+/// with an existing runner wins.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn find_notproton_runner(steam_root: &Path, support_dir: &Path) -> Option<NotProtonRunner> {
+    let mut tools: Vec<PathBuf> = std::fs::read_dir(steam_root.join("compatibilitytools.d"))
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("notproton-"))
+        })
+        .collect();
+    tools.sort();
+    tools.reverse();
+
+    for tool in tools {
+        let Ok(build) = std::fs::read_to_string(tool.join("build")) else {
+            continue;
+        };
+        let build = build.trim();
+        if build.is_empty()
+            || !build.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        {
+            continue;
+        }
+        let flavor = std::fs::read_to_string(tool.join("flavor")).unwrap_or_default();
+        let cx_root = support_dir
+            .join("runners")
+            .join(format!("crossover-{build}"))
+            .join("CrossOver");
+
+        let arm_unix = cx_root.join("lib/wine/aarch64-unix");
+        let arm = NotProtonRunner {
+            wine: arm_unix.join("wine.app/Contents/MacOS/wine"),
+            wineserver: cx_root.join("bin/wineserver-arm64"),
+            wine_unix: arm_unix,
+            cx_root: cx_root.clone(),
+        };
+        if flavor.trim() != "rosetta" && arm.wine.is_file() && arm.wineserver.is_file() {
+            return Some(arm);
+        }
+
+        let x86_unix = cx_root.join("lib/wine/x86_64-unix");
+        let wineserver = [cx_root.join("bin/wineserver"), cx_root.join("bin/wineserver-x86")]
+            .into_iter()
+            .find(|p| p.is_file());
+        let wine = x86_unix.join("wine");
+        if let (true, Some(wineserver)) = (wine.is_file(), wineserver) {
+            return Some(NotProtonRunner {
+                cx_root,
+                wine,
+                wineserver,
+                wine_unix: x86_unix,
+            });
+        }
+    }
+    None
+}
+
 /// Resolved Wine command with binary, extra args (before exe), and environment.
 struct WineCommand {
     /// Path to the Wine binary.
@@ -226,6 +302,39 @@ fn resolve_wine_binary(bottle: &Bottle) -> Result<WineCommand> {
             prefix_args.push("--bottle".to_string());
             prefix_args.push(bottle.name.clone());
             wine
+        }
+
+        // NotProton prefix run without Steam (mod tools). Games themselves go
+        // through `launch_via_steam`.
+        #[cfg(target_os = "macos")]
+        "NotProton" => {
+            let home = dirs::home_dir().unwrap_or_default();
+            let support = home.join("Library/Application Support/notproton");
+            let runner = find_notproton_runner(&crate::proton::macos_steam_root(&home), &support)
+                .ok_or_else(|| LauncherError::WineNotFound {
+                    bottle_source: source.to_string(),
+                    tried: format!(
+                        "NotProton runner under {}/runners (from Steam/compatibilitytools.d/notproton-*)",
+                        support.display()
+                    ),
+                })?;
+            let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".into());
+            env_vars.extend([
+                ("WINEPREFIX".to_string(), bottle.path.to_string_lossy().into_owned()),
+                ("CX_ROOT".to_string(), runner.cx_root.to_string_lossy().into_owned()),
+                ("WINELOADER".to_string(), runner.wine.to_string_lossy().into_owned()),
+                ("WINESERVER".to_string(), runner.wineserver.to_string_lossy().into_owned()),
+                (
+                    "WINEDLLPATH".to_string(),
+                    format!(
+                        "{}:{}",
+                        runner.cx_root.join("lib/wine/x86_64-windows").display(),
+                        runner.wine_unix.display()
+                    ),
+                ),
+                ("PATH".to_string(), format!("{}:{path}", runner.cx_root.join("bin").display())),
+            ]);
+            runner.wine
         }
 
         #[cfg(target_os = "macos")]
@@ -409,6 +518,37 @@ pub fn maybe_flatpak_spawn(cmd: &str, args: &[&str]) -> (String, Vec<String>) {
 /// # Returns
 ///
 /// A [`LaunchResult`] indicating whether the process was spawned successfully.
+/// Start a Steam Play game through the host Steam client
+/// (`steam://rungameid/<appid>`). NotProton games must start this way: Steam
+/// runs NotProton's launch script, which supplies the Steam client bridge the
+/// game's DRM needs. Running the exe under Wine directly would skip it.
+pub fn launch_via_steam(bottle: &Bottle) -> Result<LaunchResult> {
+    let app_id = bottle.steam_compat_app_id().ok_or_else(|| {
+        LauncherError::Other(format!(
+            "'{}' is not a Steam Play prefix (expected .../steamapps/compatdata/<appid>/pfx)",
+            bottle.name
+        ))
+    })?;
+    let url = format!("steam://rungameid/{app_id}");
+
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(not(target_os = "macos"))]
+    let opener = "xdg-open";
+
+    info!("Launching {} through Steam: {}", bottle.name, url);
+    Command::new(opener).arg(&url).spawn()?;
+
+    Ok(LaunchResult {
+        executable: url,
+        bottle_name: bottle.name.clone(),
+        // Steam owns the game process; there is no child PID to track.
+        pid: None,
+        success: true,
+        warning: None,
+    })
+}
+
 pub fn launch_game(
     bottle: &Bottle,
     exe_path: &Path,
@@ -605,6 +745,79 @@ pub fn find_executable_recursive(game_path: &Path, exe_name: &str) -> Option<Pat
 mod tests {
     use super::*;
     use std::fs;
+
+    fn make_notproton(tmp: &Path, build: &str, flavor: &str, arm: bool) -> (PathBuf, PathBuf) {
+        let steam_root = tmp.join("Steam");
+        let support = tmp.join("notproton");
+        let tool = steam_root.join("compatibilitytools.d/notproton-26.3");
+        fs::create_dir_all(&tool).unwrap();
+        fs::write(tool.join("build"), format!("{build}\n")).unwrap();
+        fs::write(tool.join("flavor"), format!("{flavor}\n")).unwrap();
+        let cx = support.join(format!("runners/crossover-{build}/CrossOver"));
+        for f in ["lib/wine/x86_64-unix/wine", "bin/wineserver"] {
+            fs::create_dir_all(cx.join(f).parent().unwrap()).unwrap();
+            fs::write(cx.join(f), "").unwrap();
+        }
+        if arm {
+            for f in ["lib/wine/aarch64-unix/wine.app/Contents/MacOS/wine", "bin/wineserver-arm64"] {
+                fs::create_dir_all(cx.join(f).parent().unwrap()).unwrap();
+                fs::write(cx.join(f), "").unwrap();
+            }
+        }
+        (steam_root, support)
+    }
+
+    #[test]
+    fn notproton_runner_uses_x86_64_wine_for_rosetta() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (steam_root, support) = make_notproton(tmp.path(), "26.3.0.39832", "rosetta", true);
+        let cx = support.join("runners/crossover-26.3.0.39832/CrossOver");
+        assert_eq!(
+            find_notproton_runner(&steam_root, &support),
+            Some(NotProtonRunner {
+                wine: cx.join("lib/wine/x86_64-unix/wine"),
+                wineserver: cx.join("bin/wineserver"),
+                wine_unix: cx.join("lib/wine/x86_64-unix"),
+                cx_root: cx,
+            })
+        );
+    }
+
+    #[test]
+    fn notproton_runner_uses_arm64_wine_for_fex_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (steam_root, support) = make_notproton(tmp.path(), "26.3.0.39832", "fex", true);
+        let runner = find_notproton_runner(&steam_root, &support).unwrap();
+        assert!(runner.wine.ends_with("aarch64-unix/wine.app/Contents/MacOS/wine"));
+        assert!(runner.wineserver.ends_with("bin/wineserver-arm64"));
+
+        // FEX tool without the arm64 binaries falls back to x86_64, like `run`.
+        let tmp = tempfile::tempdir().unwrap();
+        let (steam_root, support) = make_notproton(tmp.path(), "26.3.0.39832", "fex", false);
+        let runner = find_notproton_runner(&steam_root, &support).unwrap();
+        assert!(runner.wine.ends_with("x86_64-unix/wine"));
+    }
+
+    #[test]
+    fn notproton_runner_rejects_unsafe_build_and_missing_runner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (steam_root, support) = make_notproton(tmp.path(), "../../etc", "rosetta", false);
+        assert_eq!(find_notproton_runner(&steam_root, &support), None);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (steam_root, _) = make_notproton(tmp.path(), "26.3.0.39832", "rosetta", false);
+        assert_eq!(find_notproton_runner(&steam_root, &tmp.path().join("elsewhere")), None);
+    }
+
+    #[test]
+    fn launch_via_steam_rejects_non_steam_prefix() {
+        let bottle = Bottle {
+            name: "Skyrim".into(),
+            path: PathBuf::from("/tmp/Bottles/Skyrim"),
+            source: "CrossOver".into(),
+        };
+        assert!(matches!(launch_via_steam(&bottle), Err(LauncherError::Other(_))));
+    }
 
     /// Create a minimal fake bottle with drive_c.
     fn create_fake_bottle(parent: &Path, name: &str, source: &str) -> Bottle {

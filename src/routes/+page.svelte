@@ -439,6 +439,7 @@
     Wine:       { color: "#722F37", bg: "rgba(114, 47, 55, 0.14)",   gradient: "linear-gradient(135deg, rgba(114, 47, 55, 0.18), rgba(114, 47, 55, 0.06))" },
     Lutris:     { color: "#ff9f0a", bg: "rgba(255, 159, 10, 0.14)",  gradient: "linear-gradient(135deg, rgba(255, 159, 10, 0.18), rgba(255, 159, 10, 0.06))" },
     Proton:     { color: "#1a9fff", bg: "rgba(26, 159, 255, 0.14)",  gradient: "linear-gradient(135deg, rgba(26, 159, 255, 0.18), rgba(26, 159, 255, 0.06))" },
+    NotProton:  { color: "#1a9fff", bg: "rgba(26, 159, 255, 0.14)",  gradient: "linear-gradient(135deg, rgba(26, 159, 255, 0.18), rgba(26, 159, 255, 0.06))" },
     Bottles:    { color: "#3584e4", bg: "rgba(53, 132, 228, 0.14)",  gradient: "linear-gradient(135deg, rgba(53, 132, 228, 0.18), rgba(53, 132, 228, 0.06))" },
   };
 
@@ -448,7 +449,7 @@
 
   // Recommended sources per platform — others work but may have less compatibility
   const recommendedSources: Record<string, string[]> = {
-    macOS: ["CrossOver", "Moonshine"],
+    macOS: ["CrossOver", "Moonshine", "NotProton"],
     Linux: ["Proton", "Lutris"],
   };
 
@@ -610,7 +611,7 @@
                         <path d="M6.5 8.5C5 6 6.5 3 10 3c3.5 0 5 3 3.5 5.5" />
                         <circle cx="8" cy="5.5" r="0.5" fill="currentColor" />
                       </svg>
-                    {:else if bottle.source === "Proton"}
+                    {:else if bottle.source === "Proton" || bottle.source === "NotProton"}
                       <!-- Atom symbol (Rutherford-Bohr model) -->
                       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                         <circle cx="10" cy="10" r="1.5" fill="currentColor" stroke="none" />

@@ -329,7 +329,7 @@ fn check_steam_default(bottle: &Bottle, spec: &FromSoftGameSpec) -> Option<PathB
 fn check_steam_library_folders(bottle: &Bottle, spec: &FromSoftGameSpec) -> Option<PathBuf> {
     // Proton prefixes: only the owning app's host install. Never scan the
     // prefix's libraryfolders.vdf — it maps onto host libraries holding other apps.
-    if bottle.source == "Proton" {
+    if bottle.is_steam_compat_prefix() {
         return spec.steam_dirs.iter().find_map(|name| {
             let dir = crate::game_registry::find_proton_prefix_game(
                 bottle,
@@ -1011,7 +1011,20 @@ mod tests {
 
         // The prefix owner's own host install is still found.
         let owned = fx.install_owner_game(app_id, game, "eldenring.exe");
-        assert_eq!(scan(&fx.bottle("Proton")), Some(owned));
+        assert_eq!(scan(&fx.bottle("Proton")), Some(owned.clone()));
+        // NotProton (macOS) prefixes have the same layout and the same rules.
+        assert_eq!(scan(&fx.bottle("NotProton")), Some(owned));
+    }
+
+    #[test]
+    fn library_scan_in_notproton_prefix_is_owner_only() {
+        use crate::game_registry::proton_test_fixture;
+        let scan = |b: &Bottle| check_steam_library_folders(b, spec_for("eldenring"));
+        let game: &[&str] = &["ELDEN RING"];
+        let app_id = spec_for("eldenring").steam_app_id;
+
+        let fx = proton_test_fixture::new(app_id, game, "eldenring.exe");
+        assert_eq!(scan(&fx.bottle("NotProton")), None);
     }
 
     /// The owner app ID must match the game's real Steam app ID, not just the
