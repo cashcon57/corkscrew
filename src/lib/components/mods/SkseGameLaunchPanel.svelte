@@ -353,7 +353,7 @@
         try {
           const info = await getDepotDownloadCommand(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
           await navigator.clipboard.writeText(info.command);
-          showSuccess("Command copied! Paste it in the Steam console that opened.");
+          showSuccess("Commands copied. Paste each line into the Steam console that opened.");
         } catch (err) {
           console.error("depot command clipboard copy failed:", err);
         }
@@ -574,7 +574,7 @@
         Skyrim SE {downgradeStatus.current_version}
         {#if downgradeStatus.current_version !== "1.5.97"} — Downgrade Available{/if}
       </p>
-      <p class="skse-banner-text">Most mods target v1.5.97.</p>
+      <p class="skse-banner-text">Some mods and collections need v1.5.97. Downgrading downloads about 13 GB through Steam and backs up the files it replaces.</p>
     </div>
     <div class="skse-banner-actions">
       <button class="btn btn-primary btn-sm" onclick={handleDowngrade} disabled={downgrading}>

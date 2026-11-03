@@ -436,6 +436,7 @@
     Moonshine:  { color: "#bf5af2", bg: "rgba(191, 90, 242, 0.14)",  gradient: "linear-gradient(135deg, rgba(191, 90, 242, 0.18), rgba(191, 90, 242, 0.06))" },
     Heroic:     { color: "#0a84ff", bg: "rgba(10, 132, 255, 0.14)",  gradient: "linear-gradient(135deg, rgba(10, 132, 255, 0.18), rgba(10, 132, 255, 0.06))" },
     Mythic:     { color: "#30d158", bg: "rgba(48, 209, 88, 0.14)",   gradient: "linear-gradient(135deg, rgba(48, 209, 88, 0.18), rgba(48, 209, 88, 0.06))" },
+    GameHub:    { color: "#64d2ff", bg: "rgba(100, 210, 255, 0.14)", gradient: "linear-gradient(135deg, rgba(100, 210, 255, 0.18), rgba(100, 210, 255, 0.06))" },
     Wine:       { color: "#722F37", bg: "rgba(114, 47, 55, 0.14)",   gradient: "linear-gradient(135deg, rgba(114, 47, 55, 0.18), rgba(114, 47, 55, 0.06))" },
     Lutris:     { color: "#ff9f0a", bg: "rgba(255, 159, 10, 0.14)",  gradient: "linear-gradient(135deg, rgba(255, 159, 10, 0.18), rgba(255, 159, 10, 0.06))" },
     Proton:     { color: "#1a9fff", bg: "rgba(26, 159, 255, 0.14)",  gradient: "linear-gradient(135deg, rgba(26, 159, 255, 0.18), rgba(26, 159, 255, 0.06))" },
@@ -549,7 +550,7 @@
             </div>
             <p class="empty-title">No bottles found</p>
             <p class="empty-detail">
-              Corkscrew looks for bottles from CrossOver, Moonshine, Heroic, Mythic, Lutris, Proton, Bottles, and native Wine.
+              Corkscrew looks for bottles from CrossOver, Moonshine, Heroic, Mythic, GameHub, Lutris, Proton, Bottles, and native Wine.
             </p>
           </div>
         {:else}
@@ -597,6 +598,15 @@
                         <rect x="3" y="11" width="5" height="5" rx="0.5" transform="rotate(45 5.5 13.5)" />
                         <rect x="6" y="8" width="5" height="5" rx="0.5" transform="rotate(45 8.5 10.5)" />
                         <rect x="9" y="5" width="5" height="5" rx="0.5" transform="rotate(45 11.5 7.5)" />
+                      </svg>
+                    {:else if bottle.source === "GameHub"}
+                      <!-- Gamepad -->
+                      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M6 6h8a4 4 0 0 1 4 4v1.5a2.5 2.5 0 0 1-4.5 1.5L12.5 12h-5L6.5 13A2.5 2.5 0 0 1 2 11.5V10a4 4 0 0 1 4-4z" />
+                        <line x1="6" y1="8.5" x2="6" y2="10.5" />
+                        <line x1="5" y1="9.5" x2="7" y2="9.5" />
+                        <circle cx="13.5" cy="9" r="0.5" fill="currentColor" />
+                        <circle cx="14.5" cy="10.5" r="0.5" fill="currentColor" />
                       </svg>
                     {:else if bottle.source === "Wine"}
                       <!-- Wine glass -->

@@ -131,10 +131,17 @@ pub async fn check_mod_updates(
 ) -> Result<Vec<ModUpdateInfo>, String> {
     let client = nexus_client().await?;
 
+    // SQLite access is blocking; keep it off the async runtime's worker
+    // threads so a large mod list can't stall other IPC commands.
     let mods = {
-        let db = &state.db;
-        db.list_mods(&game_id, &bottle_name)
-            .map_err(|e| e.to_string())?
+        let db = state.db.clone();
+        let game_id = game_id.clone();
+        tokio::task::spawn_blocking(move || {
+            db.list_mods(&game_id, &bottle_name)
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(crate::format_join_error)??
     };
 
     // Build query list from mods that have a nexus_mod_id

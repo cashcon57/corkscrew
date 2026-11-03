@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, findOrphanedDownloads, deleteOrphanedDownloads, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, setUseWineEngineFixes, getDepotDownloadCommand, startDepotDownload, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion, listDisabledWinePlugins, reenableWinePlugin, vortexListCachedExtensions, vortexFetchExtension, vortexRefreshExtension, vortexDeleteCachedExtension, vortexListAvailableExtensions, vortexGetExtensionDetail, ddStatus, ddEnsureUpdated, ddAuthenticate, ddDownloadDepot, ddApplyDepot, ddGetDepotVersions, getLaunchOptionsStatus, patchSteamLaunchOptions, unpatchSteamLaunchOptions } from "$lib/api";
+  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, findOrphanedDownloads, deleteOrphanedDownloads, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, setUseWineEngineFixes, getDepotDownloadCommand, startDepotDownload, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion, listDisabledWinePlugins, reenableWinePlugin, vortexListCachedExtensions, vortexFetchExtension, vortexRefreshExtension, vortexDeleteCachedExtension, vortexListAvailableExtensions, vortexGetExtensionDetail, ddStatus, ddEnsureUpdated, ddAuthenticate, ddDownloadDepot, ddApplyDepot, ddGetDepotVersions, getLaunchOptionsStatus, patchSteamLaunchOptions, unpatchSteamLaunchOptions, restoreDowngrade, ddSkyrimBuilds, ddApplySkyrimBuild } from "$lib/api";
+  import type { SkyrimBuildInfo } from "$lib/api";
   import type { CleanReport, CleanResult, DowngradeStatus, DeploymentHealth, VerificationLevel, CachedVersion, DepotDownloadInfo, LaunchOptionsStatus } from "$lib/types";
   import { wineCtx } from "$lib/types";
   import type { SteamStatus } from "$lib/types";
@@ -298,6 +299,10 @@
   let ddDepotVersions = $state<Array<{ game_version: string; app_id: number; depot_id: number; manifest_id: string; build_id: string }>>([]);
   let ddSelectedVersion = $state<{ game_version: string; app_id: number; depot_id: number; manifest_id: string } | null>(null);
   let depotAutoFailed = $state(false);
+  // Skyrim SE builds Corkscrew can apply in full (all three depots).
+  let skyrimBuilds = $state<SkyrimBuildInfo[]>([]);
+  let downgradeTarget = $state("1.5.97");
+  let restoringDowngrade = $state(false);
 
   // Deployment health
   let deployHealth = $state<DeploymentHealth | null>(null);
@@ -526,6 +531,17 @@
       cachedVersions = await listGameVersions(game.game_id);
     } catch { /* ignore */ }
 
+    if (game.game_id === "skyrimse") {
+      try {
+        skyrimBuilds = await ddSkyrimBuilds();
+      } catch (e: unknown) {
+        console.error("Failed to load Skyrim builds:", e);
+        skyrimBuilds = [];
+      }
+      // 1.7.x mod setups mostly target 1.6.1170; older installs go to 1.5.97.
+      downgradeTarget = (downgradeStatus?.current_version ?? "").startsWith("1.7") ? "1.6.1170" : "1.5.97";
+    }
+
     // Load depot versions from captured Steam history
     try {
       ddDepotVersions = await ddGetDepotVersions(game.game_id);
@@ -596,6 +612,27 @@
     wizardStep = "dd_download";
     ddDownloading = true;
 
+    const build = game.game_id === "skyrimse"
+      ? skyrimBuilds.find((b) => b.game_version === ddSelectedVersion?.game_version)
+      : undefined;
+    if (build) {
+      try {
+        for (const [depotId, manifestId] of build.depots) {
+          await ddDownloadDepot(build.app_id, depotId, manifestId, game.game_id);
+        }
+        downgradeStatus = await ddApplySkyrimBuild(game.game_id, (wineCtx(game)?.bottle_name ?? ""), build.game_version);
+        cachedVersions = await listGameVersions(game.game_id);
+        wizardStep = "done";
+        showSuccess(`Skyrim is now v${downgradeStatus.current_version}`);
+      } catch (e: unknown) {
+        showError(`Download/apply failed: ${e}`);
+        wizardStep = "detect";
+      } finally {
+        ddDownloading = false;
+      }
+      return;
+    }
+
     try {
       const depotDir = await ddDownloadDepot(
         ddSelectedVersion.app_id,
@@ -624,7 +661,7 @@
 
     // Get depot info for polling path
     try {
-      depotInfo = await getDepotDownloadCommand(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
+      depotInfo = await getDepotDownloadCommand(game.game_id, (wineCtx(game)?.bottle_name ?? ""), downgradeTarget);
     } catch (e: unknown) {
       showError(`Failed to get depot info: ${e}`);
       return;
@@ -632,7 +669,7 @@
 
     // Try automated download first (macOS AppleScript)
     try {
-      const automated = await startDepotDownload(game.game_id);
+      const automated = await startDepotDownload(game.game_id, downgradeTarget);
       if (automated) {
         // Automation worked — show downloading state and start polling
         wizardStep = "downloading";
@@ -660,7 +697,7 @@
     depotPollTimer = setInterval(async () => {
       if (!game) return;
       try {
-        const result = await checkDepotReady(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
+        const result = await checkDepotReady(game.game_id, (wineCtx(game)?.bottle_name ?? ""), downgradeTarget);
         if (result) {
           depotExePath = result;
           depotPolling = false;
@@ -668,15 +705,17 @@
           depotPollTimer = null;
           wizardStep = "apply";
         }
-      } catch { /* keep polling */ }
-    }, 3000);
+      } catch (err) {
+        console.error("depot readiness poll failed:", err);
+      }
+    }, 10000);
   }
 
   async function wizardApplyDowngrade() {
     if (!game) return;
     downgrading = true;
     try {
-      const status = await applyDowngrade(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
+      const status = await applyDowngrade(game.game_id, (wineCtx(game)?.bottle_name ?? ""), downgradeTarget);
       downgradeStatus = status;
       cachedVersions = await listGameVersions(game.game_id);
       wizardStep = "done";
@@ -695,6 +734,19 @@
       depotPollTimer = null;
     }
     depotPolling = false;
+  }
+
+  async function handleRestoreDowngrade() {
+    if (!game) return;
+    restoringDowngrade = true;
+    try {
+      downgradeStatus = await restoreDowngrade(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
+      showSuccess(`Restored Skyrim v${downgradeStatus.current_version}`);
+    } catch (e: unknown) {
+      showError(`Restore failed: ${e}`);
+    } finally {
+      restoringDowngrade = false;
+    }
   }
 
   async function handleSwapVersion(version: string) {
@@ -1446,7 +1498,7 @@
             <span class="row-label">SKSE (Script Extender)</span>
             <span class="tool-description">
               {#if skse?.installed}
-                Installed{skse.version ? ` — v${skse.version}` : ""}
+                Installed{skse.version ? ` — v${skse.version}` : ""}{skse.runtime ? ` (for Skyrim ${skse.runtime})` : ""}
               {:else}
                 Required by most Skyrim mods
               {/if}
@@ -1573,7 +1625,7 @@
               {:else if wizardStep === "dd_setup"}Setting Up DepotDownloader
               {:else if wizardStep === "dd_auth"}Steam Login Required
               {:else if wizardStep === "dd_download"}Downloading Game Files
-              {:else if wizardStep === "downloading"}Downloading v1.5.97
+              {:else if wizardStep === "downloading"}Downloading v{downgradeTarget}
               {:else if wizardStep === "guide"}Download Old Version
               {:else if wizardStep === "wait"}Waiting for Download
               {:else if wizardStep === "apply"}Apply Downgrade
@@ -1612,7 +1664,31 @@
                     No cached versions yet.
                   </p>
                 {/if}
-                {#if ddDepotVersions.length > 0}
+                {#if game?.game_id === "skyrimse" && skyrimBuilds.length > 0}
+                  <p class="cleanup-info" style="margin-top: 0.75rem;">
+                    <strong>Switch to another Steam build:</strong>
+                  </p>
+                  <p class="cleanup-info" style="font-size: 0.8rem; opacity: 0.7; margin-bottom: 0.5rem;">
+                    Downloads the exe, master files and BSAs of that build from Steam (about 13 GB) and backs up every file it replaces, so you can restore later.
+                  </p>
+                  {#each skyrimBuilds as b}
+                    <div style="display: flex; align-items: center; gap: 0.5rem; margin: 0.25rem 0; padding: 0.5rem; background: var(--surface-1); border-radius: 6px;">
+                      <label style="flex: 1; display: flex; align-items: center; gap: 0.5rem;">
+                        <input type="radio" name="downgrade-target" value={b.game_version} bind:group={downgradeTarget} disabled={downgradeStatus?.current_version === b.game_version} />
+                        v{b.game_version}
+                      </label>
+                      <button
+                        class="btn-ghost"
+                        style="font-size: 0.8rem; color: var(--blue);"
+                        disabled={downgradeStatus?.current_version === b.game_version || ddDownloading || ddUpdating}
+                        onclick={() => wizardStartDDDowngrade({ game_version: b.game_version, app_id: b.app_id, depot_id: b.depots[2][0], manifest_id: b.depots[2][1] })}
+                        type="button"
+                      >
+                        {downgradeStatus?.current_version === b.game_version ? "Active" : "Download & Apply"}
+                      </button>
+                    </div>
+                  {/each}
+                {:else if ddDepotVersions.length > 0}
                   <p class="cleanup-info" style="margin-top: 0.75rem;">
                     <strong>Available via DepotDownloader:</strong>
                   </p>
@@ -1690,15 +1766,15 @@
             {:else if wizardStep === "guide"}
               <div class="cleanup-summary">
                 <p class="cleanup-info">
-                  Paste this command into the Steam console that was opened:
+                  Run these commands in the Steam console that was opened, one at a time:
                 </p>
-                <div style="margin: 1rem 0; padding: 0.75rem; background: var(--surface-1); border-radius: 6px; font-family: monospace; font-size: 0.85rem; word-break: break-all;">
-                  {depotInfo?.command ?? "download_depot 489830 489833 4063321535627579835"}
+                <div style="margin: 1rem 0; padding: 0.75rem; background: var(--surface-1); border-radius: 6px; font-family: monospace; font-size: 0.85rem; word-break: break-all; white-space: pre-line;">
+                  {depotInfo?.command ?? ""}
                 </div>
                 <ol style="margin: 0.75rem 0; padding-left: 1.5rem; line-height: 1.8;">
-                  <li>Click "Copy Command" below</li>
-                  <li>Paste the command into the Steam console and press Enter</li>
-                  <li>Wait for the download to complete (may take several minutes)</li>
+                  <li>Click "Copy Commands" below</li>
+                  <li>Paste each line into the Steam console and press Enter</li>
+                  <li>Wait for every download to finish (about 13 GB in total)</li>
                 </ol>
               </div>
 
@@ -1709,7 +1785,7 @@
                 </p>
                 <div style="display: flex; align-items: center; gap: 0.75rem; margin: 1rem 0; padding: 1rem; background: var(--surface-1); border-radius: 6px;">
                   <div class="spinner" style="width: 24px; height: 24px; border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: spin 1s linear infinite;"></div>
-                  <span>Polling for SkyrimSE.exe in depot folder...</span>
+                  <span>Waiting for all three depots of v{downgradeTarget} to finish downloading...</span>
                 </div>
                 {#if depotInfo?.expected_path}
                   <p class="cleanup-info" style="font-size: 0.8rem; opacity: 0.7;">
@@ -1727,9 +1803,9 @@
                   This will:
                 </p>
                 <ul style="margin: 0.5rem 0; padding-left: 1.5rem; line-height: 1.8;">
-                  <li>Cache your current AE executable (so you can switch back later)</li>
-                  <li>Cache the v1.5.97 executable from the depot download</li>
-                  <li>Replace the game's SkyrimSE.exe with the v1.5.97 version</li>
+                  <li>Replace the game's exe, master files and BSAs with the v{downgradeTarget} files</li>
+                  <li>Move every file it replaces into a backup, so "Restore" can put them back</li>
+                  <li>Move a newer ContentCatalog.txt aside (older builds crash on it)</li>
                 </ul>
               </div>
 
@@ -1739,7 +1815,7 @@
                   Downgrade complete! Your game is now running <strong>v{downgradeStatus?.current_version}</strong>.
                 </p>
                 <p class="cleanup-info" style="margin-top: 0.5rem;">
-                  You can switch between versions anytime from the Game Version section in Settings.
+                  Steam won't update the game again until Bethesda releases a new patch. Don't use "Verify integrity of game files": it undoes the downgrade. To go back, use Restore in Settings → Downgrader.
                 </p>
               </div>
             {/if}
@@ -1774,7 +1850,7 @@
                 </button>
               {/if}
               <button class="btn btn-ghost" onclick={() => copyToClipboard(depotInfo?.command ?? "")} type="button">
-                Copy Command
+                Copy Commands
               </button>
               <button class="btn btn-primary" onclick={() => { wizardStep = "wait"; startDepotPolling(); }} type="button">
                 Next
@@ -3143,6 +3219,16 @@
           {/if}
         </div>
       </div>
+      {#if game?.game_id === "skyrimse"}
+        <div class="card-row">
+          <span class="row-label">Undo downgrade</span>
+          <div class="row-value">
+            <button class="btn-ghost btn-sm" onclick={handleRestoreDowngrade} disabled={restoringDowngrade} type="button">
+              {restoringDowngrade ? "Restoring..." : "Restore original files"}
+            </button>
+          </div>
+        </div>
+      {/if}
       <p style="font-size: 11px; color: var(--text-tertiary); margin: 8px 0 0; line-height: 1.5;">
         DepotDownloader connects to Steam to download older game versions for modlist compatibility.
         Signing out clears saved credentials and removes the local installation.
