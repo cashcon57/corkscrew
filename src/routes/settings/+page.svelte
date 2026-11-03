@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, findOrphanedDownloads, deleteOrphanedDownloads, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, setUseWineEngineFixes, getDepotDownloadCommand, startDepotDownload, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion, listDisabledWinePlugins, reenableWinePlugin, vortexListCachedExtensions, vortexFetchExtension, vortexRefreshExtension, vortexDeleteCachedExtension, vortexListAvailableExtensions, vortexGetExtensionDetail, ddStatus, ddEnsureUpdated, ddAuthenticate, ddDownloadDepot, ddApplyDepot, ddGetDepotVersions, getLaunchOptionsStatus, patchSteamLaunchOptions, unpatchSteamLaunchOptions, getBottleCrossOverInfo, setBottleCrossOverInstall, restoreDowngrade, ddSkyrimBuilds, ddApplySkyrimBuild } from "$lib/api";
+  import { getConfig, setConfigValue, checkSkse, getSkseDownloadUrl, installSkseFromArchive, uninstallSkse, listDownloadArchives, deleteDownloadArchive, getDownloadsStats, clearAllDownloadArchives, findOrphanedDownloads, deleteOrphanedDownloads, detectModTools, installModTool, uninstallModTool, launchModTool, reinstallModTool, checkModToolUpdate, applyToolIniEdits, getPlatformDetail, getOptimalDownloadThreads, checkSteamStatus, addToSteam, removeFromSteam, scanGameDirectory, cleanGameDirectory, checkSkyrimVersion, downgradeSkyrim, checkDeploymentHealth, redeployAllMods, getVerificationLevel, setVerificationLevel, getDepotDownloadCommand, startDepotDownload, checkDepotReady, applyDowngrade, listGameVersions, swapGameVersion, listDisabledWinePlugins, reenableWinePlugin, vortexListCachedExtensions, vortexFetchExtension, vortexRefreshExtension, vortexDeleteCachedExtension, vortexListAvailableExtensions, vortexGetExtensionDetail, ddStatus, ddEnsureUpdated, ddAuthenticate, ddDownloadDepot, ddApplyDepot, ddGetDepotVersions, getLaunchOptionsStatus, patchSteamLaunchOptions, unpatchSteamLaunchOptions, getBottleCrossOverInfo, setBottleCrossOverInstall, restoreDowngrade, ddSkyrimBuilds, ddApplySkyrimBuild } from "$lib/api";
   import type { SkyrimBuildInfo } from "$lib/api";
   import type { BottleCrossOverInfo, CrossOverSelectionReason, CleanReport, CleanResult, DowngradeStatus, DeploymentHealth, VerificationLevel, CachedVersion, DepotDownloadInfo, LaunchOptionsStatus } from "$lib/types";
   import { wineCtx } from "$lib/types";
@@ -49,9 +49,6 @@
 
   // Launch fixes toggle
   let disableGameFixes = $state(false);
-
-  // Engine Fixes mode (opt-in Wine fork)
-  let useWineEngineFixes = $state(false);
 
   // Download concurrency
   let downloadThreads = $state("auto");
@@ -169,7 +166,6 @@
   let collapsedSections = $state<Set<string>>(new Set([
     "gameVersion",
     "winePlugins",
-    "engineFixes",
     "deploymentHealth",
     "gameMaintenance",
     "shaderCompatibility",
@@ -462,7 +458,6 @@
       downloadDir = cfg.download_dir ?? "";
       autoDeleteArchives = (cfg as Record<string, unknown>).auto_delete_archives === "true";
       disableGameFixes = (cfg as Record<string, unknown>).disable_game_fixes === "true";
-      useWineEngineFixes = (cfg as Record<string, unknown>).use_wine_engine_fixes === true;
       telemetryEnabled = (cfg as Record<string, unknown>).telemetry_consent === "granted";
       const savedSteamUser = (cfg as Record<string, unknown>).steam_username;
       ddSavedUsername = (savedSteamUser && savedSteamUser !== "") ? String(savedSteamUser) : null;
@@ -1957,45 +1952,8 @@
     </div>
     {/if}
 
-    <!-- Engine Fixes Mode -->
-    <div class="section">
-      <button class="section-title section-title-collapsible" onclick={() => toggleSection('engineFixes')}>
-        <span class="section-chevron">{collapsedSections.has('engineFixes') ? '\u25B8' : '\u25BE'}</span>
-        Engine Fixes
-      </button>
-      {#if !collapsedSections.has('engineFixes')}
-      <div class="section-card">
-        <div class="card-row appearance-row">
-          <div class="toggle-info">
-            <span class="row-label">Enable SSE Engine Fixes for Wine</span>
-            <span class="toggle-description">Deploy the Wine-compatible Engine Fixes fork before each Skyrim SE launch. May fix some Wine-specific crashes in large modlists, but is in-development. May introduce additional issues in its current state.</span>
-          </div>
-          <button
-            class="toggle-switch"
-            class:toggle-on={useWineEngineFixes}
-            onclick={async () => {
-              const next = !useWineEngineFixes;
-              useWineEngineFixes = next;
-              try {
-                await setUseWineEngineFixes(next);
-              } catch (err) {
-                console.error('Failed to save Engine Fixes preference:', err);
-                useWineEngineFixes = !next;
-                showError(`Failed to save Engine Fixes preference: ${err}`);
-              }
-            }}
-            type="button"
-            role="switch"
-            aria-checked={useWineEngineFixes}
-          >
-            <span class="toggle-thumb"></span>
-          </button>
-        </div>
-      </div>
-      {/if}
-    </div>
   {/if}
-  {/if}<!-- end !nativeMode: SKSE/Engine Fixes section -->
+  {/if}<!-- end !nativeMode: SKSE section -->
 
   <!-- Deployment Health -->
   {#if game}

@@ -95,21 +95,13 @@ Before any destructive native operation, Corkscrew calls `rollback::create_nativ
 
 ## Cross-Repo Awareness
 
-This workspace includes two tightly integrated repositories:
+### SSEEngineFixesForWine (retired 2026-11-03)
 
-| Repo | Path | Purpose |
-|------|------|---------|
-| **Corkscrew** | `/Users/cashconway/Corkscrew/` | Mod manager (this repo) |
-| **SSEEngineFixesForWine** | `/Users/cashconway/SSEEngineFixesForWine/` | Wine-compatible SKSE plugin |
+`/Users/cashconway/SSEEngineFixesForWine/` (cashcon57/SSEEngineFixesForWine) was a Wine fork of SSE Engine Fixes, made because stock Engine Fixes' `d3dx9_42.dll` preloader crashed under Wine. Corkscrew no longer integrates with it: nothing downloads, deploys or configures the fork, and there is no Settings option for it.
 
-### Integration Surface
-
-- **Auto-deploy**: Corkscrew downloads and deploys SSEEngineFixesForWine DLL on game launch, collection install, and redeploy (`skse.rs`)
-- **TOML patching**: Corkscrew disables original EngineFixes patches and deploys Wine version's TOML
-- **DLL naming**: `0_SSEEngineFixesForWine.dll` — the `0_` prefix ensures early SKSE load order
-- **Version tracking**: GitHub Releases API used to fetch latest version; no hardcoded versions
-
-When modifying either repo, check if the change affects this integration surface. See `engine-fixes-wine.md` in auto-memory for full details.
+- **Why retired**: the fork only supports Skyrim 1.6.1170 and hasn't changed since March 2026. Stock SSE Engine Fixes 7.0.21+ (upstream aers/EngineFixesSkyrim64, which uses SKSE's preloader via `EngineFixes_preload.txt` on 1.7+) was verified on 2026-11-03 to load under CrossOver 26.3 Wine / NotProton on Skyrim SE 1.7.104 + SKSE 2.3.1 with every patch, including the TBB memory manager, and reach the main menu. **Stock Engine Fixes is the path for everyone.**
+- **Migration** (`skse::migrate_from_engine_fixes_wine`, runs after deploys, collection installs and before launch): removes `0_SSEEngineFixesForWine.dll` and its helper files from `Data/SKSE/Plugins` unless a user-installed mod owns them, un-renames `.disabled` stock `EngineFixes.dll` / `d3dx9_42.dll` in staging and Data, re-deploys withheld stock files, re-links a Corkscrew-patched `EngineFixes.toml` from staging, and warns (reinstall Engine Fixes) when older versions patched the staging copy.
+- **Config**: `use_wine_engine_fixes` / `use_original_engine_fixes` are still accepted when reading old `config.json` files and are dropped on the next save. Don't reintroduce them.
 
 ## Memory Management
 
@@ -119,4 +111,4 @@ Auto-memory lives at `~/.claude/projects/-Users-cashconway-Corkscrew/memory/`. T
 
 **Do NOT save:** mid-task WIP, info already in CLAUDE.md or memory files, speculative conclusions.
 
-**On compaction:** Re-read relevant memory files to recover context. If working on SSEEngineFixesForWine, re-read both `engine-fixes-wine.md` and `sseef-wine.md`.
+**On compaction:** Re-read relevant memory files to recover context.

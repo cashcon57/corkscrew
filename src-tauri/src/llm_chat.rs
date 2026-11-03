@@ -529,7 +529,7 @@ For ANY destructive or hard-to-reverse action (uninstall, delete, disable plugin
 - Conflict resolution: later plugin wins record conflicts. Higher-priority mod wins file (loose) conflicts.
 - Navmesh conflicts are game-breaking — always flag these and recommend resolution patches.
 - LOOT for automated load order sorting.
-- Wine/CrossOver: .NET Script Framework and original SSE Engine Fixes crash on Wine — Corkscrew ships a Wine-compatible fork of Engine Fixes. DLL-based mods that hook Windows APIs may not work.{wine_compat_section}
+- Wine/CrossOver: .NET Script Framework crashes on Wine. Stock SSE Engine Fixes (7.0.21+) works on Wine; recommend it. DLL-based mods that hook Windows APIs may not work.{wine_compat_section}
 
 ## Troubleshooting Flow
 When a user reports crashes:
@@ -563,7 +563,7 @@ SAFETY: For ANY destructive or hard-to-reverse action (uninstall mod, delete fil
 Routing: find mod → search_nexus → open_nexus_mod (to show it in Corkscrew UI with install button) | install mod → get_mod_requirements first → if missing deps, show them via open_nexus_mod → then proceed with install | crash → get_crash_logs → analyze | conflicts → get_conflicts (returns grouped, categorized conflicts) → explain each in plain English: what the files do in-game, which mod wins, and whether the user should care | patches needed → find_needed_patches → search_nexus for each group → open_nexus_mod for found patches | batch operations ("disable all X", "enable my Y collection") → batch_mod_operation with appropriate filter | health check → get_mod_health → explain issues and suggest fixes | vague → web_search → search_nexus → open_nexus_mod
 When you find a mod the user wants, ALWAYS call open_nexus_mod to open it in Corkscrew's Discover tab where they can see images and install it.
 
-Modding: .esm first, .esl light, .esp last. Patches after patched plugin. Later plugin wins record conflicts. Higher-priority mod wins file conflicts. Navmesh conflicts = game-breaking. LOOT for auto-sort. Wine: .NET Script Framework and original SSE Engine Fixes crash — Corkscrew ships Wine-compatible fork.{wine_compat_section}
+Modding: .esm first, .esl light, .esp last. Patches after patched plugin. Later plugin wins record conflicts. Higher-priority mod wins file conflicts. Navmesh conflicts = game-breaking. LOOT for auto-sort. Wine: .NET Script Framework crashes; stock SSE Engine Fixes (7.0.21+) works.{wine_compat_section}
 
 Troubleshooting: When user reports crashes or issues, follow this flow:
 1. Ask WHEN it crashes: startup, main menu, loading save, new game, in-game (specific location or random)

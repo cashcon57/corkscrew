@@ -100,16 +100,6 @@ static REGISTRY: &[RegistryEntry] = &[
         alternative_nexus_id: None,
     },
     RegistryEntry {
-        mod_name_patterns: &["sse engine fixes"],
-        dll_patterns: &["enginefixes"],
-        nexus_mod_id: Some(17230),
-        severity: Severity::Crash,
-        reason: "d3dx9_42.dll preloader crashes Wine. Use the Wine-compatible fork instead.",
-        workaround: None,
-        alternative_mod_name: Some("SSE Engine Fixes for Wine (bundled with Corkscrew)"),
-        alternative_nexus_id: None,
-    },
-    RegistryEntry {
         mod_name_patterns: &["community shaders"],
         dll_patterns: &["communityshaders"],
         nexus_mod_id: Some(86492),
@@ -199,11 +189,6 @@ pub fn check_wine_compatibility(
         if !matched {
             for pattern in entry.mod_name_patterns {
                 if mod_lower.contains(pattern) {
-                    // Avoid false positives: "sse engine fixes" should NOT match
-                    // the Wine-compatible fork.
-                    if *pattern == "sse engine fixes" && mod_lower.contains("wine") {
-                        continue;
-                    }
                     matched = true;
                     break;
                 }
@@ -215,12 +200,6 @@ pub fn check_wine_compatibility(
             for dll_pat in entry.dll_patterns {
                 for dll in &dll_lower {
                     if dll.contains(dll_pat) {
-                        // Skip Wine-compatible engine fixes DLL.
-                        if *dll_pat == "enginefixes"
-                            && (dll.contains("wine") || dll.starts_with("0_"))
-                        {
-                            continue;
-                        }
                         matched = true;
                         break;
                     }
@@ -322,19 +301,10 @@ mod tests {
     }
 
     #[test]
-    fn detects_engine_fixes_by_name() {
-        let warnings = check_wine_compatibility("SSE Engine Fixes", &[], Some(17230));
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].severity, Severity::Crash);
-    }
-
-    #[test]
-    fn skips_wine_fork() {
-        let warnings = check_wine_compatibility(
-            "SSE Engine Fixes for Wine",
-            &["0_SSEEngineFixesForWine.dll"],
-            None,
-        );
+    fn stock_engine_fixes_is_not_flagged() {
+        // Stock SSE Engine Fixes 7.0.21+ works under Wine/CrossOver/NotProton.
+        let warnings =
+            check_wine_compatibility("SSE Engine Fixes", &["EngineFixes.dll"], Some(17230));
         assert!(warnings.is_empty());
     }
 

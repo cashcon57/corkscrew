@@ -2901,43 +2901,20 @@ pub async fn install_collection(
         }
     }
 
-    // SSE Engine Fixes for Wine policy: withhold the stock files and deploy the
-    // Wine fork when the option is on and the runtime is supported; otherwise
-    // keep/restore the stock files. Same decision as launch and redeploy.
+    // Undo the retired SSE Engine Fixes for Wine integration (stock Engine
+    // Fixes works under Wine), then disable Wine-incompatible SKSE plugins
+    // (CrashLogger, etc.). Same steps as launch and redeploy.
     if game_id == "skyrimse" {
-        let use_wine_ef = crate::config::engine_fixes_wine_enabled();
-        let game_version = if use_wine_ef {
-            skse::skyrim_runtime_version(&game_path)
-        } else {
-            None
-        };
-        let plan = skse::prepare_engine_fixes(
-            db,
-            game_id,
-            bottle_name,
-            &data_dir,
-            &game_path,
-            use_wine_ef,
-            game_version.as_deref(),
-        );
-        for msg in plan.warning.iter().chain(plan.notice.iter()) {
+        let migration =
+            skse::migrate_from_engine_fixes_wine(db, game_id, bottle_name, &data_dir, &game_path);
+        for msg in migration.into_messages() {
             log::info!("Engine Fixes: {}", msg);
         }
 
-        // Disable Wine-incompatible SKSE plugins (CrashLogger, etc.)
         let wine_disabled =
             skse::disable_wine_incompatible_plugins(&data_dir, db, game_id, bottle_name);
         for (name, reason) in &wine_disabled {
             log::info!("Wine compat: disabled {} — {}", name, reason);
-        }
-
-        // Auto-deploy SSE Engine Fixes for Wine (opt-in via settings)
-        if plan.install_wine_fork {
-            match skse::install_engine_fixes_wine(&data_dir).await {
-                Ok(true) => log::info!("Auto-deployed SSE Engine Fixes for Wine"),
-                Ok(false) => log::debug!("SSE Engine Fixes for Wine already deployed"),
-                Err(e) => log::warn!("Could not auto-deploy SSE Engine Fixes for Wine: {}", e),
-            }
         }
     }
 

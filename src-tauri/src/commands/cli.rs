@@ -1355,15 +1355,10 @@ pub fn cli_launch(game_id: &str, bottle_name: &str, use_skse: bool, db: &Arc<Mod
             println!("[corkscrew] Fixed {} SKSE plugin DLL(s)", fixes);
         }
 
-        for msg in skse::apply_engine_fixes_blocking(
-            db,
-            game_id,
-            bottle_name,
-            &data_dir,
-            &game_path,
-            None,
-            "CLI launch",
-        ) {
+        for msg in
+            skse::migrate_from_engine_fixes_wine(db, game_id, bottle_name, &data_dir, &game_path)
+                .into_messages()
+        {
             println!("[corkscrew] {}", msg);
         }
 

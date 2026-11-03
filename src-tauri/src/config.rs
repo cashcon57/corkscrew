@@ -10,12 +10,17 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Global lock for config file read-modify-write operations.
 /// Prevents concurrent access from corrupting the JSON file.
 static CONFIG_LOCK: Mutex<()> = Mutex::new(());
+
+/// Settings that no longer do anything. Writes are ignored and reads return
+/// nothing so a stale caller can't resurrect them in the `extra` map.
+const RETIRED_KEYS: &[&str] = &["use_original_engine_fixes", "use_wine_engine_fixes"];
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -111,21 +116,14 @@ pub struct AppConfig {
     #[serde(default)]
     pub verification_level: VerificationLevel,
 
-    /// Legacy field — ignored. Kept for backwards-compatible deserialization
-    /// of existing config files.
-    #[serde(default)]
-    pub use_original_engine_fixes: bool,
-
-    /// If true, deploy the Wine fork of SSE Engine Fixes before Skyrim SE
-    /// launches. This is opt-in because the Wine fork is in active development
-    /// and may introduce issues. May fix some Wine-specific crashes in large
-    /// modlists.
-    ///
-    /// Read this through [`engine_fixes_wine_enabled`] — never gate on the
-    /// legacy `use_original_engine_fixes` field, which previously caused
-    /// redeploy and launch to disagree about whether the Wine fork is active.
-    #[serde(default)]
-    pub use_wine_engine_fixes: bool,
+    /// Retired SSE Engine Fixes for Wine settings (the integration was
+    /// removed on 2026-11-03; stock SSE Engine Fixes works under Wine).
+    /// Accepted with any value so existing config files still load, and
+    /// never written back, so the keys disappear on the next save.
+    #[serde(default, skip_serializing)]
+    pub use_original_engine_fixes: IgnoredAny,
+    #[serde(default, skip_serializing)]
+    pub use_wine_engine_fixes: IgnoredAny,
 
     /// If true, surface The Sims 4 adult-content sources (e.g. LoversLab)
     /// in tool listings. Off by default — explicit opt-in required since
@@ -290,14 +288,6 @@ pub fn get_config() -> Result<AppConfig> {
     get_config_inner()
 }
 
-/// Single source of truth for the "deploy SSEEngineFixesForWine" decision.
-/// Opt-in, default off. Every gate (launch, CLI, redeploy, collection
-/// install) must use this so the deployed state can't depend on which code
-/// path ran last.
-pub fn engine_fixes_wine_enabled() -> bool {
-    get_config().map(|c| c.use_wine_engine_fixes).unwrap_or(false)
-}
-
 /// Persists the given configuration to disk, creating parent directories as
 /// needed.
 pub fn save_config(config: &AppConfig) -> Result<()> {
@@ -340,12 +330,9 @@ pub fn set_config_value(key: &str, value: &str) -> Result<()> {
                 _ => VerificationLevel::Balanced,
             };
         }
-        "use_original_engine_fixes" => {
-            // Legacy — keep for compat but no-op
-            config.use_original_engine_fixes = value == "true";
-        }
-        "use_wine_engine_fixes" => {
-            config.use_wine_engine_fixes = value == "true";
+        key if RETIRED_KEYS.contains(&key) => {
+            log::debug!("Ignoring retired config key '{}'", key);
+            return Ok(());
         }
         _ => {
             config
@@ -378,8 +365,7 @@ pub fn get_config_value(key: &str) -> Result<Option<String>> {
             VerificationLevel::Balanced => "Balanced".to_string(),
             VerificationLevel::Paranoid => "Paranoid".to_string(),
         }),
-        "use_original_engine_fixes" => Some(config.use_original_engine_fixes.to_string()),
-        "use_wine_engine_fixes" => Some(config.use_wine_engine_fixes.to_string()),
+        key if RETIRED_KEYS.contains(&key) => None,
         _ => config.extra.get(key).map(|v| match v {
             serde_json::Value::String(s) => s.clone(),
             other => other.to_string(),
@@ -419,8 +405,8 @@ mod tests {
             has_completed_setup: false,
             controller_mode: false,
             verification_level: VerificationLevel::default(),
-            use_original_engine_fixes: false,
-            use_wine_engine_fixes: false,
+            use_original_engine_fixes: IgnoredAny,
+            use_wine_engine_fixes: IgnoredAny,
             enable_adult_content_for_sims4: false,
             experimental: ExperimentalConfig::default(),
             extra: HashMap::new(),
@@ -438,6 +424,30 @@ mod tests {
             restored.extra.get("theme"),
             Some(&serde_json::Value::String("dark".into()))
         );
+    }
+
+    #[test]
+    fn config_with_retired_engine_fixes_keys_still_loads() {
+        // Written by Corkscrew <= 0.14.24 (Settings toggle on).
+        let json = r#"{
+            "nexus_api_key": "abc",
+            "use_original_engine_fixes": false,
+            "use_wine_engine_fixes": true,
+            "controller_mode": true
+        }"#;
+        let cfg: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.nexus_api_key.as_deref(), Some("abc"));
+        assert!(cfg.controller_mode);
+        assert!(!cfg.extra.contains_key("use_wine_engine_fixes"));
+
+        // Any value type is tolerated (e.g. a string written via `extra`).
+        let cfg: AppConfig =
+            serde_json::from_str(r#"{"use_wine_engine_fixes": "true"}"#).unwrap();
+        assert!(cfg.extra.is_empty());
+
+        // The retired keys are dropped on the next save.
+        let saved = serde_json::to_string(&cfg).unwrap();
+        assert!(!saved.contains("engine_fixes"), "{saved}");
     }
 
     #[test]
