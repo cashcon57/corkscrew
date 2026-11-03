@@ -26,6 +26,10 @@
     reorderMods,
     getConflicts,
     checkModUpdates,
+    getModUpdateResults,
+    routeModUpdates,
+    updateModsFromNexus,
+    cancelModUpdates,
     fixSkyrimDisplay,
     onInstallProgress,
     redeployAllMods,
@@ -74,7 +78,7 @@
     nativeMode,
   } from "$lib/stores";
   import { absoluteDate } from "$lib/relativeTime";
-  import type { InstalledMod, DetectedGame, SkseStatus, DowngradeStatus, FileConflict, ModUpdateInfo, FomodInstaller } from "$lib/types";
+  import type { InstalledMod, DetectedGame, SkseStatus, DowngradeStatus, FileConflict, ModUpdateInfo, UpdateOutcome, FomodInstaller } from "$lib/types";
   import { createModFilters } from "$lib/stores/modFilters.svelte";
   import GameIcon from "$lib/components/GameIcon.svelte";
   import DiskBudgetPanel from "$lib/components/DiskBudgetPanel.svelte";
@@ -418,6 +422,28 @@
   // Update check state
   let modUpdates = $state<ModUpdateInfo[]>([]);
   let checkingUpdates = $state(false);
+  let updatingAll = $state(false);
+
+  // Conflict count shown in the sidebar comes from the live conflict list,
+  // not from the deploy-health snapshot (which can be taken before the
+  // background conflict fetch finishes).
+  let conflictCount = $derived(conflicts.length);
+
+  // Nexus mod id -> number of installed rows from that page. When several
+  // files from one page are installed, rows show their archive as a subtitle.
+  let nexusPageCounts = $derived((() => {
+    const counts = new Map<number, number>();
+    for (const m of $installedMods) {
+      if (m.nexus_mod_id != null) counts.set(m.nexus_mod_id, (counts.get(m.nexus_mod_id) ?? 0) + 1);
+    }
+    return counts;
+  })());
+
+  function siblingFileLabel(mod: InstalledMod): string | null {
+    if (mod.nexus_mod_id == null || (nexusPageCounts.get(mod.nexus_mod_id) ?? 0) < 2) return null;
+    const archive = mod.archive_name.split(/[\\/]/).pop() ?? "";
+    return archive || null;
+  }
 
   // Deploy/purge state
   let deploying = $state(false);
@@ -1292,6 +1318,10 @@
           if (thisLoad === loadGeneration) conflicts = c;
         })
         .catch((err) => console.error('Failed to load conflicts:', err));
+      // Background: stored results of the last Nexus update check
+      getModUpdateResults(game.game_id, (wineCtx(game)?.bottle_name ?? ""))
+        .then(u => { if (thisLoad === loadGeneration) modUpdates = u; })
+        .catch((err) => console.error('Failed to load stored update results:', err));
       // Background: endorsements
       loadEndorsements(game.nexus_slug);
       // Background: tools
@@ -1559,10 +1589,14 @@
   }
 
   async function toggleGameFixes() {
-    disableGameFixes = !disableGameFixes;
+    const next = !disableGameFixes;
     try {
-      await setConfigValue("disable_game_fixes", disableGameFixes ? "true" : "false");
-    } catch { /* best-effort */ }
+      await setConfigValue("disable_game_fixes", next ? "true" : "false");
+      disableGameFixes = next;
+    } catch (e: unknown) {
+      console.error("Failed to save launch fixes setting:", e);
+      showError(`Failed to save launch fixes setting: ${e}`);
+    }
   }
 
   async function handleFixDisplay() {
@@ -1972,21 +2006,64 @@
   // --- Batch Update All ---
   async function handleUpdateAll() {
     const game = pickedGame ?? $selectedGame;
-    if (!game || modUpdates.length === 0) return;
-    // NexusMods compliance: open browser pages for each update
-    // Free users must manually download from the Nexus website
-    const gameSlug = game.nexus_slug || game.game_id;
-    let opened = 0;
-    for (const update of modUpdates) {
-      try {
-        await openUrl(`https://www.nexusmods.com/${gameSlug}/mods/${update.nexus_mod_id}?tab=files`);
-        opened++;
-      } catch {
-        // Skip mods that fail to open
+    if (!game || modUpdates.length === 0 || updatingAll) return;
+    const bottle = wineCtx(game)?.bottle_name ?? "";
+    updatingAll = true;
+    try {
+      // The backend decides per update: Premium accounts download through the
+      // API; free accounts get the file's Nexus page (NexusMods policy forbids
+      // automated downloads for free users).
+      const routed = await routeModUpdates(game.game_id, bottle, modUpdates.map(u => u.mod_id));
+      const apiIds = routed.filter(r => r.route.kind === "api_download").map(r => r.mod_id);
+      const browserUrls = routed.flatMap(r => (r.route.kind === "browser" ? [r.route.url] : []));
+
+      let opened = 0;
+      for (const url of browserUrls) {
+        try {
+          await openUrl(url);
+          opened++;
+        } catch (err) {
+          console.error(`Failed to open ${url}:`, err);
+        }
       }
+      if (opened > 0) {
+        showSuccess(`Opened ${opened} Nexus file page${opened !== 1 ? "s" : ""}. Click "Mod Manager Download" on each to update the installed mod in place.`);
+      }
+
+      if (apiIds.length > 0) {
+        let outcomes: UpdateOutcome[];
+        try {
+          outcomes = await updateModsFromNexus(game.game_id, bottle, apiIds);
+        } finally {
+          await Promise.all([loadMods(game), refreshHealth(game)]);
+        }
+        const done = outcomes.filter(o => o.ok);
+        const failed = outcomes.filter(o => !o.ok);
+        const doneIds = new Set(done.map(o => o.mod_id));
+        modUpdates = modUpdates.filter(u => !doneIds.has(u.mod_id));
+        const diverged = done.filter(o => o.note).length;
+        const divergedText = diverged > 0
+          ? ` ${diverged} of them came from a collection and now differ from the file the collection pins.`
+          : "";
+        if (failed.length === 0) {
+          showSuccess(`Updated ${done.length} mod${done.length !== 1 ? "s" : ""}.${divergedText}`);
+        } else {
+          const details = failed.map(o => `${o.mod_name}: ${o.error ?? "unknown error"}`).join("; ");
+          showError(`Updated ${done.length} of ${outcomes.length} mods.${divergedText} Failed: ${details}`);
+        }
+      }
+    } catch (e: unknown) {
+      showError(`Update failed: ${e}`);
+    } finally {
+      updatingAll = false;
     }
-    if (opened > 0) {
-      showSuccess(`Opened ${opened} Nexus mod page${opened !== 1 ? "s" : ""} for updating`);
+  }
+
+  async function handleCancelUpdates() {
+    try {
+      await cancelModUpdates();
+    } catch (err) {
+      console.error('Failed to cancel updates:', err);
     }
   }
 
@@ -2105,6 +2182,7 @@
     if (!game || !mod.nexus_mod_id) return;
     try {
       const updates = await checkModUpdates(game.game_id, (wineCtx(game)?.bottle_name ?? ""));
+      modUpdates = updates;
       const update = updates.find(u => u.mod_id === mod.id);
       if (update) {
         showSuccess(`Update available for "${mod.name}": v${update.latest_version}`);
@@ -2405,11 +2483,16 @@
             {/if}
           {/if}
         </button>
-        {#if modUpdates.length > 0}
+        {#if updatingAll}
+          <button class="btn btn-ghost btn-sm" onclick={handleCancelUpdates} title="Stop after the updates already in progress">
+            <span class="spinner spinner-sm"></span>
+            Updating... Cancel
+          </button>
+        {:else if modUpdates.length > 0}
           <button
             class="btn btn-accent btn-sm"
             onclick={handleUpdateAll}
-            title="Open Nexus download pages for all outdated mods"
+            title="Premium: download and update every outdated mod in place. Free account: open each file's Nexus page."
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -2644,6 +2727,23 @@
             <button class="dropdown-item" onclick={() => { showSkseMenu = false; doLaunch(false); }}>
               <span class="dropdown-check"></span>
               Launch Game Directly
+            </button>
+            <div class="dropdown-divider"></div>
+            <button
+              class="dropdown-item"
+              onclick={(e) => { e.stopPropagation(); toggleGameFixes(); }}
+              title="Before launch: Wine cursor/input fixes, and repair SkyrimPrefs.ini display settings. Your fullscreen, borderless, or SSE Display Tweaks mode is kept."
+              role="menuitemcheckbox"
+              aria-checked={!disableGameFixes}
+            >
+              <span class="dropdown-check">
+                {#if !disableGameFixes}
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M10 3L4.5 8.5L2 6" />
+                  </svg>
+                {/if}
+              </span>
+              Apply display &amp; cursor fixes
             </button>
             <div class="dropdown-divider"></div>
             <div class="dropdown-info">
@@ -3296,7 +3396,7 @@
                     <span class="col-check" role="checkbox" aria-checked={selectedModIds.has(mod.id)} onclick={(e) => { e.stopPropagation(); toggleSelectMod(mod.id, e); }}><span class="check-box" class:check-box-checked={selectedModIds.has(mod.id)}>{#if selectedModIds.has(mod.id)}<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12" /></svg>{/if}</span></span>
                     <span class="col-grip"><span class="drag-handle" title="Drag to reorder" aria-label="Drag to reorder {mod.name}"><svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><circle cx="4" cy="2.5" r="1" /><circle cx="8" cy="2.5" r="1" /><circle cx="4" cy="6" r="1" /><circle cx="8" cy="6" r="1" /><circle cx="4" cy="9.5" r="1" /><circle cx="8" cy="9.5" r="1" /></svg></span></span>
                     <span class="col-toggle"><button class="toggle-switch" class:toggle-on={mod.enabled} class:toggle-busy={togglingMod === mod.id} onclick={() => handleToggle(mod)} title={mod.enabled ? "Disable mod" : "Enable mod"} aria-label="{mod.enabled ? 'Disable' : 'Enable'} {mod.name}" aria-pressed={mod.enabled} role="switch"><span class="toggle-track"><span class="toggle-thumb"></span></span></button></span>
-                    <span class="col-name"><span class="mod-name">{mod.name}</span>{#if conflictModIds.has(mod.id)}<span class="conflict-icon" title={getConflictTooltip(mod.id)}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg></span>{:else if overlapModIds.has(mod.id)}<span class="overlap-icon" title={getConflictTooltip(mod.id)}><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="5" /></svg></span>{/if}{#if mod.user_notes}<span class="notes-icon" title={mod.user_notes}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg></span>{/if}</span>
+                    <span class="col-name"><span class="mod-name">{mod.name}</span>{#if siblingFileLabel(mod)}<span class="mod-file-label" title={`Installed from ${siblingFileLabel(mod)}`}>{siblingFileLabel(mod)}</span>{/if}{#if conflictModIds.has(mod.id)}<span class="conflict-icon" title={getConflictTooltip(mod.id)}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg></span>{:else if overlapModIds.has(mod.id)}<span class="overlap-icon" title={getConflictTooltip(mod.id)}><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="5" /></svg></span>{/if}{#if mod.user_notes}<span class="notes-icon" title={mod.user_notes}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg></span>{/if}</span>
                     <span class="col-category">{#if mod.auto_category}<span class="category-cell" style="color: {categoryColors[mod.auto_category] ?? '#6b7280'};" title={mod.auto_category}>{#if categoryIcons[mod.auto_category]}<svg class="category-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html categoryIcons[mod.auto_category]}</svg>{/if}<span class="category-label">{mod.auto_category}</span></span>{:else}<span class="text-muted">&mdash;</span>{/if}</span>
                     <span class="col-origin">{#if mod.source_type === "nexus"}<span class="origin-label origin-nexus">Nexus</span>{:else if mod.source_type === "loverslab"}<span class="origin-label origin-loverslab">LoversLab</span>{:else if mod.source_type === "moddb"}<span class="origin-label origin-moddb">ModDB</span>{:else if mod.source_type === "curseforge"}<span class="origin-label origin-curseforge">CurseForge</span>{:else if mod.source_type === "direct"}<span class="origin-label origin-direct">Direct</span>{:else}<span class="origin-label origin-manual">Manual</span>{/if}{#if getModSourceUrl(mod)}<button class="origin-link-btn" title="Open mod page" onclick={(e) => { e.stopPropagation(); openUrl(getModSourceUrl(mod)!); }}><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg></button>{/if}</span>
                     <span class="col-source">{#if mod.collection_name}<span class="source-label source-collection" title={mod.collection_name}>{mod.collection_name}</span>{:else}<span class="source-label source-user">User</span>{/if}</span>
@@ -3395,7 +3495,7 @@
                   <span class="col-check" role="checkbox" aria-checked={selectedModIds.has(mod.id)} onclick={(e) => { e.stopPropagation(); toggleSelectMod(mod.id, e); }}><span class="check-box" class:check-box-checked={selectedModIds.has(mod.id)}>{#if selectedModIds.has(mod.id)}<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12" /></svg>{/if}</span></span>
                   <span class="col-grip"></span>
                   <span class="col-toggle"><button class="toggle-switch" class:toggle-on={mod.enabled} class:toggle-busy={togglingMod === mod.id} onclick={() => handleToggle(mod)} title="Enable mod" aria-label="Enable {mod.name}" aria-pressed={mod.enabled} role="switch"><span class="toggle-track"><span class="toggle-thumb"></span></span></button></span>
-                  <span class="col-name"><span class="mod-name">{mod.name}</span></span>
+                  <span class="col-name"><span class="mod-name">{mod.name}</span>{#if siblingFileLabel(mod)}<span class="mod-file-label" title={`Installed from ${siblingFileLabel(mod)}`}>{siblingFileLabel(mod)}</span>{/if}</span>
                   <span class="col-category">{#if mod.auto_category}<span class="category-cell" style="color: {categoryColors[mod.auto_category] ?? '#6b7280'};" title={mod.auto_category}>{#if categoryIcons[mod.auto_category]}<svg class="category-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html categoryIcons[mod.auto_category]}</svg>{/if}<span class="category-label">{mod.auto_category}</span></span>{:else}<span class="text-muted">&mdash;</span>{/if}</span>
                   <span class="col-origin">{#if mod.source_type === "nexus"}<span class="origin-label origin-nexus">Nexus</span>{:else}<span class="origin-label origin-manual">Manual</span>{/if}</span>
                   <span class="col-source">{#if mod.collection_name}<span class="source-label source-collection" title={mod.collection_name}>{mod.collection_name}</span>{:else}<span class="source-label source-user">User</span>{/if}</span>
@@ -3474,6 +3574,7 @@
                 <span class="col-name">
                   <!-- eslint-disable-next-line svelte/no-at-html-tags -->
                   <span class="mod-name">{@html highlightMatch(mod.name, filters.searchQuery)}</span>
+                  {#if siblingFileLabel(mod)}<span class="mod-file-label" title={`Installed from ${siblingFileLabel(mod)}`}>{siblingFileLabel(mod)}</span>{/if}
                   {#if conflictModIds.has(mod.id)}
                     <span class="conflict-icon" title={getConflictTooltip(mod.id)}>
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -3698,14 +3799,14 @@
                 <span class="sidebar-stat-label">Files</span>
               </div>
               <div class="sidebar-stat">
-                <span class="sidebar-stat-value" class:health-warning={(deployHealth.conflict_count ?? 0) > 0}>{deployHealth.conflict_count ?? 0}</span>
+                <span class="sidebar-stat-value" class:health-warning={conflictCount > 0}>{conflictCount}</span>
                 <span class="sidebar-stat-label">Conflicts</span>
               </div>
             </div>
             {#if deployHealth.deploy_method && deployHealth.deploy_method !== "none"}
               <span class="sidebar-detail">{deployHealth.deploy_method === "hardlink" ? "Hardlinks (0 extra disk)" : "File copies"}</span>
             {/if}
-            {#if (deployHealth.conflict_count ?? 0) > 0}
+            {#if conflictCount > 0}
               <button class="sidebar-link" onclick={() => showConflictPanel = !showConflictPanel}>
                 Resolve conflicts
               </button>
@@ -4853,6 +4954,18 @@
     text-overflow: ellipsis;
     min-width: 0;
     flex: 1;
+  }
+
+  /* Archive name, shown when several files from one Nexus page are installed */
+  .mod-file-label {
+    flex: 0 1 auto;
+    max-width: 45%;
+    font-size: 11px;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
   }
 
   .nexus-badge {

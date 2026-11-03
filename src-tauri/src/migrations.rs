@@ -19,7 +19,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 /// The current target schema version. Bump this when adding a new migration.
-pub const TARGET_VERSION: u32 = 25;
+pub const TARGET_VERSION: u32 = 26;
 
 /// Get the current schema version (0 if no version table exists).
 pub fn current_version(conn: &Connection) -> Result<u32> {
@@ -169,6 +169,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version == 24 {
         migrate_v24_to_v25(conn)?;
         version = 25;
+    }
+
+    if version == 25 {
+        migrate_v25_to_v26(conn)?;
+        version = 26;
     }
 
     let _ = version; // suppress unused warning when TARGET_VERSION == current
@@ -1264,7 +1269,45 @@ fn migrate_v23_to_v24(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Migration v24 → v25: persist each mod's deploy target on `installed_mods`.
+/// Migration 24 → 25: persist Nexus update-check results.
+///
+/// One row per checked mod. `latest_file_id` is NULL when the last check
+/// found the mod up to date, so `checked_at` still records that it was
+/// checked. Rows cascade away with their mod.
+///
+/// Also drops `nexus_url_cache`: nothing ever read or wrote it, and Nexus
+/// download links are short-lived and must not be cached.
+fn migrate_v24_to_v25(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS mod_update_checks (
+            mod_id            INTEGER PRIMARY KEY
+                              REFERENCES installed_mods(id) ON DELETE CASCADE,
+            game_id           TEXT    NOT NULL,
+            bottle_name       TEXT    NOT NULL,
+            nexus_mod_id      INTEGER NOT NULL,
+            installed_file_id INTEGER,
+            latest_file_id    INTEGER,
+            latest_version    TEXT,
+            latest_file_name  TEXT,
+            checked_at        TEXT    NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_mod_update_checks_game_bottle
+            ON mod_update_checks (game_id, bottle_name);
+
+        DROP TABLE IF EXISTS nexus_url_cache;",
+    )?;
+
+    tx.execute("UPDATE schema_version SET version = 25", [])?;
+    tx.commit()?;
+    log::info!("Migration 24 → 25 complete (mod_update_checks, dropped nexus_url_cache)");
+
+    Ok(())
+}
+
+/// Migration v25 → v26: persist each mod's deploy target on `installed_mods`.
 ///
 /// **Why.** The per-mod target (`data` / `root` / `custom`) used to be read
 /// back from the mod's own `deployment_manifest` rows. Those rows are deleted
@@ -1275,7 +1318,7 @@ fn migrate_v23_to_v24(conn: &Connection) -> Result<()> {
 ///
 /// NULL means "unknown": readers fall back to the manifest, then `data`.
 /// Backfill prefers a non-`data` target when a mod has mixed rows.
-fn migrate_v24_to_v25(conn: &Connection) -> Result<()> {
+fn migrate_v25_to_v26(conn: &Connection) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
 
     match tx.execute_batch("ALTER TABLE installed_mods ADD COLUMN deploy_target TEXT") {
@@ -1294,10 +1337,10 @@ fn migrate_v24_to_v25(conn: &Connection) -> Result<()> {
           WHERE deploy_target IS NULL;",
     )?;
 
-    tx.execute("UPDATE schema_version SET version = 25", [])?;
+    tx.execute("UPDATE schema_version SET version = 26", [])?;
 
     tx.commit()?;
-    log::info!("Migration 24 → 25 complete (installed_mods.deploy_target)");
+    log::info!("Migration 25 → 26 complete (installed_mods.deploy_target)");
     Ok(())
 }
 

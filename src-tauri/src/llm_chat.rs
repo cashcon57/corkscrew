@@ -385,11 +385,11 @@ pub fn get_chat_tools(tier: ModelCapabilityTier) -> Vec<ChatTool> {
             ),
             tool(
                 "analyze_crash_log",
-                "Analyze a crash log.",
+                "Analyze a crash log by its file name from get_crash_logs.",
                 serde_json::json!({
                     "type": "object",
-                    "properties": { "log_path": { "type": "string" } },
-                    "required": ["log_path"]
+                    "properties": { "filename": { "type": "string" } },
+                    "required": ["filename"]
                 }),
             ),
             tool("list_profiles", "List mod profiles.", no_params.clone()),

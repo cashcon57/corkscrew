@@ -3312,45 +3312,168 @@ impl ModDatabase {
 }
 
 // ---------------------------------------------------------------------------
-// Nexus URL cache
+// Nexus update checks (persisted results)
 // ---------------------------------------------------------------------------
 
+/// One mod's result from a Nexus update check, as stored.
+#[derive(Clone, Debug)]
+pub struct UpdateCheckRow {
+    pub mod_id: i64,
+    pub nexus_mod_id: i64,
+    pub installed_file_id: Option<i64>,
+    /// `(file_id, version, file name)` of the newer file, or `None` when the
+    /// mod was found up to date.
+    pub latest: Option<(i64, String, String)>,
+}
+
 impl ModDatabase {
-    /// Cache a Nexus download URL with expiry.
-    pub fn cache_nexus_url(
+    /// Store the results of an update check. Rows for the given mods are
+    /// replaced; mods that were not checked (for example because the API
+    /// call failed) keep their previous result.
+    pub fn save_update_check_results(
         &self,
-        game_domain: &str,
-        mod_id: i64,
-        file_id: i64,
-        url: &str,
-        expires_at: &str,
+        game_id: &str,
+        bottle_name: &str,
+        rows: &[UpdateCheckRow],
     ) -> Result<()> {
+        let checked_at = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO mod_update_checks
+                    (mod_id, game_id, bottle_name, nexus_mod_id, installed_file_id,
+                     latest_file_id, latest_version, latest_file_name, checked_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            )?;
+            for r in rows {
+                let (latest_id, latest_version, latest_name) = match &r.latest {
+                    Some((id, v, n)) => (Some(*id), Some(v.as_str()), Some(n.as_str())),
+                    None => (None, None, None),
+                };
+                stmt.execute(params![
+                    r.mod_id,
+                    game_id,
+                    bottle_name,
+                    r.nexus_mod_id,
+                    r.installed_file_id,
+                    latest_id,
+                    latest_version,
+                    latest_name,
+                    checked_at,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Updates still outstanding from the last check: rows with a newer file
+    /// whose mod has not since been switched to that file.
+    pub fn list_pending_updates(
+        &self,
+        game_id: &str,
+        bottle_name: &str,
+    ) -> Result<Vec<crate::nexus::ModUpdateInfo>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT u.mod_id, u.nexus_mod_id, m.name, m.version,
+                    u.latest_version, u.latest_file_name, u.latest_file_id
+             FROM mod_update_checks u
+             JOIN installed_mods m ON m.id = u.mod_id
+             WHERE u.game_id = ?1 AND u.bottle_name = ?2
+               AND u.latest_file_id IS NOT NULL
+               AND (m.nexus_file_id IS NULL OR m.nexus_file_id != u.latest_file_id)
+             ORDER BY m.name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![game_id, bottle_name], |row| {
+            Ok(crate::nexus::ModUpdateInfo {
+                mod_id: row.get(0)?,
+                nexus_mod_id: row.get(1)?,
+                mod_name: row.get(2)?,
+                current_version: row.get(3)?,
+                latest_version: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                latest_file_name: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                latest_file_id: row.get(6)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Forget the stored update result for a mod (after it was updated).
+    pub fn clear_update_check(&self, mod_id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
-            "INSERT OR REPLACE INTO nexus_url_cache (game_domain, mod_id, file_id, url, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![game_domain, mod_id, file_id, url, expires_at],
+            "DELETE FROM mod_update_checks WHERE mod_id = ?1",
+            params![mod_id],
         )?;
         Ok(())
     }
 
-    /// Get a cached Nexus URL if it hasn't expired.
-    pub fn get_cached_nexus_url(
+    /// Point an existing mod row at new contents after an in-place update or
+    /// reinstall. Keeps the row id, so priority, enabled state, collection
+    /// membership, notes, tags and profile entries are untouched. Old file
+    /// hashes are dropped and replaced in the same transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn replace_mod_contents(
         &self,
-        game_domain: &str,
         mod_id: i64,
-        file_id: i64,
-    ) -> Result<Option<String>> {
+        name: &str,
+        version: &str,
+        archive_name: &str,
+        nexus_ids: Option<(i64, Option<i64>)>,
+        staging_path: &str,
+        files: &[String],
+        hashes: &[(String, String, u64)],
+        auto_category: Option<&str>,
+    ) -> Result<()> {
+        let files_json = serde_json::to_string(files)?;
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let result = conn
-            .prepare(
-                "SELECT url FROM nexus_url_cache
-                 WHERE game_domain = ?1 AND mod_id = ?2 AND file_id = ?3
-                 AND datetime(expires_at) > datetime('now')",
-            )?
-            .query_row(params![game_domain, mod_id, file_id], |row| row.get(0))
-            .ok();
-        Ok(result)
+        let tx = conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE installed_mods
+             SET name = ?1, version = ?2, archive_name = ?3, staging_path = ?4,
+                 installed_files = ?5, auto_category = ?6
+             WHERE id = ?7",
+            params![
+                name,
+                version,
+                archive_name,
+                staging_path,
+                files_json,
+                auto_category,
+                mod_id
+            ],
+        )?;
+        if changed == 0 {
+            return Err(DatabaseError::ModNotFound(mod_id));
+        }
+        if let Some((nexus_mod_id, nexus_file_id)) = nexus_ids {
+            tx.execute(
+                "UPDATE installed_mods SET nexus_mod_id = ?1, nexus_file_id = ?2 WHERE id = ?3",
+                params![nexus_mod_id, nexus_file_id, mod_id],
+            )?;
+        }
+        tx.execute("DELETE FROM file_hashes WHERE mod_id = ?1", params![mod_id])?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO file_hashes (mod_id, relative_path, sha256, file_size)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for (path, hash, size) in hashes {
+                stmt.execute(params![mod_id, path, hash, *size as i64])?;
+            }
+        }
+        tx.execute(
+            "DELETE FROM mod_update_checks WHERE mod_id = ?1",
+            params![mod_id],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 }
 

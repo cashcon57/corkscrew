@@ -1152,39 +1152,65 @@ pub fn get_files_for_selections(
                     .map(|(_, v)| v)
             });
 
-            if let Some(names) = selected_names {
-                for option in &group.options {
-                    if names.contains(&option.name) {
-                        files.extend(option.files.clone());
-                        for (k, v) in &option.condition_flags {
-                            condition_flags.insert(k.clone(), v.clone());
-                        }
+            // Options picked for this group. Names are matched exactly first,
+            // then case-/whitespace-insensitively (collection manifests and
+            // saved recipes drift from the XML's exact spelling).
+            let matched: Vec<&FomodOption> = match selected_names {
+                Some(names) => group
+                    .options
+                    .iter()
+                    .filter(|option| {
+                        names.iter().any(|n| {
+                            *n == option.name
+                                || n.trim().eq_ignore_ascii_case(option.name.trim())
+                        })
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
+
+            let chosen: Vec<&FomodOption> = match selected_names {
+                Some(names) if !matched.is_empty() || names.is_empty() => matched,
+                _ => {
+                    // Either the group was never selected, or the selection
+                    // names an option that doesn't exist in this XML (e.g. a
+                    // collection recorded choices against a different
+                    // version of the mod). Apply the group's defaults so
+                    // Required/Recommended payload is not silently dropped.
+                    let ctx = FomodContext {
+                        flags: &condition_flags,
+                        game_version,
+                        data_dir,
+                        skse_version: None,
+                    };
+                    let defaults = default_selections_for_group(group, &ctx);
+                    match selected_names {
+                        Some(names) => log::warn!(
+                            "FOMOD: selection [{}] for group '{}' matches no option — \
+                             falling back to defaults: [{}]",
+                            names.join(", "),
+                            group.name,
+                            defaults.join(", ")
+                        ),
+                        None if !defaults.is_empty() => log::info!(
+                            "FOMOD: no selection for group '{}' — applying defaults: [{}]",
+                            group.name,
+                            defaults.join(", ")
+                        ),
+                        None => {}
                     }
+                    group
+                        .options
+                        .iter()
+                        .filter(|option| defaults.contains(&option.name))
+                        .collect()
                 }
-            } else {
-                // No match in selections — apply defaults for this group so
-                // Required/Recommended options are not silently dropped.
-                let ctx = FomodContext {
-                    flags: &condition_flags,
-                    game_version,
-                    data_dir,
-                    skse_version: None,
-                };
-                let defaults = default_selections_for_group(group, &ctx);
-                if !defaults.is_empty() {
-                    log::info!(
-                        "FOMOD: no selection for group '{}' — applying defaults: [{}]",
-                        group.name,
-                        defaults.join(", ")
-                    );
-                }
-                for option in &group.options {
-                    if defaults.contains(&option.name) {
-                        files.extend(option.files.clone());
-                        for (k, v) in &option.condition_flags {
-                            condition_flags.insert(k.clone(), v.clone());
-                        }
-                    }
+            };
+
+            for option in chosen {
+                files.extend(option.files.clone());
+                for (k, v) in &option.condition_flags {
+                    condition_flags.insert(k.clone(), v.clone());
                 }
             }
         }
@@ -2946,5 +2972,50 @@ mod tests {
         assert!(version_gte("1.6.5", "1.6.0"));
         assert!(!version_gte("1.5.0", "1.6.0"));
         assert!(version_gte("2.0.0", "1.9.9"));
+    }
+
+    #[test]
+    fn unmatched_group_selection_falls_back_to_defaults() {
+        // The collection/recipe names an option that doesn't exist in this
+        // version of the XML. Previously the group contributed nothing and
+        // only requiredInstallFiles were installed.
+        let installer = parse_fomod_xml(SAMPLE_XML).unwrap();
+        let mut selections = HashMap::new();
+        selections.insert("Textures".to_string(), vec!["Ultra Res (old name)".to_string()]);
+
+        let files = get_files_for_selections(&installer, &selections, None, None);
+        let sources: Vec<&str> = files.iter().map(|f| f.source.as_str()).collect();
+        assert!(sources.contains(&"core"), "required files kept: {:?}", sources);
+        assert!(
+            sources.contains(&"textures/high"),
+            "group default (Recommended 'High Res') applied: {:?}",
+            sources
+        );
+        assert!(!sources.contains(&"textures/low"));
+    }
+
+    #[test]
+    fn group_selection_matches_option_names_case_insensitively() {
+        let installer = parse_fomod_xml(SAMPLE_XML).unwrap();
+        let mut selections = HashMap::new();
+        selections.insert("Textures".to_string(), vec![" low res ".to_string()]);
+
+        let files = get_files_for_selections(&installer, &selections, None, None);
+        let sources: Vec<&str> = files.iter().map(|f| f.source.as_str()).collect();
+        assert!(sources.contains(&"textures/low"), "{:?}", sources);
+        assert!(!sources.contains(&"textures/high"), "{:?}", sources);
+    }
+
+    #[test]
+    fn explicit_empty_group_selection_is_respected() {
+        // An explicitly empty list means "nothing from this group" (prior
+        // behaviour) and must not be replaced with the group's defaults —
+        // only a selection naming non-existent options falls back.
+        let installer = parse_fomod_xml(SAMPLE_XML).unwrap();
+        let mut selections = HashMap::new();
+        selections.insert("Textures".to_string(), vec![]);
+
+        let files = get_files_for_selections(&installer, &selections, None, None);
+        assert!(!files.iter().any(|f| f.source.starts_with("textures/")));
     }
 }

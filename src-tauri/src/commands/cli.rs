@@ -1321,12 +1321,20 @@ pub fn cli_launch(game_id: &str, bottle_name: &str, use_skse: bool, db: &Arc<Mod
         .unwrap_or(false);
 
     if game_id == "skyrimse" && !fixes_disabled {
-        match display_fix::auto_fix_display(&bottle) {
+        match display_fix::auto_fix_display(&bottle, Some(std::path::Path::new(&game.data_dir))) {
             Ok(r) => {
                 if r.fixed {
                     println!(
-                        "[corkscrew] Display fix applied: {}x{} fullscreen",
-                        r.applied.width, r.applied.height
+                        "[corkscrew] Display fix applied: {}x{} {}",
+                        r.applied.width,
+                        r.applied.height,
+                        if r.applied.fullscreen {
+                            "fullscreen"
+                        } else if r.applied.borderless {
+                            "borderless"
+                        } else {
+                            "windowed"
+                        }
                     );
                 }
             }

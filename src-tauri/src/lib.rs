@@ -12,6 +12,7 @@ pub mod config;
 pub mod conflict_resolver;
 pub mod crashlog;
 pub mod crossover_cxmenu;
+pub mod crossover_install;
 pub mod crossover_shortcuts;
 pub mod cursor_clamp;
 pub mod database;
@@ -45,6 +46,7 @@ pub mod instruction_validator;
 pub mod integrity;
 pub mod launch_fixes;
 pub mod launcher;
+pub mod launcher_swap;
 pub mod llm_chat;
 pub mod llm_parser;
 pub mod loot;
@@ -54,6 +56,7 @@ pub mod mod_dependencies;
 pub mod mod_recommendations;
 pub mod mod_tools;
 pub mod mod_types;
+pub mod mod_updates;
 pub mod modengine2_config;
 pub mod modlist_io;
 pub mod nexus;
@@ -1367,6 +1370,10 @@ pub fn run() {
             commands::profiles::restore_profile_saves,
             // Update Checking
             commands::notifications::check_mod_updates,
+            commands::notifications::get_mod_update_results,
+            commands::notifications::route_mod_updates,
+            commands::notifications::update_mods_from_nexus,
+            commands::notifications::cancel_mod_updates,
             // Mod Tools
             commands::tools::detect_mod_tools_cmd,
             commands::tools::install_mod_tool,
@@ -1648,6 +1655,8 @@ pub fn run() {
             commands::crossover_cmds::remove_custom_game_cmd,
             commands::crossover_cmds::update_custom_game_paths_cmd,
             commands::crossover_cmds::search_nexus_games_cmd,
+            commands::crossover_cmds::get_bottle_crossover_info,
+            commands::crossover_cmds::set_bottle_crossover_install,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

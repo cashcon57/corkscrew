@@ -22,6 +22,7 @@ use crate::games::{DetectedGame};
 use crate::installer;
 use crate::launcher::{LaunchResult};
 use crate::mod_types;
+use crate::mod_updates;
 use crate::nexus;
 use crate::nxm_handler;
 use crate::oauth;
@@ -51,7 +52,7 @@ use tauri::{AppHandle, State};
 ///    legacy behaviour (`use_legacy_data_dir() == false`) or no plugin is
 ///    registered.
 /// 3. Fallback to `data_dir`.
-fn resolve_effective_deploy_dir(
+pub(crate) fn resolve_effective_deploy_dir(
     game_id: &str,
     game: &DetectedGame,
     data_dir: &Path,
@@ -368,9 +369,12 @@ pub async fn install_mod_cmd(
     source_type: Option<String>,
     source_url: Option<String>,
     nexus_mod_id: Option<i64>,
+    nexus_file_id: Option<i64>,
+    replace_mod_id: Option<i64>,
     state: State<'_, AppState>,
 ) -> Result<InstalledMod, String> {
     check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
+    let _guard = crate::DeployGuard::try_acquire(state.deploy_in_progress.clone(), app.clone())?;
     let db = state.db.clone();
     let app = app.clone();
     tokio::task::spawn_blocking(move || {
@@ -399,6 +403,85 @@ pub async fn install_mod_cmd(
                 mod_name: name.clone(),
             },
         );
+
+        // Same Nexus file already installed, the file a pending update points
+        // at, or an explicit "update this mod": replace the existing row in
+        // place instead of adding a duplicate.
+        let (plan, existing) = mod_updates::plan_install_for(
+            &db,
+            &game_id,
+            &bottle_name,
+            nexus_mod_id,
+            nexus_file_id,
+            replace_mod_id,
+        )?;
+        if let mod_updates::InstallPlan::Replace { mod_id: target, reason } = plan {
+            let current = existing
+                .iter()
+                .find(|m| m.id == target)
+                .ok_or_else(|| format!("Mod {target} not found"))?;
+            log::info!("Installing '{}' replaces '{}' in place ({:?})", name, current.name, reason);
+            let _ = app.emit(
+                INSTALL_PROGRESS_EVENT,
+                InstallProgress::StepChanged {
+                    mod_index: 0,
+                    step: "extracting".to_string(),
+                    detail: Some(format!("Updating {}...", current.name)),
+                },
+            );
+            let spec = mod_updates::ReplaceSpec {
+                name: current.name.clone(),
+                version: if version.is_empty() { current.version.clone() } else { version.clone() },
+                archive_name: archive_path.clone(),
+                nexus_ids: nexus_mod_id.map(|n| {
+                    let file = nexus_file_id.or(if current.nexus_mod_id == Some(n) {
+                        current.nexus_file_id
+                    } else {
+                        None
+                    });
+                    (n, file)
+                }),
+            };
+            let result = mod_updates::replace_mod_in_place(
+                &db, &game_id, &bottle_name, &game, &data_dir, target, &archive, &spec,
+            );
+            let installed = match result {
+                Ok(m) => m,
+                Err(e) => {
+                    let _ = app.emit(
+                        INSTALL_PROGRESS_EVENT,
+                        InstallProgress::ModFailed {
+                            mod_index: 0,
+                            mod_name: current.name.clone(),
+                            error: e.clone(),
+                        },
+                    );
+                    return Err(e);
+                }
+            };
+            if let Some(ref st) = source_type {
+                if let Err(e) = db.set_mod_source(target, st, source_url.as_deref()) {
+                    log::warn!("Failed to set source for mod {target}: {e}");
+                }
+            }
+            if let Err(e) = crate::sync_plugins_for_game(&game, &bottle) {
+                log::warn!("Plugin sync after updating '{}' failed: {e}", installed.name);
+            }
+            let _ = app.emit(
+                INSTALL_PROGRESS_EVENT,
+                InstallProgress::ModCompleted {
+                    mod_index: 0,
+                    mod_name: installed.name.clone(),
+                    mod_id: target,
+                    deployed_size: 0,
+                    duration_ms: 0,
+                },
+            );
+            return db
+                .get_mod(target)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "Failed to retrieve installed mod".to_string());
+        }
 
         // Step 1: Reserve DB record
         let _ = app.emit(
@@ -436,6 +519,12 @@ pub async fn install_mod_cmd(
             })?;
         db.set_mod_priority(mod_id, next_priority)
             .map_err(|e| e.to_string())?;
+        if let Some(n) = nexus_mod_id {
+            // Record the exact file so update checks and later installs of
+            // the same file can find this row.
+            db.set_nexus_ids(mod_id, n, nexus_file_id)
+                .map_err(|e| e.to_string())?;
+        }
 
         // Step 2: Extract and stage
         let _ = app.emit(
@@ -1093,6 +1182,7 @@ pub async fn download_from_nexus(
     game_id: String,
     bottle_name: String,
     auto_install: bool,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let client = nexus_client().await?;
@@ -1142,26 +1232,17 @@ pub async fn download_from_nexus(
         }
     }
 
-    // Get mod info
-    let mod_info = client
-        .get_mod(&nxm.game_slug, nxm.mod_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let mod_name = mod_info
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Unknown Mod")
-        .to_string();
-    let mod_version = mod_info
-        .get("version")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    // Name and version come from the specific file, not just the mod page:
+    // pages often ship several files (main + optional patches) that would
+    // otherwise all be listed under the page title.
+    let (mod_name, mod_version) =
+        nexus_file_identity(&client, &nxm.game_slug, nxm.mod_id, nxm.file_id).await?;
 
     // Download
     let cfg = config::get_config().map_err(|e| e.to_string())?;
     let download_dir = cfg
         .download_dir
+        .clone()
         .map(PathBuf::from)
         .unwrap_or_else(config::downloads_dir);
 
@@ -1171,101 +1252,298 @@ pub async fn download_from_nexus(
         .map_err(|e| e.to_string())?;
 
     if auto_install {
-        let (bottle, game, data_dir) = resolve_game(&game_id, &bottle_name)?;
-        let db = &state.db;
-
-        // 1. Add mod to DB with Nexus ID
-        let next_priority = db
-            .get_next_priority(&game_id, &bottle_name)
-            .map_err(|e| e.to_string())?;
-        let mod_id = db
-            .add_mod(
-                &game_id,
-                &bottle_name,
-                Some(nxm.mod_id),
-                &mod_name,
-                &mod_version,
-                &archive_path.to_string_lossy(),
-                &[],
-            )
-            .map_err(|e| e.to_string())?;
-        db.set_mod_priority(mod_id, next_priority)
-            .map_err(|e| e.to_string())?;
-
-        // 2. Stage
-        let staging_result =
-            match staging::stage_mod(&archive_path, &game_id, &bottle_name, mod_id, &mod_name) {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = db.remove_mod(mod_id);
-                    return Err(format!("Staging failed: {}", e));
-                }
-            };
-
-        // 3. Update DB
-        db.set_staging_path(mod_id, &staging_result.staging_path.to_string_lossy())
-            .map_err(|e| e.to_string())?;
-        db.update_installed_files(mod_id, &staging_result.files)
-            .map_err(|e| e.to_string())?;
-        db.store_file_hashes(mod_id, &staging_result.hashes)
-            .map_err(|e| e.to_string())?;
-
-        // 4. Resolve routing (BepInEx plugins, UE ~mods/, Vortex mod types,
-        // etc.) — same logic the manual install path uses. Previously the
-        // NXM auto-install dumped everything into `data_dir`, which broke
-        // non-Bethesda games and routed mods.
-        let (effective_dir, _routed_type) = resolve_effective_deploy_dir(
-            &game_id,
-            &game,
-            &data_dir,
-            &mod_name,
-            &staging_result.files,
-        );
-
-        // 5. Deploy
-        let deploy_target_str = if effective_dir != data_dir { "custom" } else { "data" };
-        if let Err(e) = deployer::deploy_mod(
-            db,
-            &game_id,
-            &bottle_name,
-            mod_id,
-            &staging_result.staging_path,
-            &effective_dir,
-            &staging_result.files,
-            deploy_target_str,
-        ) {
-            let _ = staging::remove_staging(&staging_result.staging_path);
-            let _ = db.remove_mod(mod_id);
-            return Err(format!("Deploy failed: {}", e));
-        }
-        let _ = db.set_deploy_target_for_mod(mod_id, deploy_target_str);
-
-        // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
-        crate::sync_plugins_logged(&game, &bottle, "archive install");
-
-        // Auto-delete archive if setting is enabled
-        if cfg
-            .extra
-            .get("auto_delete_archives")
-            .and_then(|v| v.as_str())
-            == Some("true")
-        {
-            let _ = std::fs::remove_file(&archive_path);
-        }
-
-        let installed = db
-            .get_mod(mod_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Failed to retrieve installed mod".to_string())?;
-
+        check_game_lock(&state.game_locks, &game_id, &bottle_name)?;
+        let _guard =
+            crate::DeployGuard::try_acquire(state.deploy_in_progress.clone(), app.clone())?;
+        let db = state.db.clone();
+        let req = NexusInstallRequest {
+            game_id,
+            bottle_name,
+            archive_path,
+            name: mod_name,
+            version: mod_version,
+            nexus_mod_id: nxm.mod_id,
+            nexus_file_id: Some(nxm.file_id),
+            source_url: format!(
+                "https://www.nexusmods.com/{}/mods/{}",
+                nxm.game_slug, nxm.mod_id
+            ),
+            replace_mod_id: None,
+            delete_archive_after: auto_delete_archives(&cfg),
+        };
+        let installed =
+            tokio::task::spawn_blocking(move || install_nexus_archive_blocking(&db, &req))
+                .await
+                .map_err(crate::format_join_error)??;
         Ok(serde_json::to_value(installed).map_err(|e| e.to_string())?)
     } else {
+        // Tell the user up front whether confirming will update or reinstall
+        // an installed mod, or add a second file from the same page.
+        let db = state.db.clone();
+        let (gid, bn, nexus_mod_id, file_id) =
+            (game_id.clone(), bottle_name.clone(), nxm.mod_id, nxm.file_id);
+        let preview = tokio::task::spawn_blocking(move || {
+            mod_updates::plan_install_for(&db, &gid, &bn, Some(nexus_mod_id), Some(file_id), None)
+                .map(|(plan, existing)| mod_updates::describe_plan(&plan, &existing))
+        })
+        .await
+        .map_err(crate::format_join_error)?
+        .unwrap_or_else(|e| {
+            log::warn!("Could not plan NXM install: {e}");
+            mod_updates::InstallPreview::default()
+        });
         Ok(serde_json::json!({
             "downloaded": archive_path.to_string_lossy(),
             "mod_name": mod_name,
             "mod_version": mod_version,
+            "nexus_mod_id": nxm.mod_id,
+            "nexus_file_id": nxm.file_id,
+            "replaces_mod_id": preview.replaces_mod_id,
+            "install_note": preview.note,
         }))
     }
+}
+
+fn auto_delete_archives(cfg: &AppConfig) -> bool {
+    cfg.extra
+        .get("auto_delete_archives")
+        .and_then(|v| v.as_str())
+        == Some("true")
+}
+
+/// Name and version for a mod row installed from one Nexus file.
+///
+/// Uses the mod page for the title and the file entry (metadata only, no
+/// download) for the file's own name, version and category. Falls back to
+/// the page alone if the file list can't be fetched.
+pub(crate) async fn nexus_file_identity(
+    client: &nexus::NexusClient,
+    game_slug: &str,
+    nexus_mod_id: i64,
+    file_id: i64,
+) -> Result<(String, String), String> {
+    let mod_info = client
+        .get_mod(game_slug, nexus_mod_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let page_name = mod_info
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown Mod")
+        .to_string();
+    let page_version = mod_info
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let file = match client.get_mod_files_with_updates(game_slug, nexus_mod_id).await {
+        Ok((files, _)) => mod_updates::parse_file_entries(&files)
+            .into_iter()
+            .find(|f| f.file_id == file_id),
+        Err(e) => {
+            log::warn!(
+                "Could not fetch the file list of Nexus mod {nexus_mod_id} \
+                 (naming from the mod page): {e}"
+            );
+            None
+        }
+    };
+    let name = mod_updates::display_name_for_file(&page_name, file.as_ref());
+    let version = file
+        .as_ref()
+        .map(|f| f.version.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or(page_version);
+    Ok((name, version))
+}
+
+/// A Nexus archive that is downloaded and ready to install.
+pub(crate) struct NexusInstallRequest {
+    pub game_id: String,
+    pub bottle_name: String,
+    pub archive_path: PathBuf,
+    pub name: String,
+    pub version: String,
+    pub nexus_mod_id: i64,
+    pub nexus_file_id: Option<i64>,
+    pub source_url: String,
+    pub replace_mod_id: Option<i64>,
+    pub delete_archive_after: bool,
+}
+
+/// Install a downloaded Nexus archive, replacing the installed copy in place
+/// when it is the same file, the pending update of a mod, or an explicitly
+/// requested update. Otherwise adds a new mod with its Nexus mod and file ids
+/// recorded. The caller holds the `DeployGuard`.
+pub(crate) fn install_nexus_archive_blocking(
+    db: &database::ModDatabase,
+    req: &NexusInstallRequest,
+) -> Result<InstalledMod, String> {
+    let (bottle, game, data_dir) = resolve_game(&req.game_id, &req.bottle_name)?;
+    let (plan, existing) = mod_updates::plan_install_for(
+        db,
+        &req.game_id,
+        &req.bottle_name,
+        Some(req.nexus_mod_id),
+        req.nexus_file_id,
+        req.replace_mod_id,
+    )?;
+
+    let installed = match plan {
+        mod_updates::InstallPlan::Replace { mod_id, reason } => {
+            let current = existing
+                .iter()
+                .find(|m| m.id == mod_id)
+                .ok_or_else(|| format!("Mod {mod_id} not found"))?;
+            log::info!(
+                "Nexus install of mod {} file {:?} replaces '{}' in place ({:?})",
+                req.nexus_mod_id,
+                req.nexus_file_id,
+                current.name,
+                reason
+            );
+            let spec = mod_updates::ReplaceSpec {
+                name: current.name.clone(),
+                version: req.version.clone(),
+                archive_name: req.archive_path.to_string_lossy().into_owned(),
+                nexus_ids: Some((req.nexus_mod_id, req.nexus_file_id)),
+            };
+            let installed = mod_updates::replace_mod_in_place(
+                db,
+                &req.game_id,
+                &req.bottle_name,
+                &game,
+                &data_dir,
+                mod_id,
+                &req.archive_path,
+                &spec,
+            )?;
+            if let Err(e) = db.set_mod_source(mod_id, "nexus", Some(&req.source_url)) {
+                log::warn!("Failed to set source for mod {mod_id}: {e}");
+            }
+            installed
+        }
+        mod_updates::InstallPlan::New { siblings } => {
+            if !siblings.is_empty() {
+                log::info!(
+                    "Installing another file ({:?}) from Nexus mod {} alongside mod ids {:?}",
+                    req.nexus_file_id,
+                    req.nexus_mod_id,
+                    siblings
+                );
+            }
+            install_new_nexus_mod(db, req, &game, &data_dir)?
+        }
+    };
+
+    // Self-gated: sync_plugins_for_game no-ops for games without plugin load order
+    if let Err(e) = crate::sync_plugins_for_game(&game, &bottle) {
+        log::warn!("Plugin sync after installing '{}' failed: {e}", installed.name);
+    }
+
+    if req.delete_archive_after {
+        if let Err(e) = std::fs::remove_file(&req.archive_path) {
+            log::warn!("Failed to auto-delete {}: {e}", req.archive_path.display());
+        }
+    }
+
+    Ok(installed)
+}
+
+fn install_new_nexus_mod(
+    db: &database::ModDatabase,
+    req: &NexusInstallRequest,
+    game: &DetectedGame,
+    data_dir: &Path,
+) -> Result<InstalledMod, String> {
+    let next_priority = db
+        .get_next_priority(&req.game_id, &req.bottle_name)
+        .map_err(|e| e.to_string())?;
+    let mod_id = db
+        .add_mod(
+            &req.game_id,
+            &req.bottle_name,
+            Some(req.nexus_mod_id),
+            &req.name,
+            &req.version,
+            &req.archive_path.to_string_lossy(),
+            &[],
+        )
+        .map_err(|e| e.to_string())?;
+    let cleanup_row = |db: &database::ModDatabase| {
+        if let Err(e) = db.remove_mod(mod_id) {
+            log::warn!("Failed to remove half-installed mod {mod_id}: {e}");
+        }
+    };
+    if let Err(e) = db
+        .set_mod_priority(mod_id, next_priority)
+        .and_then(|_| db.set_nexus_ids(mod_id, req.nexus_mod_id, req.nexus_file_id))
+        .and_then(|_| db.set_mod_source(mod_id, "nexus", Some(&req.source_url)))
+    {
+        cleanup_row(db);
+        return Err(e.to_string());
+    }
+
+    let staging_result =
+        match staging::stage_mod(&req.archive_path, &req.game_id, &req.bottle_name, mod_id, &req.name) {
+            Ok(r) => r,
+            Err(e) => {
+                cleanup_row(db);
+                return Err(format!("Staging failed: {}", e));
+            }
+        };
+
+    db.set_staging_path(mod_id, &staging_result.staging_path.to_string_lossy())
+        .map_err(|e| e.to_string())?;
+    db.update_installed_files(mod_id, &staging_result.files)
+        .map_err(|e| e.to_string())?;
+    db.store_file_hashes(mod_id, &staging_result.hashes)
+        .map_err(|e| e.to_string())?;
+
+    // Same routing as the manual install path (BepInEx plugins, UE ~mods/,
+    // Vortex mod types, ...).
+    let (effective_dir, _routed_type) = resolve_effective_deploy_dir(
+        &req.game_id,
+        game,
+        data_dir,
+        &req.name,
+        &staging_result.files,
+    );
+    let deploy_target_str = if effective_dir != data_dir { "custom" } else { "data" };
+    if let Err(e) = deployer::deploy_mod(
+        db,
+        &req.game_id,
+        &req.bottle_name,
+        mod_id,
+        &staging_result.staging_path,
+        &effective_dir,
+        &staging_result.files,
+        deploy_target_str,
+    ) {
+        if let Err(e2) = staging::remove_staging(&staging_result.staging_path) {
+            log::warn!("Failed to remove staging after failed deploy: {e2}");
+        }
+        cleanup_row(db);
+        return Err(format!("Deploy failed: {}", e));
+    }
+    if let Err(e) = db.set_deploy_target_for_mod(mod_id, deploy_target_str) {
+        log::warn!("Failed to store deploy target for mod {mod_id}: {e}");
+    }
+
+    if let Some(mod_type) = games::with_plugin(&req.game_id, |plugin| {
+        plugin.detect_mod_type_from_files(&staging_result.files)
+    })
+    .flatten()
+    {
+        games::with_plugin(&req.game_id, |plugin| {
+            plugin.on_mod_deployed(&game.game_path, Some(mod_type.as_str()), &staging_result.files);
+        });
+    }
+
+    db.get_mod(mod_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Failed to retrieve installed mod".to_string())
 }
 
 /// Check if the current user has Nexus Mods premium/supporter status.
@@ -1295,6 +1573,11 @@ pub async fn get_config() -> Result<AppConfig, String> {
 
 #[tauri::command]
 pub async fn set_config_value(key: String, value: String) -> Result<(), String> {
+    // The CrossOver pin chooses which wine binary runs; it can only be set
+    // through `set_bottle_crossover_install`, which validates it.
+    if key.starts_with(crate::crossover_install::OVERRIDE_KEY_PREFIX) {
+        return Err("Use the CrossOver install setting to change this".to_string());
+    }
     tokio::task::spawn_blocking(move || {
         config::set_config_value(&key, &value).map_err(|e| e.to_string())
     })
@@ -1879,15 +2162,38 @@ pub async fn launch_game_cmd(
     let game_path = PathBuf::from(&game.game_path);
     let data_dir_check = PathBuf::from(&game.data_dir);
 
-    // NotProton games start through the macOS Steam client (see
-    // `launcher::launch_via_steam`), which runs the game's own executable.
-    // Script extenders and custom executables need a different exe and aren't
-    // wired up for NotProton yet.
-    let via_steam = bottle.source == crate::bottles::NOTPROTON_SOURCE;
-    if via_steam && use_skse {
-        return Err("Launching through a script extender isn't supported for NotProton games yet. \
-                    Turn off the script extender option to start the game through Steam."
-            .to_string());
+    // Steam Play games (Proton on Linux, NotProton on macOS) must be started
+    // by the Steam client so they get its Steam bridge; running the exe under
+    // Wine directly makes Steam-DRM games like Skyrim exit at once. GameHub
+    // games are started by GameHub. Both start the game's launcher exe, so a
+    // script extender runs by taking the launcher's place (`launcher_swap`).
+    let via_steam = bottle.is_steam_compat_prefix();
+    let started_by_client = via_steam || bottle.source == crate::gamehub::SOURCE;
+    let launcher_swap = if started_by_client {
+        crate::launcher_swap::for_game(&game_id)
+    } else {
+        None
+    };
+    if started_by_client {
+        match (use_skse, launcher_swap) {
+            (true, Some(swap)) => {
+                crate::launcher_swap::apply(&game_path, swap).map_err(|e| {
+                    format!("Couldn't set up the script extender for a {} launch: {e}", bottle.source)
+                })?;
+            }
+            (true, None) => {
+                return Err(format!(
+                    "Script extenders aren't supported for this game under {} yet. \
+                     Turn off the script extender option to start the game normally.",
+                    bottle.source
+                ));
+            }
+            (false, Some(swap)) => {
+                crate::launcher_swap::restore(&game_path, swap)
+                    .map_err(|e| format!("Couldn't restore {}: {e}", swap.launcher))?;
+            }
+            (false, None) => {}
+        }
     }
 
     let mut launch_warnings: Vec<String> = Vec::new();
@@ -1947,7 +2253,7 @@ pub async fn launch_game_cmd(
 
     // When SKSE is requested, it takes priority over custom executables.
     // Otherwise, check for a custom default executable first.
-    if !use_skse && !via_steam {
+    if !use_skse && !started_by_client {
         let custom_exe =
             executables::get_default_executable(&db, &game_id, &bottle_name).unwrap_or(None);
 
@@ -2116,14 +2422,16 @@ pub async fn launch_game_cmd(
         .map(|v| v == "true")
         .unwrap_or(false);
 
-    // Auto-apply display fix for Skyrim SE before launching to ensure fullscreen
+    // Pre-launch display fix for Skyrim SE: Wine input/registry fixes, and a
+    // SkyrimPrefs.ini correction that keeps the user's display mode.
     if game_id == "skyrimse" && !fixes_disabled {
-        match display_fix::auto_fix_display(&bottle) {
+        match display_fix::auto_fix_display(&bottle, Some(&data_dir_check)) {
             Ok(result) => {
                 if result.fixed {
                     log::info!(
-                        "Auto-applied display fix: {}x{} fullscreen (was {}x{} fs={} borderless={})",
+                        "Auto-applied display fix: {}x{} fs={} borderless={} (was {}x{} fs={} borderless={})",
                         result.applied.width, result.applied.height,
+                        result.applied.fullscreen, result.applied.borderless,
                         result.previous.width, result.previous.height,
                         result.previous.fullscreen, result.previous.borderless
                     );
@@ -2204,10 +2512,27 @@ pub async fn launch_game_cmd(
 
     let mut result = if via_steam {
         launcher::launch_via_steam(&bottle)
+    } else if started_by_client {
+        // GameHub starts the game itself; with a script extender its launcher
+        // entry now runs the loader, so hand GameHub the game's own exe.
+        let game_exe = games::with_plugin(&game_id, |p| {
+            p.executables().first().and_then(|n| launcher::find_executable(&game_path, n))
+        })
+        .flatten()
+        .unwrap_or_else(|| exe_path.clone());
+        launcher::launch_game(&bottle, &game_exe, Some(&game_path), Some(&game_id), None)
     } else {
         launcher::launch_game(&bottle, &exe_path, Some(&game_path), Some(&game_id), None)
     }
     .map_err(|e| format!("Launch failed ({}): {}", bottle.source, e))?;
+    if use_skse && launcher_swap.is_some() {
+        let note = "The script extender starts in place of the game's launcher. \
+                    If Steam verifies or updates the game, Corkscrew sets it up again on the next launch.";
+        result.warning = Some(match result.warning.take() {
+            Some(w) => format!("{w}\n{note}"),
+            None => note.to_string(),
+        });
+    }
 
     // Cursor fix is now handled by Wine registry keys (set in auto_fix_display
     // above via fix_cursor_grab). No runtime Dock/Hot Corner/event tap needed.
@@ -2434,7 +2759,8 @@ pub async fn scan_skse_plugins_cmd(
             .map(|s| s.current_version)
             .unwrap_or_else(|_| "unknown".to_string());
 
-        Ok(skse::scan_skse_plugins(&data_dir, &version))
+        let skse_version = skse::detect_skse(&game_path).version;
+        Ok(skse::scan_skse_plugins(&data_dir, &version, skse_version.as_deref()))
     })
     .await
     .map_err(crate::format_join_error)?
@@ -2501,7 +2827,8 @@ pub async fn reenable_wine_plugin_cmd(
 pub async fn fix_skyrim_display(bottle_name: String) -> Result<display_fix::DisplayFixResult, String> {
     tokio::task::spawn_blocking(move || {
         let bottle = resolve_bottle(&bottle_name)?;
-        display_fix::auto_fix_display(&bottle)
+        // Explicit user action: force exclusive fullscreen at native resolution.
+        display_fix::force_exclusive_fullscreen(&bottle)
     })
     .await
     .map_err(crate::format_join_error)?

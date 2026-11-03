@@ -319,6 +319,28 @@ export interface DisplaySettings {
   borderless: boolean;
 }
 
+/** One installed CrossOver build (macOS). */
+export interface CrossOverInstall {
+  app_path: string;
+  name: string;
+  version: string | null;
+  build_timestamp: string | null;
+}
+
+export type CrossOverSelectionReason =
+  | "override"
+  | "live_wineserver"
+  | "bottle_version"
+  | "default";
+
+/** CrossOver installs and which one a bottle launches with. */
+export interface BottleCrossOverInfo {
+  installs: CrossOverInstall[];
+  selected: { install: CrossOverInstall; reason: CrossOverSelectionReason } | null;
+  override_path: string | null;
+  error: string | null;
+}
+
 export interface DisplayFixResult {
   fixed: boolean;
   prefs_path: string;
@@ -544,6 +566,37 @@ export interface ModUpdateInfo {
   latest_version: string;
   latest_file_name: string;
   latest_file_id: number;
+}
+
+/** How one pending update is fetched: Premium = API download, free = Nexus website. */
+export type UpdateRoute =
+  | { kind: "api_download" }
+  | { kind: "browser"; url: string };
+
+export interface RoutedUpdate {
+  mod_id: number;
+  mod_name: string;
+  route: UpdateRoute;
+}
+
+export interface UpdateOutcome {
+  mod_id: number;
+  mod_name: string;
+  ok: boolean;
+  new_version: string | null;
+  error: string | null;
+  note: string | null;
+}
+
+/** Result of `download_from_nexus` with `autoInstall = false`. */
+export interface NxmDownloadResult {
+  downloaded: string;
+  mod_name: string;
+  mod_version: string;
+  nexus_mod_id: number | null;
+  nexus_file_id: number | null;
+  replaces_mod_id: number | null;
+  install_note: string | null;
 }
 
 export interface IntegrityReport {
