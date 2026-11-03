@@ -8,8 +8,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
@@ -446,181 +445,187 @@ pub(crate) fn parse_query_params(path: &str) -> HashMap<String, String> {
     params
 }
 
-/// Spin up a temporary HTTP server on a random port, wait for the OAuth
-/// callback, then return the authorization code.
+/// How long one browser connection may take to send its request line and
+/// headers. Browsers open speculative "preconnect" sockets that never send
+/// anything; without this the server would block on one forever while the
+/// real callback waits unread on another connection.
+const CONNECTION_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Upper bound on bytes read from one callback request (request line + headers).
+const MAX_CALLBACK_REQUEST_BYTES: u64 = 16 * 1024;
+
+/// What to do after handling one connection to the callback server.
+enum ConnectionOutcome {
+    /// Not the callback (idle preconnect, favicon, bad state): keep listening.
+    KeepListening,
+    /// The flow is finished, successfully or not.
+    Done(Result<CallbackResult, OAuthError>),
+}
+
+fn write_html(stream: &std::net::TcpStream, status: &str, body: &str) {
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let mut writer = stream;
+    let _ = writer.write_all(response.as_bytes());
+    let _ = writer.flush();
+}
+
+fn html_escape(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Read one HTTP request from `stream` and decide whether it is the OAuth
+/// callback. I/O problems on a single connection never end the flow.
+fn handle_callback_connection(
+    stream: std::net::TcpStream,
+    expected_state: &str,
+) -> ConnectionOutcome {
+    use std::io::Read;
+
+    if stream.set_nonblocking(false).is_err()
+        || stream.set_read_timeout(Some(CONNECTION_READ_TIMEOUT)).is_err()
+    {
+        return ConnectionOutcome::KeepListening;
+    }
+
+    let mut reader = BufReader::new((&stream).take(MAX_CALLBACK_REQUEST_BYTES));
+    let mut request_line = String::new();
+    match reader.read_line(&mut request_line) {
+        Ok(0) => return ConnectionOutcome::KeepListening, // closed without a request
+        Ok(_) => {}
+        Err(e) => {
+            log::debug!("OAuth callback: dropping connection that sent no request ({e})");
+            return ConnectionOutcome::KeepListening;
+        }
+    }
+    // Drain headers up to the blank line.
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) if line.trim().is_empty() => break,
+            Ok(_) => {}
+            Err(_) => return ConnectionOutcome::KeepListening,
+        }
+    }
+
+    // "GET /callback?code=...&state=... HTTP/1.1"
+    let path = request_line.split_whitespace().nth(1).unwrap_or("");
+    if !path.starts_with(CALLBACK_PATH) {
+        write_html(&stream, "404 Not Found", "");
+        return ConnectionOutcome::KeepListening;
+    }
+
+    let params = parse_query_params(path);
+
+    // Validate state before anything else, so a bad request can't end the
+    // flow and block the legitimate callback.
+    match params.get("state") {
+        Some(s) if !s.is_empty() && s == expected_state => {}
+        Some(s) if !s.is_empty() => {
+            log::warn!("OAuth callback: state mismatch, ignoring request");
+            write_html(
+                &stream,
+                "400 Bad Request",
+                "<html><body><h1>Authorization Failed</h1>\
+                 <p>State mismatch - possible CSRF attack.</p>\
+                 <p>You can close this tab.</p></body></html>",
+            );
+            return ConnectionOutcome::KeepListening;
+        }
+        _ => {
+            write_html(
+                &stream,
+                "400 Bad Request",
+                "<html><body><h1>Authorization Failed</h1>\
+                 <p>Missing or empty state parameter.</p>\
+                 <p>You can close this tab.</p></body></html>",
+            );
+            return ConnectionOutcome::KeepListening;
+        }
+    }
+
+    if let Some(error) = params.get("error") {
+        let description = params
+            .get("error_description")
+            .cloned()
+            .unwrap_or_else(|| error.clone());
+        write_html(
+            &stream,
+            "200 OK",
+            &format!(
+                "<html><body><h1>Authorization Failed</h1><p>{}</p>\
+                 <p>You can close this tab.</p></body></html>",
+                html_escape(&description)
+            ),
+        );
+        return ConnectionOutcome::Done(Err(OAuthError::TokenExchange(description)));
+    }
+
+    let Some(code) = params.get("code").cloned() else {
+        return ConnectionOutcome::Done(Err(OAuthError::TokenExchange(
+            "no authorization code in callback".to_string(),
+        )));
+    };
+
+    write_html(
+        &stream,
+        "200 OK",
+        "<html><body style=\"font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; \
+         display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; \
+         background: #1a1a2e; color: #e0e0e0;\">\
+         <div style=\"text-align: center;\">\
+         <h1 style=\"color: #da8e35;\">Authorization Successful!</h1>\
+         <p>You can close this tab and return to Corkscrew.</p>\
+         </div></body></html>",
+    );
+    ConnectionOutcome::Done(Ok(CallbackResult {
+        code,
+        state: expected_state.to_string(),
+    }))
+}
+
+/// Serve the OAuth redirect on `listener` until the callback arrives, the
+/// flow times out, or `cancelled()` returns true.
 pub(crate) fn wait_for_callback(
     listener: &TcpListener,
     expected_state: &str,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<CallbackResult, OAuthError> {
-    listener.set_nonblocking(false)?;
-
     let timeout = std::time::Duration::from_secs(CALLBACK_TIMEOUT_SECS);
-    let callback_received = Arc::new(AtomicBool::new(false));
-
-    // Use a blocking accept with a manual timeout via SO_RCVTIMEO equivalent.
-    // TcpListener doesn't have set_timeout directly, so we use
-    // incoming() with a thread-based timeout approach.
     let start = std::time::Instant::now();
+    listener.set_nonblocking(true)?;
 
     loop {
-        // Check timeout
+        if cancelled() {
+            log::info!("OAuth: sign-in cancelled");
+            return Err(OAuthError::Cancelled);
+        }
         if start.elapsed() > timeout {
+            log::warn!("OAuth: no callback within {CALLBACK_TIMEOUT_SECS}s, giving up");
             return Err(OAuthError::Cancelled);
         }
 
-        // Try to accept with a short non-blocking poll
-        listener.set_nonblocking(true)?;
         match listener.accept() {
             Ok((stream, _)) => {
-                stream.set_nonblocking(false)?;
-                // Read the HTTP request
-                let mut reader = BufReader::new(&stream);
-                let mut request_line = String::new();
-                reader.read_line(&mut request_line)?;
-
-                // Parse the request line: "GET /callback?code=...&state=... HTTP/1.1"
-                let path = request_line
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap_or("")
-                    .to_string();
-
-                // Drain remaining headers (read until empty line)
-                loop {
-                    let mut line = String::new();
-                    reader.read_line(&mut line)?;
-                    if line.trim().is_empty() {
-                        break;
+                if let ConnectionOutcome::Done(result) =
+                    handle_callback_connection(stream, expected_state)
+                {
+                    match &result {
+                        Ok(_) => log::info!("OAuth: callback received"),
+                        Err(e) => log::warn!("OAuth: callback reported an error: {e}"),
                     }
+                    return result;
                 }
-
-                // Only handle requests to /callback
-                if !path.starts_with(CALLBACK_PATH) {
-                    // Send 404 and continue listening
-                    let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
-                    let mut writer = stream.try_clone()?;
-                    let _ = writer.write_all(response.as_bytes());
-                    continue;
-                }
-
-                let params = parse_query_params(&path);
-
-                // Validate state BEFORE consuming callback_received flag to
-                // prevent DoS where an attacker's bad-state request blocks
-                // the legitimate callback.
-                let state = match params.get("state").cloned() {
-                    Some(s) if !s.is_empty() => s,
-                    _ => {
-                        // Missing state — don't consume callback, just reject
-                        let body = "<html><body><h1>Authorization Failed</h1>\
-                                    <p>Missing or empty state parameter.</p>\
-                                    <p>You can close this tab.</p></body></html>";
-                        let response = format!(
-                            "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let mut writer = stream.try_clone()?;
-                        let _ = writer.write_all(response.as_bytes());
-                        let _ = writer.flush();
-                        continue; // Don't consume callback — keep listening
-                    }
-                };
-
-                if state != expected_state {
-                    // Wrong state — possible CSRF. Don't consume callback.
-                    let body = "<html><body><h1>Authorization Failed</h1>\
-                                <p>State mismatch - possible CSRF attack.</p>\
-                                <p>You can close this tab.</p></body></html>";
-                    let response = format!(
-                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
-                    );
-                    let mut writer = stream.try_clone()?;
-                    let _ = writer.write_all(response.as_bytes());
-                    let _ = writer.flush();
-                    continue; // Don't consume callback — keep listening
-                }
-
-                // State validated — now consume the callback flag
-                if callback_received.swap(true, Ordering::SeqCst) {
-                    let body = "<html><body><h1>Already Processed</h1>\
-                                <p>This callback has already been handled. You can close this tab.</p></body></html>";
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
-                    );
-                    let mut writer = stream.try_clone()?;
-                    let _ = writer.write_all(response.as_bytes());
-                    let _ = writer.flush();
-                    return Err(OAuthError::TokenExchange(
-                        "duplicate callback received".to_string(),
-                    ));
-                }
-
-                // Check for errors from the OAuth provider
-                if let Some(error) = params.get("error") {
-                    let description = params
-                        .get("error_description")
-                        .cloned()
-                        .unwrap_or_else(|| error.clone());
-
-                    let safe_desc = description
-                        .replace('&', "&amp;")
-                        .replace('<', "&lt;")
-                        .replace('>', "&gt;")
-                        .replace('"', "&quot;");
-                    let body = format!(
-                        "<html><body><h1>Authorization Failed</h1><p>{}</p>\
-                         <p>You can close this tab.</p></body></html>",
-                        safe_desc
-                    );
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
-                    );
-                    let mut writer = stream.try_clone()?;
-                    let _ = writer.write_all(response.as_bytes());
-                    let _ = writer.flush();
-
-                    return Err(OAuthError::TokenExchange(description));
-                }
-
-                let code = params.get("code").cloned().ok_or_else(|| {
-                    OAuthError::TokenExchange("no authorization code in callback".to_string())
-                })?;
-
-                // State was already validated above (before callback_received flag).
-
-                // Send success page
-                let body = "<html><body style=\"font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; \
-                            display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; \
-                            background: #1a1a2e; color: #e0e0e0;\">\
-                            <div style=\"text-align: center;\">\
-                            <h1 style=\"color: #da8e35;\">Authorization Successful!</h1>\
-                            <p>You can close this tab and return to Corkscrew.</p>\
-                            </div></body></html>";
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let mut writer = stream.try_clone()?;
-                let _ = writer.write_all(response.as_bytes());
-                let _ = writer.flush();
-
-                return Ok(CallbackResult { code, state });
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No connection yet; sleep briefly and retry. 500ms halves
-                // the wakeup rate vs the old 100ms loop without making the
-                // post-callback latency user-perceptible (it's bounded by
-                // browser → loopback round-trip, not this poll).
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                continue;
+                std::thread::sleep(std::time::Duration::from_millis(200));
             }
             Err(e) => return Err(OAuthError::Io(e)),
         }
@@ -656,15 +661,33 @@ fn tokens_path() -> PathBuf {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Bumped by every new sign-in and by [`cancel_oauth_flow`]; a waiting flow
+/// stops as soon as the value no longer matches the one it started with.
+static OAUTH_FLOW_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Stop any sign-in that is waiting for the browser callback.
+pub fn cancel_oauth_flow() {
+    OAUTH_FLOW_GENERATION.fetch_add(1, Ordering::SeqCst);
+}
+
 /// Start the full OAuth 2.0 + PKCE authorization flow.
 ///
 /// 1. Generate PKCE verifier/challenge and a random state.
 /// 2. Bind a local HTTP server on a random port.
-/// 3. Open the user's browser to the Nexus Mods authorization page.
+/// 3. Hand the authorization URL to `on_auth_url` (so the UI can offer it
+///    for copy/paste into another browser or profile) and open it in the
+///    default browser.
 /// 4. Wait for the redirect callback with the authorization code.
 /// 5. Exchange the code for access + refresh tokens.
 /// 6. Return the token pair.
-pub async fn start_oauth_flow(client_id: &str) -> Result<TokenPair, OAuthError> {
+///
+/// Starting a new flow cancels one that is still waiting.
+pub async fn start_oauth_flow(
+    client_id: &str,
+    on_auth_url: impl FnOnce(&str),
+) -> Result<TokenPair, OAuthError> {
+    let generation = OAUTH_FLOW_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+
     // 1. PKCE
     let pkce = generate_pkce()?;
     let state = generate_state()?;
@@ -673,15 +696,28 @@ pub async fn start_oauth_flow(client_id: &str) -> Result<TokenPair, OAuthError> 
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     let redirect_uri = format!("http://127.0.0.1:{}{}", port, CALLBACK_PATH);
+    log::info!("OAuth: waiting for Nexus Mods callback on 127.0.0.1:{port}");
 
-    // 3. Build URL and open browser
+    // 3. Build URL, share it with the UI, open browser. A failed browser
+    // launch isn't fatal: the user can still paste the link themselves.
     let auth_url = build_auth_url(client_id, &redirect_uri, &state, &pkce.challenge);
-    open_browser(&auth_url)?;
+    on_auth_url(&auth_url);
+    match open_browser(&auth_url) {
+        Ok(()) => {}
+        Err(OAuthError::Io(e)) => {
+            log::warn!("OAuth: could not open the browser ({e}); waiting for a pasted link");
+        }
+        Err(e) => return Err(e),
+    }
 
-    // 4. Wait for callback (this blocks until the user completes auth or timeout)
+    // 4. Wait for callback (this blocks until the user completes auth, cancels or times out)
     let callback = tokio::task::spawn_blocking({
         let expected_state = state.clone();
-        move || wait_for_callback(&listener, &expected_state)
+        move || {
+            wait_for_callback(&listener, &expected_state, &|| {
+                OAUTH_FLOW_GENERATION.load(Ordering::SeqCst) != generation
+            })
+        }
     })
     .await
     .map_err(|_| OAuthError::Cancelled)??;
@@ -1372,5 +1408,68 @@ mod tests {
     fn test_tokens_path() {
         let path = tokens_path();
         assert!(path.ends_with("corkscrew/nexus_tokens.json"));
+    }
+
+    /// Runs `wait_for_callback` on a fresh listener in a thread and hands the
+    /// port to `client`. Panics if the wait doesn't finish within 20 s.
+    fn run_callback_server(
+        expected_state: &'static str,
+        client: impl FnOnce(u16) + Send + 'static,
+    ) -> Result<CallbackResult, OAuthError> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(wait_for_callback(&listener, expected_state, &|| false));
+        });
+        std::thread::spawn(move || client(port));
+        rx.recv_timeout(std::time::Duration::from_secs(20))
+            .expect("wait_for_callback hung")
+    }
+
+    fn send_request(port: u16, path: &str) -> String {
+        use std::io::Read;
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(s, "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        out
+    }
+
+    #[test]
+    fn callback_survives_idle_preconnect() {
+        // Chrome opens speculative connections that never send a request.
+        // The real callback arrives on a later connection and must still be read.
+        let result = run_callback_server("st8", |port| {
+            let idle = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let resp = send_request(port, "/callback?code=abc&state=st8");
+            assert!(resp.contains("200 OK"), "unexpected response: {resp}");
+            drop(idle);
+        })
+        .expect("callback should succeed");
+        assert_eq!(result.code, "abc");
+    }
+
+    #[test]
+    fn callback_ignores_unrelated_and_bad_state_requests() {
+        let result = run_callback_server("good", |port| {
+            assert!(send_request(port, "/favicon.ico").contains("404"));
+            assert!(send_request(port, "/callback?code=x&state=evil").contains("400"));
+            assert!(send_request(port, "/callback?code=real&state=good").contains("200 OK"));
+        })
+        .expect("callback should succeed");
+        assert_eq!(result.code, "real");
+    }
+
+    #[test]
+    fn callback_wait_stops_when_cancelled() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let started = std::time::Instant::now();
+        let result = wait_for_callback(&listener, "s", &|| {
+            started.elapsed() > std::time::Duration::from_millis(300)
+        });
+        assert!(matches!(result, Err(OAuthError::Cancelled)));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 }

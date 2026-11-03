@@ -204,7 +204,7 @@ pub async fn start_google_oauth_flow() -> Result<GoogleTokens, GoogleOAuthError>
     let callback = tokio::task::spawn_blocking({
         let expected_state = state.clone();
         move || {
-            oauth::wait_for_callback(&listener, &expected_state)
+            oauth::wait_for_callback(&listener, &expected_state, &|| false)
                 .map_err(|e| GoogleOAuthError::TokenExchange(e.to_string()))
         }
     })

@@ -31,16 +31,34 @@ pub async fn start_nexus_sso() -> Result<String, String> {
 /// Start OAuth login flow using the hardcoded Corkscrew client ID.
 /// Opens the user's default browser to NexusMods for authorization.
 #[tauri::command]
-pub async fn start_oauth_login() -> Result<TokenPair, String> {
-    oauth::start_oauth_flow(oauth::CLIENT_ID)
+pub async fn start_oauth_login(app: tauri::AppHandle) -> Result<TokenPair, String> {
+    oauth::start_oauth_flow(oauth::CLIENT_ID, |url| emit_oauth_url(&app, url))
         .await
         .map_err(|e| e.to_string())
 }
 
+/// Sends the sign-in URL to the UI so the user can copy it into another
+/// browser or profile if the default browser opened the wrong one.
+fn emit_oauth_url(app: &tauri::AppHandle, url: &str) {
+    use tauri::Emitter;
+    if let Err(e) = app.emit("nexus-oauth-url", url) {
+        log::warn!("Failed to emit nexus-oauth-url: {e}");
+    }
+}
+
+/// Stop a sign-in that is waiting for the browser.
+#[tauri::command]
+pub fn cancel_oauth_login() {
+    oauth::cancel_oauth_flow();
+}
+
 /// Legacy command that accepts an explicit client_id (kept for compatibility).
 #[tauri::command]
-pub async fn start_nexus_oauth(client_id: String) -> Result<TokenPair, String> {
-    oauth::start_oauth_flow(&client_id)
+pub async fn start_nexus_oauth(
+    app: tauri::AppHandle,
+    client_id: String,
+) -> Result<TokenPair, String> {
+    oauth::start_oauth_flow(&client_id, |url| emit_oauth_url(&app, url))
         .await
         .map_err(|e| e.to_string())
 }
