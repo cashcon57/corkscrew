@@ -149,6 +149,12 @@ toml = { version = "0.8", features = ["preserve_order"] }
 # Info.plist reader (macOS .app bundle metadata — XML and binary plist support).
 plist = "1"
 
+# Linux only (see lib.rs `single_instance_plugin`): each nxm:// click execs a
+# new process; this forwards its URL to the running instance. Must be the first
+# plugin registered. macOS gets single-instance + URL delivery from LaunchServices.
+[target.'cfg(target_os = "linux")'.dependencies]
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+
 # WebDriver E2E testing — debug builds only, compiled out of release
 [target.'cfg(debug_assertions)'.dependencies]
 tauri-plugin-webdriver = "0.2"

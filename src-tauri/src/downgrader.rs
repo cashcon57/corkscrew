@@ -462,18 +462,44 @@ pub fn depot_search_dirs(bottle_path: &Path) -> Vec<PathBuf> {
         dirs_found.push(dir);
     }
     if let Some(home) = dirs::home_dir() {
-        let native_candidates = [
-            home.join("Library/Application Support/Steam"), // macOS
-            home.join(".steam/steam"),                      // Linux
-            home.join(".local/share/Steam"),                // Linux
-        ];
-        for candidate in native_candidates {
-            if candidate.exists() {
+        let xdg_data_home = crate::proton::xdg_data_home_env();
+        for candidate in native_steam_candidates(&home, xdg_data_home.as_deref()) {
+            if candidate.exists() && !dirs_found.iter().any(|d| same_canonical(d, &candidate)) {
                 dirs_found.push(candidate);
             }
         }
     }
     dirs_found
+}
+
+/// Host Steam roots that `download_depot` (run in the native client) may
+/// write to: macOS, native Linux and its `~/.steam` symlinks, both Flatpak
+/// layouts, Snap, and a custom `$XDG_DATA_HOME` Steam root. Callers skip
+/// missing dirs and aliases of the same install.
+fn native_steam_candidates(home: &Path, xdg_data_home: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = [
+        "Library/Application Support/Steam", // macOS
+        ".steam/steam",
+        ".local/share/Steam",
+        ".steam/root",
+        ".var/app/com.valvesoftware.Steam/data/Steam",
+        ".var/app/com.valvesoftware.Steam/.local/share/Steam",
+        "snap/steam/common/.local/share/Steam",
+    ]
+    .iter()
+    .map(|c| home.join(c))
+    .collect();
+    candidates.extend(crate::proton::xdg_steam_root(xdg_data_home));
+    candidates
+}
+
+/// Whether two existing paths resolve to the same directory (symlink aliases
+/// such as `~/.steam/steam` → `~/.local/share/Steam`).
+fn same_canonical(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 /// Get the expected depot download path after `download_depot` completes.
@@ -1042,5 +1068,38 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let result = find_skyrim_exe(tmp.path());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn native_steam_candidates_cover_flatpak_snap_and_xdg() {
+        let home = Path::new("/home/deck");
+        let xdg = std::ffi::OsStr::new("/data/xdg");
+        let c = native_steam_candidates(home, Some(xdg));
+        for expected in [
+            "/home/deck/.steam/steam",
+            "/home/deck/.local/share/Steam",
+            "/home/deck/.steam/root",
+            "/home/deck/.var/app/com.valvesoftware.Steam/data/Steam",
+            "/home/deck/.var/app/com.valvesoftware.Steam/.local/share/Steam",
+            "/home/deck/snap/steam/common/.local/share/Steam",
+            "/data/xdg/Steam",
+        ] {
+            assert!(c.contains(&PathBuf::from(expected)), "missing {expected}");
+        }
+        // Relative XDG values are ignored per the XDG Base Directory spec.
+        let rel = native_steam_candidates(home, Some(std::ffi::OsStr::new("rel/xdg")));
+        assert!(!rel.iter().any(|p| p.ends_with("rel/xdg/Steam")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_canonical_collapses_symlink_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        fs::create_dir_all(&real).unwrap();
+        let alias = tmp.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        assert!(same_canonical(&real, &alias));
+        assert!(!same_canonical(&real, tmp.path()));
     }
 }
