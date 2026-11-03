@@ -1621,3 +1621,34 @@ mod tests {
         assert!(!same_canonical(&real, tmp.path()));
     }
 }
+
+#[cfg(test)]
+mod live_tests {
+    /// Live check on this machine's real bottles (read-only):
+    /// `cargo test --lib live_downgrade_targets -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn live_downgrade_targets() {
+        crate::plugins::skyrim_se::register();
+        for bottle in crate::bottles::detect_bottles() {
+            let games = crate::games::detect_games(&bottle);
+            eprintln!("BOTTLE {} [{}] {} -> {:?}", bottle.name, bottle.source, bottle.path.display(),
+                games.iter().map(|g| g.game_id.clone()).collect::<Vec<_>>());
+            for game in games {
+                if game.game_id != "skyrimse" {
+                    continue;
+                }
+                let path = std::path::Path::new(&game.game_path);
+                eprintln!(
+                    "{} [{}] game={} version={:?} depot_dirs={:?} backup={}",
+                    bottle.name,
+                    bottle.source,
+                    game.game_path.display(),
+                    super::detect_skyrim_version(path).map(|s| s.current_version).ok(),
+                    super::depot_search_dirs(&bottle),
+                    super::new_full_downgrade_backup(path, "skyrimse").display(),
+                );
+            }
+        }
+    }
+}
