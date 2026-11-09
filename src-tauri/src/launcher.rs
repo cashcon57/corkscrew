@@ -1255,14 +1255,11 @@ mod tests {
 
     // --- Early-exit detection ---
 
-    /// `false`/`true` live in /bin on Linux but only in /usr/bin on macOS.
-    fn system_bin(name: &str) -> &'static str {
-        match (name, Path::new("/bin/false").exists()) {
-            ("false", true) => "/bin/false",
-            ("false", false) => "/usr/bin/false",
-            (_, true) => "/bin/true",
-            _ => "/usr/bin/true",
-        }
+    /// A "wine" that exits immediately with `code`. Uses `/bin/sh` because
+    /// it's the only path guaranteed everywhere: `true`/`false` live in /bin
+    /// on FHS Linux, /usr/bin on macOS, and neither on NixOS.
+    fn exiting_wine(code: i32) -> WineCommand {
+        wine_cmd("/bin/sh", &["-c", &format!("exit {code}"), "sh"])
     }
 
     fn wine_cmd(binary: &str, prefix_args: &[&str]) -> WineCommand {
@@ -1284,7 +1281,7 @@ mod tests {
 
         let err = run_wine(
             &bottle,
-            &wine_cmd(system_bin("false"), &[]),
+            &exiting_wine(1),
             &exe,
             tmp.path(),
             &logs,
@@ -1350,7 +1347,7 @@ mod tests {
         // A clean exit inside the window is also a success.
         let ok = run_wine(
             &bottle,
-            &wine_cmd(system_bin("true"), &[]),
+            &exiting_wine(0),
             &exe,
             tmp.path(),
             &tmp.path().join("logs"),
