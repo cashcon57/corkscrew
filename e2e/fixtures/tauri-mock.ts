@@ -143,6 +143,9 @@ export async function injectTauriMock(
       case "check_skse": return { installed: false, loader_path: null, version: null, use_skse: false };
       case "get_available_disk_space": return 50000000000;
       case "get_conflicts": return [];
+      case "get_mod_update_results": return [];
+      case "check_mod_updates": return [];
+      case "route_mod_updates": return [];
       case "toggle_mod": return null;
       case "get_deployment_stats": return { total_files: 172, deployed_files: 172, missing_files: 0, orphaned_files: 0 };
 
