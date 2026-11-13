@@ -127,3 +127,21 @@ test.describe('Mods page: category placeholder (#17)', () => {
     await expect(cell).not.toContainText('\\u');
   });
 });
+
+test.describe('Mods page: malformed stored update results', () => {
+  // The backend always returns an array, but the page must not crash if the
+  // IPC layer ever hands back null (the e2e mock used to do exactly that).
+  test.use({ mockOverrides: { get_mod_update_results: null } });
+
+  test('renders the mod list without uncaught errors when update results are null', async ({ page }) => {
+    const pageErrors: string[] = [];
+    page.on('pageerror', (err) => pageErrors.push(err.message));
+
+    await gotoMods(page);
+    await expect.poll(() => countCalls(page, 'get_mod_update_results')).toBeGreaterThan(0);
+    await page.waitForTimeout(500);
+
+    expect(pageErrors.filter((m) => m.includes('modUpdates'))).toEqual([]);
+    await expect(page.locator('.toggle-switch').first()).toBeVisible();
+  });
+});
