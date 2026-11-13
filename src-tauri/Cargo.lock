@@ -1181,7 +1181,7 @@ dependencies = [
 
 [[package]]
 name = "corkscrew"
-version = "0.14.25"
+version = "0.14.26"
 dependencies = [
  "anyhow",
  "ba2",
@@ -9050,8 +9050,6 @@ dependencies = [
 [[package]]
 name = "xcap"
 version = "0.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6776c1b371ea7c73bc98a40ae5c6a69c648669ff2e6d8a03fc8b80ddc58a0498"
 dependencies = [
  "core-foundation 0.9.4",
  "core-graphics 0.23.2",

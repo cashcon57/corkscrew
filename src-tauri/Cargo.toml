@@ -1,6 +1,6 @@
 [package]
 name = "corkscrew"
-version = "0.14.25"
+version = "0.14.26"
 description = "A mod manager for CrossOver/Wine games on macOS and Linux"
 authors = ["cashconway"]
 license = "GPL-3.0-or-later"
@@ -158,6 +158,14 @@ tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 # WebDriver E2E testing — debug builds only, compiled out of release
 [target.'cfg(debug_assertions)'.dependencies]
 tauri-plugin-webdriver = "0.2"
+
+# xcap 0.0.4 (pinned exactly by tauri-plugin-mcp above) fails to compile on
+# Rust >= 1.100: two dbus `method_call`s rely on the old never-type fallback
+# (rust-lang/rust#148922). vendor/xcap is the crates.io 0.0.4 source with only
+# those two reply types annotated as `()`. Drop this when tauri-plugin-mcp is
+# bumped past upstream 995a266 (xcap 0.9).
+[patch.crates-io]
+xcap = { path = "vendor/xcap" }
 
 # ── Release profile optimizations ─────────────────────────
 # Default Cargo release: fat LTO + 16 codegen units = very slow builds.
