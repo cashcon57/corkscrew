@@ -97,7 +97,7 @@ tungstenite = { version = "0.29", default-features = false, features = ["handsha
 libc = "0.2"
 
 # LRU cache (FOMOD parsing)
-lru = "0.16"
+lru = "0.18"
 
 # Regex (instruction parser)
 regex = "1"
