@@ -288,7 +288,8 @@ jobs:
     # Pinned: ubuntu-latest moved to 26.04, whose newer WebKitGTK breaks
     # WebDriver-driven navigation (clicks succeed but pages don't change).
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # apt installs of the WebKitGTK deps have taken 20+ min on slow runners.
+    timeout-minutes: 45
     continue-on-error: true
     steps:
       - uses: actions/checkout@v6
